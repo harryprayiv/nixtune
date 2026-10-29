@@ -44,4 +44,4 @@ An ephemeral root is the intended end state and is not in this release: the Pi b
 
 ## Licence
 
-AGPL-3.0-or-later. Add the licence text as `LICENSE` before publishing.
+AGPL-3.0-or-later.
