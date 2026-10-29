@@ -1,0 +1,17 @@
+# The whole maintenance loop: `nix flake update` on the update branch, this
+# runs, merge to main. Evaluation of the example host and the page's build
+# are what break when an input moves, so that is what runs.
+name: check
+on:
+  push:
+    branches: [main, update]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix flake check --no-build
+      - run: nix build .#web --print-build-logs
+      - run: nix build .#checks.x86_64-linux.example-eval --print-build-logs

@@ -1,0 +1,6 @@
+result
+result-*
+web/output
+web/.spago
+web/index.js
+web/node_modules

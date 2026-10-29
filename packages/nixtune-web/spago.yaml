@@ -1,0 +1,35 @@
+package:
+  name: nixtune-web
+  dependencies:
+    - aff
+    - affjax
+    - affjax-web
+    - argonaut-codecs
+    - argonaut-core
+    - arrays
+    - bifunctors
+    - effect
+    - either
+    - foldable-traversable
+    - foreign
+    - halogen
+    - halogen-subscriptions
+    - integers
+    - js-timers
+    - maybe
+    - numbers
+    - prelude
+    - strings
+    - transformers
+    - tuples
+    - web-events
+    - web-html
+    - web-socket
+  bundle:
+    module: Main
+    outfile: index.js
+    platform: browser
+    type: app
+workspace:
+  packageSet:
+    registry: 60.0.0
