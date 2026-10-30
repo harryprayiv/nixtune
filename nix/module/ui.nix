@@ -25,6 +25,8 @@ let
     }
   ];
 
+  haveArt = cfg.library.export != null && cfg.ui.albumArt;
+
   capabilities = pkgs.writeTextDir "capabilities.json" (
     builtins.toJSON {
       hostname = config.networking.hostName;
@@ -43,6 +45,9 @@ let
       # cannot write this card's mixer. The page reads the level from MPD
       # either way.
       volumePath = cfg.volume.path;
+      # Where cover images are served from, or null when there is no
+      # library or album art is off.
+      artPath = if haveArt then "/art" else null;
       maxVolume = cfg.mpd.maxVolume;
       publicUrl = cfg.ui.publicUrl;
       hostPath = cfg.ui.hostPath;
@@ -107,31 +112,48 @@ in
           }
         ];
         inherit root;
-        # Every path that is not a file is the page; the page reads the
-        # path to choose its role (ui.hostPath).
-        #
-        # NO BROWSER CACHING, AND WHY. Every file here is in the Nix store,
-        # where every mtime is 1970-01-01. nginx would send that as
-        # Last-Modified with no lifetime, and a browser then applies
-        # heuristic freshness, ten percent of the file's age: about five
-        # years. A phone that loaded index.js once would not ask for it
-        # again after a deploy. So the page is served no-store, and the
-        # mtime-based validators are off because from the store they say
-        # nothing. The bundle is kilobytes on a LAN.
-        locations."/" = {
-          tryFiles = "$uri $uri/ /index.html";
-          extraConfig = ''
-            add_header Cache-Control "no-store";
-            etag off;
-            if_modified_since off;
-          '';
-        };
-        locations."/ws" = {
-          proxyPass = "http://127.0.0.1:${toString websocketPort}";
-          proxyWebsockets = true;
-          extraConfig = ''
-            proxy_read_timeout 1h;
-          '';
+        locations = {
+          # Every path that is not a file is the page; the page reads the
+          # path to choose its role (ui.hostPath).
+          #
+          # NO BROWSER CACHING, AND WHY. Every file here is in the Nix
+          # store, where every mtime is 1970-01-01. nginx would send that
+          # as Last-Modified with no lifetime, and a browser then applies
+          # heuristic freshness, ten percent of the file's age: about five
+          # years. A phone that loaded index.js once would not ask for it
+          # again after a deploy. So the page is served no-store, and the
+          # mtime-based validators are off because from the store they say
+          # nothing. The bundle is kilobytes on a LAN.
+          "/" = {
+            tryFiles = "$uri $uri/ /index.html";
+            extraConfig = ''
+              add_header Cache-Control "no-store";
+              etag off;
+              if_modified_since off;
+            '';
+          };
+
+          "/ws" = {
+            proxyPass = "http://127.0.0.1:${toString websocketPort}";
+            proxyWebsockets = true;
+            extraConfig = ''
+              proxy_read_timeout 1h;
+            '';
+          };
+        }
+        # Cover images out of the library, and nothing else out of it: the
+        # regex admits four image extensions and the alias uses its
+        # capture, so a request for an audio file never matches here. These
+        # are worth caching, unlike the page: a cover changes when the
+        # album does.
+        // lib.optionalAttrs haveArt {
+          "~* ^/art/(.+\\.(?:jpe?g|png|webp))$" = {
+            extraConfig = ''
+              alias /srv/music/$1;
+              expires 1h;
+              add_header Cache-Control "public, max-age=3600";
+            '';
+          };
         };
       };
     };

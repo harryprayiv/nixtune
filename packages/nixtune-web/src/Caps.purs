@@ -35,6 +35,9 @@ type Caps =
   -- Null when MPD's own mixer takes volume changes; a path when the
   -- helper in nix/module/volume.nix does.
   , volumePath :: Maybe String
+  -- Where cover images are served from, or null when the host serves
+  -- none. See nix/module/ui.nix.
+  , artPath :: Maybe String
   , maxVolume :: Int
   , publicUrl :: String
   , hostPath :: String

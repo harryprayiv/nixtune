@@ -6,6 +6,14 @@
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0f1115">
 <title>nixtune</title>
+<!-- The tab icon, drawn here rather than shipped as a file: an SVG data
+     URI needs no request, no cache entry and no second format. Safari on
+     iOS wants a PNG for a home-screen icon and will not take this, so a
+     bookmark there gets a screenshot until a rasterised one is built. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1115'/%3E%3Cpath d='M8 13h3.5L17 8.5v15L11.5 19H8z' fill='%237aa2f7'/%3E%3Cpath d='M20.5 12.3a5.2 5.2 0 0 1 0 7.4M23.8 9a9.4 9.4 0 0 1 0 14' fill='none' stroke='%237aa2f7' stroke-width='2.1' stroke-linecap='round'/%3E%3C/svg%3E">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="nixtune">
 <style>
 /* Dark by default, light when the system asks. Written for a phone held in
    one hand first, then widened. */
@@ -74,10 +82,31 @@ button:disabled { opacity: .45; cursor: default; }
 .empty { color: var(--muted); text-align: center; margin: 3rem auto; max-width: 24rem; }
 .note { color: var(--muted); font-size: .9rem; margin: 0; }
 
-/* Now playing. */
+/* Now playing. The text sits in .meta so the cover can sit beside the
+   whole block of it while the seek bar still runs the full width. */
 .now { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 1.25rem 1rem; display: flex; flex-direction: column; gap: .35rem; }
+.now .meta { display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
 .now .title { font-size: 1.35rem; font-weight: 600; overflow-wrap: anywhere; }
+/* The cover, when the library has one beside the files. The panel keeps
+   its shape whether or not the image loads, because the image is removed
+   from the layout rather than left as a broken box. */
+.now.withart { display: grid; grid-template-columns: auto 1fr; column-gap: 1rem; align-items: start; }
+.now.withart .art { width: 6.5rem; height: 6.5rem; object-fit: cover; border-radius: 10px; background: var(--raised); box-shadow: 0 2px 10px rgba(0, 0, 0, .4); }
+.now.withart .progress { grid-column: 1 / -1; }
+@media (min-width: 40rem) {
+  .now.withart .art { width: 9rem; height: 9rem; }
+}
 .now .line, .song .line { color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+
+/* What a file is. The colour carries the distinction the eye is looking
+   for when picking an album: filled for anything that keeps every
+   sample, outlined for anything that threw some away. The rate badge is
+   what the decoder is producing right now, not what the file claims. */
+.fmts { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .15rem; }
+.fmt { font: 600 .68rem/1.5 var(--mono); letter-spacing: .02em; border-radius: 5px; padding: .05rem .4rem; flex: none; white-space: nowrap; }
+.fmt.lossless { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 45%, transparent); }
+.fmt.lossy { color: var(--muted); border: 1px solid var(--line); }
+.fmt.rate { color: var(--muted); border: 1px solid var(--line); font-weight: 400; }
 .progress { display: flex; align-items: center; gap: .6rem; margin-top: .6rem; font: .8rem var(--mono); color: var(--muted); }
 .bar { flex: 1; height: .35rem; background: var(--raised); border-radius: 999px; overflow: hidden; }
 .fill { height: 100%; background: var(--accent); }
@@ -188,6 +217,7 @@ button:disabled { opacity: .45; cursor: default; }
 .i-x { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E"); }
 .i-up { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 14.5l6-6 6 6'/%3E%3C/svg%3E"); }
 .i-down { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9.5l6 6 6-6'/%3E%3C/svg%3E"); }
+.i-grip { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000'%3E%3Ccircle cx='9' cy='6' r='1.7'/%3E%3Ccircle cx='15' cy='6' r='1.7'/%3E%3Ccircle cx='9' cy='12' r='1.7'/%3E%3Ccircle cx='15' cy='12' r='1.7'/%3E%3Ccircle cx='9' cy='18' r='1.7'/%3E%3Ccircle cx='15' cy='18' r='1.7'/%3E%3C/svg%3E"); }
 .i-folder { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M3 6.5h6l2 2.5h10v9.5H3z'/%3E%3C/svg%3E"); }
 .i-list { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M4 7h16M4 12h16M4 17h10'/%3E%3C/svg%3E"); }
 
@@ -205,9 +235,24 @@ button:disabled { opacity: .45; cursor: default; }
    column, so reordering is a thumb's width and never near the remove
    button. A row the player has already passed is dimmed and struck
    through, and stays in the queue until the queue is cleared. */
-.reorder { flex: none; display: flex; flex-direction: column; gap: .15rem; }
-.reorder button { width: 1.9rem; height: 1.35rem; padding: 0; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: var(--muted); background: transparent; border-color: transparent; }
-.reorder button:hover:not(:disabled) { background: var(--raised); border-color: var(--line); color: var(--fg); }
+/* The handle. One control for both ways of reordering: drag it with a
+   finger or a mouse, or give it focus and press the arrow keys.
+   touch-action none is what stops a drag on a phone being read as a
+   scroll of the page underneath. */
+.grip { flex: none; width: 2rem; height: 2.6rem; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--muted); background: transparent; border-color: transparent; cursor: grab; touch-action: none; }
+.grip:hover { background: var(--raised); border-color: var(--line); color: var(--fg); }
+.list li.held .grip { cursor: grabbing; }
+
+/* While a row is held the others slide out of its way. The held row
+   itself gets no transition: it has to track the finger exactly, and a
+   transition on it would lag by exactly its own duration. */
+.list li { transition: transform 130ms cubic-bezier(.2, .7, .3, 1); }
+.list.dragging li { user-select: none; -webkit-user-select: none; }
+.list li.held { transition: none; position: relative; z-index: 3; border-color: var(--accent); box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+@media (prefers-reduced-motion: reduce) {
+  .list li { transition: none; }
+}
+
 .list li.past { opacity: .5; }
 .list li.past .title { text-decoration: line-through; }
 .list li .icon-btn { padding: .5rem; display: flex; align-items: center; justify-content: center; }

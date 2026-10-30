@@ -3,6 +3,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
@@ -74,6 +75,35 @@ in
       # alsactl stores and restores the mixer levels, so the hardware volume
       # survives a reboot.
       hardware.alsa.enablePersistence = lib.mkDefault (out.kind == "alsa");
+
+      # The playback modes MPD remembers are set back to the host's
+      # defaults at every start, for the ones the host states an opinion
+      # about. Only consume today. MPD has no config setting for it: the
+      # modes live in its state file, so the only way to express a default
+      # is to set it once MPD is listening.
+      systemd.services.nixtune-mpd-defaults = lib.mkIf (cfg.mpd.consume != null) {
+        description = "nixtune: MPD playback modes this host defaults to";
+        wantedBy = [ "mpd.service" ];
+        after = [ "mpd.service" ];
+        path = [ pkgs.mpc ];
+        serviceConfig = {
+          Type = "oneshot";
+          DynamicUser = true;
+        };
+        script = ''
+          # mpd.service is ready when systemd says so, but the socket can
+          # still refuse the first connection by a hair. Five tries over
+          # five seconds, then stop and say so in the journal rather than
+          # failing the unit and with it the boot.
+          for _ in 1 2 3 4 5; do
+            if mpc --host 127.0.0.1 --port ${toString cfg.mpd.port} consume ${if cfg.mpd.consume then "on" else "off"}; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "nixtune: could not set consume mode; MPD did not answer"
+        '';
+      };
     })
   ];
 }

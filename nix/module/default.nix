@@ -145,6 +145,22 @@ in
         default = 100;
         description = "Upper bound the page allows for the volume.";
       };
+      consume = mkOption {
+        type = types.nullOr types.bool;
+        default = null;
+        description = ''
+          Consume mode at every MPD start, or null to leave whatever was
+          last chosen.
+
+          MPD remembers consume, random, repeat and single in its state
+          file across restarts, so null means a change made on the page
+          survives a reboot. A value here overrides that remembered state
+          on every start, which is what makes it a default rather than a
+          preference: with true, a queue is a list of things waiting to be
+          played and each one leaves as it finishes, and the page's
+          Consume toggle still turns it off until the next start.
+        '';
+      };
     };
 
     radio.stations = mkOption {
@@ -177,6 +193,21 @@ in
           The address the QR code on the host page encodes: how a guest's
           phone reaches the guest page. A name the LAN's DNS resolves, or
           an address with a reservation behind it.
+        '';
+      };
+      albumArt = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Serve cover images out of the library, so the page can show the
+          art beside what is playing.
+
+          MPD's own albumart and readpicture commands answer with binary,
+          which the text-mode websocket cannot carry, so the images come
+          from nginx instead: only files ending .jpg, .jpeg, .png or .webp
+          under the library, never the audio. Nothing is extracted from
+          tags, so an album with its art embedded in the files and no
+          cover file beside them shows none.
         '';
       };
       hostPath = mkOption {
