@@ -7,132 +7,128 @@
 -- does, with none of moOde's code, none of its name, and none of its
 -- runtime configuration machinery.
 --
--- STATE OF THE WORLD, 2026-10-29. This revision exists so the work can
--- be handed off mid-stream. Facts first, design second.
+-- STATE OF THE WORLD, 2026-10-30, 03:00. The hardware works. This
+-- revision records how it got there and specifies the next thing,
+-- the page as a shared player for a room.
 --
---   Repositories (both on winsmuth, the workstation; neither pushed):
---     ~/git/nixtune             the public flake. flake.nix, .gitignore,
---                               nix/module/{default,hardware,mpd,library,
---                               ui,airplay,upnp}.nix, packages/upmpdcli.nix,
---                               packages/nixtune-web/{default.nix,spago.yaml,
---                               spago.lock,index.html,src/{Main,Mpd,Caps}.purs}.
---                               Its own flake.lock pins nixpkgs to
---                               6510408d147d8c5e6d76043e899e9251756f6a75,
---                               deliberately: see KnownIssue purescript below.
+--   Repositories (both on winsmuth; neither pushed):
+--     ~/git/nixtune             the public flake: flake.nix, nix/module/
+--                               {default,hardware,mpd,library,ui,airplay,
+--                               upnp}.nix, packages/upmpdcli.nix,
+--                               packages/nixtune-web/. Its flake.lock pins
+--                               nixpkgs to 6510408d (KnownIssue
+--                               purescript_segfault). A devShell carries
+--                               spago from purescript-overlay for editing
+--                               the lock; consumers never evaluate it.
 --     ~/neoblade-config         the fleet. Input `nixtune` =
---                               git+file:///home/bismuth/git/nixtune with
---                               nixpkgs following the fleet's. Adapter role
+--                               git+file:///home/bismuth/git/nixtune,
+--                               nixpkgs following. Adapter role
 --                               modules/system/player.nix; rows `nixtune`
---                               (aarch64, Pi) and `nixtune-vm` (x86 QEMU) in
---                               targets.nix; facts in hosts/nixtune.nix and
---                               hosts/nixtune-vm.nix. The input is read from
---                               the checkout's committed tree, so a change in
---                               ~/git/nixtune needs `git add` there and
---                               `nix flake update nixtune` in the fleet.
+--                               (aarch64, Pi) and `nixtune-vm` (x86 QEMU);
+--                               facts in hosts/nixtune.nix and
+--                               hosts/nixtune-vm.nix. deployAddr is the
+--                               NAME nixtune.lan, which the router's DNS
+--                               gives to whichever interface holds the
+--                               lease; the earlier plan of one reserved
+--                               address per MAC was abandoned because the
+--                               wired and wireless MACs differ.
 --
---   Verified:
---     - Both fleet rows evaluate; `./build check` passes with only the
---       pre-existing fleet warnings plus two first-boot warnings for
---       nixtune (no secrets/nixtune.yaml yet: initialPassword from
---       base.nix, and services.nixtune.wifi.pskFile null from the module).
---     - `./build vm nixtune-vm`: mpd, nixtune-websocket and nginx active,
---       no failed units, no journal errors, capabilities.json served,
---       the page drove MPD end to end (GBH 89.7 queued and playing into
---       the null output). Streaming works; the first station URLs I
---       wrote were wrong and were replaced by GBH's published ones.
---     - packages.aarch64-linux.sd-image-nixtune builds.
---     - nixtune-web builds from spago.lock with nixpkgs' purescript
---       0.15.15 and esbuild (eighty fixed-output fetches, zero compiler
---       warnings); the page passed a 19-check headless browser test
---       against a protocol-faithful fake MPD.
---   Not yet done:
---     - The Pi has not been flashed or booted. Nothing about the DAC,
---       the overlay, AirPlay, wifi or the NFS mount has run on hardware.
---     - secrets/nixtune.yaml does not exist (it cannot until the Pi has
---       booted once and produced its host key).
---     - upmpdcli has never been built: packages/upmpdcli.nix carries
---       lib.fakeHash for all three tarballs. UPnP is declared off.
---     - LICENSE (AGPLv3) and README in ~/git/nixtune; the flake template
---       for adopters; the scope expansion below.
+--   Verified on the Pi (Raspberry Pi 5 Model B Rev 1.1, HiFiBerry DAC2
+--   HD, Samsung 128 GB card):
+--     - Boots the generic aarch64 SD image with U-Boot chainloaded by the
+--       GPU firmware (hardware.raspberry-pi.firmware.uboot.enable, set
+--       by the module when nixos-hardware's Pi options are present).
+--     - The DAC appears as ALSA card sndrpihifiberry with mixer control
+--       DAC; MPD plays GBH 89.7 through it with hardware volume. The
+--       overlay arrives as a config.txt dtoverlay line rendered by
+--       nixos-hardware; the compatible-string rewrite for the generation
+--       DTB path is kept but unused on this boot path.
+--     - mpd, nixtune-websocket, nginx, shairport-sync active; no failed
+--       units after the ordering fix in library.nix and auto_update off.
+--     - /srv/music mounts from the Synology; the rescan timer runs two
+--       minutes after boot and daily.
+--     - Wifi: secrets/nixtune.yaml holds user-password and wifi-psk
+--       (PSK=... form), the profile PissiNet-5G is written from the sops
+--       path, and the cable has come out.
+--   Lessons that cost a night, written down so they are not paid twice:
+--     - nixpkgs' online first-boot resize of the ext4 root (sd-image's
+--       expandOnBoot) corrupted directory blocks across the nixpkgs
+--       source in the store; the image file was clean (e2fsck -fn on a
+--       loop device), the card stored the image byte for byte (sha256
+--       over the image length, modulo the few bytes a desktop automount
+--       writes), and a card grown OFFLINE on winsmuth (sfdisk, e2fsck,
+--       resize2fs) booted clean. KnownIssue sd_resize below.
+--     - MPD's auto_update installs inotify watches over the whole tree
+--       on its main thread before notifying systemd; on a vast NFS
+--       library this exceeded the start timeout. inotify never fires for
+--       NFS writes anyway. Off; a timer runs `mpc update`.
+--     - A host reads capabilities.json once at page load; a stale tab
+--       keeps a stale station list.
+--     - e2fsprogs and parted are not on winsmuth; every tool outside
+--       coreutils and util-linux is invoked through `nix shell`.
 --
 -- Design decisions that shape this spec:
 --
 --   1. The only source of configuration is the Nix declaration. No
 --      settings database, no settings page, no daemon that rewrites
---      /etc or /boot. Changing a setting means a new generation, with
---      the previous one a reboot away.
+--      /etc or /boot.
 --   2. Every optional capability is a sub-option with an enable flag
---      defaulting to false. A disabled one contributes no package, unit,
---      nginx location, firewall rule or UI element. Only MPD is
---      mandatory.
+--      defaulting to false; a disabled one contributes nothing.
 --   3. The page is a Halogen single page application that speaks the
 --      MPD protocol itself over websockets bridged by websocat. There is
---      no backend code. The capability set is a JSON file Nix writes
---      into the static site at build time.
+--      no backend code on the Pi, and decision 8 below is made under
+--      that constraint.
 --   4. No over the air updates. Updates arrive only as new generations.
---   5. The root filesystem is NOT ephemeral yet, on purpose: the fleet's
---      wipe-on-boot has not been rehearsed on the Pi boot path (firmware,
---      U-Boot, extlinux, ext4 root from the generic SD image), and
---      oracle runs the same path without it. The module publishes what
---      it needs kept (services.nixtune.persistPaths = ["/var/lib/mpd"])
---      and the fleet adapter already maps that into homelab.persist, so
---      the manifest is correct from the first boot that has impermanence.
---   6. Two layers, one boundary. The public module knows nothing about
---      any fleet: the wifi passphrase is a runtime path to an
---      environment file, the library is one "host:/export" string, the
---      packages are built with the importing host's pkgs so no overlay
---      is needed. The fleet adapter (modules/system/player.nix, ~40
---      lines of config) maps homelab.nas.host plus roles.player.musicExport
---      to library.export, the sops secret to wifi.pskFile, and
---      persistPaths to homelab.persist.system. The machine, its boot
---      block, its secrets and its row live in the fleet; only the
---      mechanism is public. Keeping the two in sync is `nix flake update
---      nixtune` on the fleet's update branch, like every other input.
---   7. Maintenance is `nix flake update` on an update branch, CI
---      (`nix flake check`: the page build and an x86 rehearsal host),
---      merge to main. Nothing else.
+--   5. The root filesystem is NOT ephemeral yet; the module publishes
+--      persistPaths and the fleet adapter maps it into the manifest.
+--   6. Two layers, one boundary: the public module knows no fleet; the
+--      adapter maps fleet facts into its options.
+--   7. Maintenance is `nix flake update` on an update branch, CI, merge.
 --
--- Decisions taken 2026-10-26: AirPlay and UPnP as the first renderers;
--- wifi on the home 5 GHz SSID with the PSK as a sops secret; NFS
--- export /volume2/music from the Synology, nofail and automount; SD
--- card boot on oracle's path; a library browser in the first page; the
--- hardware profile from the DAC2 HD datasheet; DSP out of scope.
+-- Decisions taken 2026-10-30 (the page as a room's player, from a
+-- questionnaire):
+--   8. ROLES WITHOUT A BACKEND. Two pages from one bundle: the guest
+--      page at / and the host page at /host. The QR code on the host
+--      page encodes the guest URL. There is no token and no rotation:
+--      a rotating token needs something on the Pi that issues and
+--      checks it, and the decision was to keep the Pi free of
+--      application servers rather than add one for this. The host URL
+--      is a path known to the host; it is not a secret in any strong
+--      sense. THE CONSEQUENCE, stated plainly: role limits are enforced
+--      by the page, not by the Pi. Both pages reach the same websocket,
+--      and a guest who opens a browser console can send any MPD command.
+--      This is accepted for a LAN of invited people. A filtering proxy
+--      between websocat and MPD is the upgrade path if that stops being
+--      acceptable; it is an open question, not a plan.
+--   9. GUESTS APPEND ONLY. A guest sees now playing (read-only) and the
+--      library (browse first; search secondary), and may add a track or
+--      a folder to the END of the queue. Guests do not see the queue, do
+--      not remove or reorder, do not skip, do not touch transport or
+--      volume. The host page has everything the page has today plus the
+--      QR, the attribution column and the scan indicator.
+--  10. GUEST IDENTITY IS A NICKNAME PER DEVICE, generated by the page on
+--      first visit (adjective plus animal, from word lists in the
+--      bundle), kept in that browser's localStorage, never prompted for.
+--      Attribution lives in MPD stickers: on append the page sets
+--      sticker song <uri> nixtune.added_by <nickname>; the host's queue
+--      view reads it back. Stickers are per URI, not per queue entry,
+--      so the same file added twice shows the latest adder; accepted.
+--  11. LIBRARY = Music/ ONLY. library.export points at
+--      /volume2/music/Music; audiobooks, ringtones and the rename
+--      queues are outside MPD's world. The first scan runs for days in
+--      the background on the Pi; the page shows a quiet indicator (song
+--      count and "scanning") in the header until updating_db clears,
+--      and everything already scanned is browsable meanwhile.
+--  12. NO COVER ART in this release; text only.
+--  13. THE QR IS BUILT BY NIX: qrencode renders the guest URL
+--      (services.nixtune.ui.publicUrl, default http://<hostname>.lan/)
+--      to qr.svg in the closure, served beside the page. No QR library
+--      in the bundle, nothing generated at runtime.
 --
--- Decisions taken 2026-10-28 (scope for the public project, from a
--- questionnaire against moOde's feature list; everything was answered
--- yes, so the order below is the plan, and the three collisions are
--- recorded so nobody re-derives them):
---   Step 1  the Pi plays music over wifi from the NAS with AirPlay, as
---           built. Nothing else until this is true on hardware.
---   Step 2  the public release: flake template, HiFiBerry family and
---           generic USB DAC profiles; page gains tag browsing, cover
---           art, saved playlists, favorites (MPD stickers), three
---           read-only views (audio info, system status, service
---           health), a shipped curated station list plus runtime
---           station add kept in MPD playlists; ListenBrainz scrobbling.
---   Step 3  a real output arbiter, then renderers one at a time:
---           Spotify Connect, Squeezelite, Bluetooth sink, Roon Bridge
---           (unfree); MPD httpd output; several declared SSIDs; a
---           fallback access point.
---   Step 4  multiroom via snapcast, HDMI/touch kiosk, GPIO and rotary,
---           IR remote, USB and SMB sources, release images.
---   Collision A: "anyone who can flash a card" against "no runtime
---           configuration". A prebuilt image cannot know a stranger's
---           SSID or NAS. Resolution: the flake template is the public
---           entry point; images come in step 4 with a boot-partition
---           file for wifi and NAS only, documented as the one escape
---           hatch.
---   Collision B: five renderers against hook-script arbitration. The
---           before/after hooks work for one renderer against MPD; with
---           more they become pairwise agreements. An arbiter owning the
---           card is built before the second renderer.
---   Collision C: kiosk (a browser plus compositor on the Pi) and
---           Bluetooth sink (bluez plus bluealsa beside an ALSA-only
---           card) against "lightweight". Both are step 4, both off by
---           default, both the first to cut.
---
--- Deliberately outside this spec: the MPD protocol, the kernel's
--- device tree handling, nginx, and the renderer daemons' behaviour.
+-- Earlier decisions still in force: AirPlay on, UPnP off until upmpdcli
+-- builds, DSP out of scope, SD card on oracle's boot path, hardware
+-- profile from the datasheet, the staged scope of 2026-10-28 (public
+-- release, then arbiter and renderers, then the long tail).
 
 ------------------------------------------------------------
 -- Given
@@ -150,9 +146,6 @@ given {
 -- External Entities
 ------------------------------------------------------------
 
--- neoblade-config: rows, roles, ./build, sops, attic. Governed by its
--- own spec (neoblade-config.allium). Here it is the consumer that
--- imports nixosModules.default and owns the machine.
 external entity FleetConfig {
     repo_path: String
     input_url: String
@@ -160,15 +153,14 @@ external entity FleetConfig {
     build_command: String
 }
 
--- A client on the network. Identity is by address only.
+-- A browser on the LAN. Identity is a nickname the page made up and
+-- stored in that browser; nothing on the Pi knows who anyone is.
 external entity Client {
     address: String
     on_lan: Boolean
-    role: listener | operator | adopter
+    nickname: String?
 }
 
--- The Synology. Its NFS export allowlist decides whether the player's
--- address may mount; a missing entry presents as a timeout.
 external entity Nas {
     address: String
     export: String
@@ -204,6 +196,8 @@ value Capabilities {
     stations: List<RadioStation>
     websocket_path: String
     max_volume: Integer
+    public_url: String
+    host_path: String
 }
 
 ------------------------------------------------------------
@@ -214,49 +208,45 @@ contract PlayerModule {
     evaluate: (declaration: HostDeclaration) -> SystemClosure
 
     @invariant Purity
-        -- Evaluation reads only the Nix declaration and pinned flake
-        -- inputs. No network, no clock, no state from a previous
-        -- generation. The page's dependencies are fixed-output fetches
-        -- checked against spago.lock's integrity hashes, so evaluation
-        -- never fetches; building does, once, with the network off
-        -- afterwards.
+        -- Evaluation reads only the Nix declaration and pinned inputs.
+        -- The page's dependencies are fixed-output fetches checked
+        -- against spago.lock; nothing fetches during evaluation.
 
     @invariant Determinism
-        -- The same declaration and the same flake.lock produce the
-        -- same closure on every machine.
+        -- Same declaration, same lock, same closure.
 
     @invariant LazyModules
-        -- A disabled sub-option contributes no package, no systemd
-        -- unit, no nginx location, no firewall rule and no UI
-        -- capability to the closure.
+        -- A disabled sub-option contributes nothing to the closure.
 
     @invariant NoRuntimeConfiguration
-        -- Nothing in the closure writes to /etc, /boot or the Nix
-        -- store at runtime.
+        -- Nothing in the closure writes to /etc, /boot or the store at
+        -- runtime. The nickname and the host path are browser-side.
 
     @invariant FleetAgnostic
-        -- The module references no option outside the NixOS option
-        -- tree it ships with nixpkgs and its own services.nixtune.*.
-        -- homelab.* appears only in the fleet adapter.
+        -- The module references only nixpkgs' option tree, its own
+        -- services.nixtune.*, and, when present, nixos-hardware's
+        -- hardware.raspberry-pi.* (guarded by `options.hardware ?
+        -- raspberry-pi`, with optionalAttrs rather than mkIf so a host
+        -- without those options never sees the attribute path).
 
     @guidance
-        -- Options, as implemented:
+        -- Options, as implemented plus the two this revision adds:
         --   enable
         --   hardware.profile            "pi5-dac2hd" | "none"
         --   library.export              "host:/path" or null
-        --   wifi.ssid, wifi.pskFile     pskFile is a runtime path to an
-        --                               env file holding PSK=<passphrase>
-        --   mpd.port (6600), mpd.exposeOnLan (false), mpd.maxVolume (100)
-        --   radio.stations              [{name, url}]
-        --   ui.enable (true), ui.package, ui.port (80)
-        --   arbitration.resumeAfterRenderer (true)
+        --   wifi.ssid, wifi.pskFile
+        --   mpd.port, mpd.exposeOnLan, mpd.maxVolume
+        --   radio.stations
+        --   ui.enable, ui.package, ui.port
+        --   ui.publicUrl                NEW: what the QR encodes; default
+        --                               "http://<hostname>.lan/"
+        --   ui.hostPath                 NEW: default "/host"
+        --   arbitration.resumeAfterRenderer
         --   renderers.airplay.{enable,name}
         --   renderers.upnp.{enable,friendlyName,package}
-        --   persistPaths                read-only, ["/var/lib/mpd"]
-        --   output.{kind,card,device,mixer}   internal, from the profile
-        -- Assertions: airplay needs output.kind = alsa; an ssid needs
-        -- networking.networkmanager.enable (set by mkDefault when an
-        -- ssid is declared). Warning: ssid set with pskFile null.
+        --   persistPaths (read-only), output.* (internal)
+        -- On a Pi: firmware.uboot.enable = true and the DAC overlay as a
+        -- config.txt line (hardware.nix).
 }
 
 contract MpdBridge {
@@ -265,24 +255,20 @@ contract MpdBridge {
     capabilities: () -> Capabilities
 
     @invariant ReadOnlySystem
-        -- The bridge speaks only the MPD protocol and serves the
-        -- capability file baked into the closure. It cannot enable,
-        -- disable or reconfigure any module.
+        -- Only the MPD protocol passes; the capability file is static.
 
     @invariant LanOnly
-        -- nginx on 0.0.0.0:<ui.port>; websocat and MPD on loopback
-        -- only (MPD on the LAN only with mpd.exposeOnLan). No
-        -- authentication because there is no public exposure.
+        -- nginx on 0.0.0.0:<ui.port>; websocat and MPD on loopback.
+
+    @invariant NoRoleEnforcement
+        -- The bridge does not know which page a socket came from. Role
+        -- limits are the page's (decision 8).
 
     @guidance
-        -- websocat -t -E ws-l:127.0.0.1:8600 tcp:127.0.0.1:<mpd.port>
-        -- as nixtune-websocket.service (DynamicUser, hardened), nginx
-        -- location /ws proxying it with proxy_read_timeout 1h, static
-        -- root = symlinkJoin of the page package and capabilities.json.
-        -- The page opens TWO websockets: one for commands, whose
-        -- replies are read against a queue of what was asked, and one
-        -- parked in `idle player mixer playlist options database`.
-        -- Nothing is polled.
+        -- websocat -t -E ws-l:127.0.0.1:8600 tcp:127.0.0.1:<mpd.port> as
+        -- nixtune-websocket.service; nginx /ws proxies it; the page
+        -- holds one command socket with a reply queue and one idle
+        -- socket. Both pages use the same two sockets.
 }
 
 ------------------------------------------------------------
@@ -299,19 +285,15 @@ enum ModuleKind {
     | web_ui
 }
 
+enum Role { host | guest }
+
 enum NetworkKind { wired | wifi }
 
 enum PlaybackState { playing | paused | stopped }
 
-enum SourceKind { nfs | cifs | local | usb }
+enum ScanState { never_scanned | scanning | scanned }
 
-enum PersistKind {
-    mpd_state_dir
-    | host_keys
-    | sops_age_key
-}
-
-enum ReleaseStep { pi_plays | public_release | arbiter_and_renderers | long_tail }
+enum ReleaseStep { pi_plays | room_page | public_release | arbiter_and_renderers | long_tail }
 
 ------------------------------------------------------------
 -- Entities and Variants
@@ -327,8 +309,6 @@ entity HardwareProfile {
     needs_pi_kernel: Boolean
 }
 
--- One player host, as declared. Fleet members declare the fleet; an
--- adopter's host has fleet = null.
 entity HostDeclaration {
     hostname: String
     hardware: HardwareProfile
@@ -336,6 +316,8 @@ entity HostDeclaration {
     ssid: String?
     psk_file: String?
     library_export: String?
+    public_url: String
+    host_path: String
     fleet: FleetConfig?
 
     modules: ModuleDeclaration with host = this
@@ -343,7 +325,6 @@ entity HostDeclaration {
     renderers: modules where kind in {airplay, upnp_renderer, spotify_connect, squeezelite, bluetooth}
     enabled_renderers: renderers where enabled = true
 
-    music_sources: MusicSource with host = this
     radio_stations: RadioStation with host = this
     persisted_paths: PersistedPath with host = this
     generations: Generation with host = this
@@ -353,7 +334,6 @@ entity HostDeclaration {
     capabilities: enabled_modules -> kind
     has_core: modules.any(m => m.kind = mpd and m.enabled)
     has_ui: modules.any(m => m.kind = web_ui and m.enabled)
-    wifi_declared: ssid != null
     wifi_configured: ssid != null and psk_file != null
 
     invariant CoreIsMandatory {
@@ -368,21 +348,17 @@ entity HostDeclaration {
         enabled_renderers.any(r => r.kind = airplay) implies hardware.card != null
     }
 
-    invariant PiProfileNeedsPiKernel {
-        hardware.needs_pi_kernel implies hardware.dac_overlay != null
+    invariant HostPathIsNotRoot {
+        host_path != "/"
     }
 
     @guidance
-        -- The fleet member: hostname nixtune, 192.168.8.222 reserved
-        -- at the router, pi5-dac2hd, ssid PissiNet-5G, library export
-        -- 192.168.8.110:/volume2/music, AirPlay on as "nixtune", UPnP
-        -- off, stations GBH 89.7 (https://wgbh-live.streamguys1.com/wgbh)
-        -- and CRB Classical 99.5 (.../classical-hi/), both from GBH's
-        -- own help page. WBUR publishes no stream URL; the StreamGuys
-        -- host is wbur-sc.streamguys1.com and the path is unverified.
-        -- The rehearsal: hostname nixtune-vm, profile none, no
-        -- library, no renderers, GBH only, page forwarded to
-        -- localhost:8080, ssh on 2222.
+        -- The fleet member: hostname nixtune, deployAddr nixtune.lan,
+        -- pi5-dac2hd, ssid PissiNet-5G, library export
+        -- 192.168.8.110:/volume2/music/Music (roles.player.musicExport =
+        -- "/volume2/music/Music" in hosts/nixtune.nix), AirPlay on as
+        -- "nixtune", UPnP off, stations GBH 89.7 and CRB Classical 99.5,
+        -- public_url http://nixtune.lan/, host_path /host.
 }
 
 entity ModuleDeclaration {
@@ -397,20 +373,20 @@ entity ModuleDeclaration {
     }
 }
 
--- The fleet's sops file for the host. It cannot exist before the host
--- has booted once, because sops encrypts to the host's ssh key.
 entity SecretsFile {
     host: HostDeclaration
     path: String
     has_user_password: Boolean
     has_wifi_psk: Boolean
 
-    invariant WifiPskIsEnvFile {
-        -- The wifi-psk entry holds `PSK=<passphrase>`, not a bare
-        -- passphrase: NetworkManager's ensureProfiles substitutes
-        -- $PSK from an environment file.
-        has_wifi_psk implies true
-    }
+    @guidance
+        -- Created without an editor session: the hash from mkpasswd and
+        -- the passphrase are staged in $XDG_RUNTIME_DIR (RAM), their
+        -- lengths checked (a yescrypt hash is 73 characters; sops
+        -- rejects a YAML null for a key it must install), encrypted with
+        -- `sops --encrypt --filename-override secrets/<host>.yaml`, and
+        -- the staging file removed. Verification prints lengths and
+        -- prefixes, never values.
 }
 
 entity OutputDevice {
@@ -431,50 +407,44 @@ entity OutputDevice {
 entity Player {
     host: HostDeclaration
     state: PlaybackState
-    current: Track?
-    queue: List<Track>
-    library_ready: Boolean
+    current: QueueEntry?
+    queue: List<QueueEntry>
+    scan: ScanState
+    song_count: Integer
     last_error: String?
     sessions: Session with player = this
     open_sessions: sessions where status = open
 }
 
+-- A track in the queue with who put it there. The attribution is an
+-- MPD sticker on the track's URI (nixtune.added_by); null for tracks
+-- the host queued or that predate the sticker.
+entity QueueEntry {
+    position: Integer
+    track: Track
+    added_by: String?
+}
+
 value PlayerStatus {
     state: PlaybackState
-    current: Track?
+    current: QueueEntry?
     volume: Integer?
     queue_length: Integer
-    library_ready: Boolean
+    scan: ScanState
+    song_count: Integer
     capabilities: Set<ModuleKind>
 }
 
 entity Session {
     player: Player
     client: Client
+    role: Role
     status: open | closed
     opened_at: Timestamp
-}
 
-entity MusicSource {
-    host: HostDeclaration
-    kind: SourceKind
-    remote: String
-    mount_point: String
-    mounted: Boolean
-    last_mount_attempt_at: Timestamp
-
-    invariant FirstReleaseIsNfs {
-        kind = nfs
+    invariant GuestsAreNamed {
+        role = guest implies client.nickname != null
     }
-
-    @guidance
-        -- fileSystems."/srv/music": nfs, ro nofail noatime noauto
-        -- x-systemd.automount idle-timeout 600 mount-timeout 30s soft
-        -- timeo=150 retrans=3. mpd.service after/wants
-        -- srv-music.automount. music_directory is /srv/music and not
-        -- under /var/lib/mpd, because the mpd module turns a music
-        -- directory under its StateDirectory into a chown target that
-        -- fails on a root-squashed export.
 }
 
 entity RadioStation {
@@ -487,7 +457,6 @@ entity RadioStation {
 entity PersistedPath {
     host: HostDeclaration
     path: String
-    kind: PersistKind
 }
 
 entity Generation {
@@ -536,8 +505,6 @@ entity UpdateRun {
     }
 }
 
--- Things known to be wrong or unfinished, with the state they leave
--- the system in. Each one is closed by a commit, not by forgetting.
 entity KnownIssue {
     repo: ProjectRepository
     name: String
@@ -555,10 +522,10 @@ config {
     ui_port: Integer = 80
     websocket_port: Integer = 8600
     max_volume: Integer = 100
-    nfs_mount_timeout: Duration = 30.seconds
-    nfs_idle_timeout: Duration = 600.seconds
+    rescan_after_boot: Duration = 2.minutes
+    rescan_every: Duration = 1.day
     resume_mpd_after_renderer: Boolean = true
-    current_step: ReleaseStep = pi_plays
+    current_step: ReleaseStep = room_page
 }
 
 ------------------------------------------------------------
@@ -599,135 +566,55 @@ default ProjectRepository nixtune = {
     nixpkgs_pin: "6510408d147d8c5e6d76043e899e9251756f6a75"
 }
 
+default KnownIssue sd_resize = {
+    repo: nixtune,
+    name: "sd-image's online first-boot resize corrupts the root filesystem",
+    status: open,
+    effect: "a card that boots straight from the image as built loses directory blocks in the store; the workaround is the offline grow on winsmuth before first boot",
+    closes_when: "sdImage.expandOnBoot = false in the nixtune row's extraModules (and oracle's), the offline grow written into the first-boot header of hosts/nixtune.nix, and the cause reported upstream with the e2fsck transcript"
+}
+
 default KnownIssue upmpdcli_unbuilt = {
     repo: nixtune,
     name: "upmpdcli hashes are lib.fakeHash",
     status: open,
-    effect: "renderers.upnp cannot be enabled; the fleet host declares it off",
-    closes_when: "nix build ~/git/nixtune#upmpdcli has been through all three hash errors (libnpupnp 6.2.1, libupnpp 1.0.2, upmpdcli 1.9.4; versions unverified, lesbonscomptes.com was unreachable from the sandbox)"
+    effect: "renderers.upnp cannot be enabled",
+    closes_when: "nix build ~/git/nixtune#upmpdcli has been through all three hash errors; versions unverified"
 }
 
 default KnownIssue purescript_segfault = {
     repo: nixtune,
-    name: "nixpkgs' prebuilt purs 0.15.15 segfaults in installPhase on nixos-unstable newer than the pin",
+    name: "nixpkgs' prebuilt purs 0.15.15 segfaults on nixos-unstable newer than the pin",
     status: open,
-    effect: "the public repo's flake.lock is pinned to the fleet's nixpkgs revision; a plain nix flake update there reintroduces the crash until nixpkgs fixes it",
-    closes_when: "a nixpkgs revision past the pin builds purescript, or the page build switches to a purs built from source"
+    effect: "the public repo's lock stays on the fleet's nixpkgs revision",
+    closes_when: "a newer nixpkgs builds purescript, or the page build switches to a purs built from source"
 }
 
 default KnownIssue no_impermanence = {
     repo: nixtune,
     name: "ext4 root without wipe-on-boot",
     status: open,
-    effect: "the fleet emits its ext4-root warning for nixtune as it does for oracle; persistPaths is mapped but inert",
+    effect: "the fleet's ext4-root warning; persistPaths mapped but inert",
     closes_when: "the rollback cycle has been rehearsed on a Pi and both Pi rows adopt it together"
 }
 
-default KnownIssue fleet_warnings = {
+default KnownIssue oracle_uboot = {
     repo: nixtune,
-    name: "warnings at ./build check that are not nixtune's",
+    name: "oracle's image would not boot if rebuilt",
     status: open,
-    effect: "/var/log bind-mount notes, scratch and winsmuth-vm secrets files, boot.zfs.forceImportRoot twice, oracle's catalogue entries, homebeacon test warnings; all pre-existing in the fleet",
-    closes_when: "each is fixed in its own fleet commit; none blocks the player"
+    effect: "hosts/oracle.nix does not set hardware.raspberry-pi.firmware.uboot.enable; its running install is unaffected",
+    closes_when: "the option is added to hosts/oracle.nix in its own fleet commit"
 }
 
 ------------------------------------------------------------
 -- Rules
 ------------------------------------------------------------
 
--- Bring-up, in order ------------------------------------------------
-
-rule OperatorBuildsImage {
-    when: OperatorBuildsImage(operator)
-    requires: host.fleet != null
-    ensures:
-        Generation.created(
-            host: host,
-            closure: { store_path: "", flake_revision: fleet_repo.input_url },
-            status: built,
-            built_at: now
-        )
-
-    @guidance
-        -- winsmuth, in ~/neoblade-config:
-        --   nix build .#packages.aarch64-linux.sd-image-nixtune
-        -- The full attribute path: the image lives under the Pi's
-        -- system, not the workstation's. Then, with the card in a
-        -- reader and lsblk showing which device it is:
-        --   sudo dd if=result/sd-image/*.img of=/dev/sdX bs=4M status=progress conv=fsync
-        -- Done once already on 2026-10-29: the image builds.
-}
-
-rule FirstBootIsWired {
-    when: HostBoots(generation)
-    requires: generation.status = built
-    requires: host.secrets = null
-    ensures:
-        generation.status = booted
-        host.network = wired
-        WarnedFirstBoot(host: host)
-
-    @guidance
-        -- ETHERNET CABLE IN. No secrets file exists, so: the account
-        -- password is base.nix's initialPassword ("neoblade"), the
-        -- module writes no wifi profile, and the machine answers on
-        -- DHCP over the cable. The router reservation puts it at
-        -- 192.168.8.222.
-}
-
-rule OperatorCreatesSecrets {
-    when: OperatorCreatesSecrets(operator)
-    requires: host.booted_generation.count = 1
-    requires: host.secrets = null
-    ensures:
-        SecretsFile.created(host: host, path: "secrets/nixtune.yaml", has_user_password: true, has_wifi_psk: true)
-        host.psk_file = "/run/secrets/wifi-psk"
-
-    @guidance
-        -- winsmuth:
-        --   ssh bismuth@192.168.8.222 cat /etc/ssh/ssh_host_ed25519_key.pub \
-        --     | nix shell nixpkgs#ssh-to-age --command ssh-to-age
-        --   add the age key to .sops.yaml as nixtune_host with a
-        --     creation rule for secrets/nixtune.yaml listing
-        --     bismuth_winsmuth, bismuth_blade, nixtune_host
-        --   env EDITOR=nano sops secrets/nixtune.yaml
-        --     user-password: <mkpasswd -m yescrypt>
-        --     wifi-psk: PSK=<passphrase>
-        --   git add .sops.yaml secrets/nixtune.yaml
-        --   ./build check            both nixtune warnings are gone
-        -- The adapter sees the file exist and sets wifi.pskFile to the
-        -- sops path; the module then writes the PissiNet-5G profile.
-}
-
-rule OperatorDeploysOverCable {
-    when: OperatorDeploys(operator, revision)
-    requires: host.secrets != null
-    requires: host.network = wired
-    ensures:
-        Generation.created(host: host, closure: { store_path: "", flake_revision: revision }, status: built, built_at: now)
-        WifiProfileWritten(host: host)
-
-    @guidance
-        -- winsmuth:
-        --   ./build deploy-native nixtune      builds on the Pi, activates with test
-        --   ssh bismuth@192.168.8.222 nmcli connection show --active
-        --     must list PissiNet-5G beside the wired connection
-        --   ./build boot-native nixtune
-        -- Then unplug the cable, reboot, confirm 192.168.8.222 answers
-        -- over wifi. The same cable-first order applies to every
-        -- future PSK rotation (rotateManual in the adapter says so).
-}
-
-rule HostSwitchesToWifi {
-    when: WifiProfileWritten(host)
-    requires: host.wifi_configured
-    ensures: host.network = wifi
-}
+-- Boot and generations -----------------------------------------------
 
 rule HostBootsGeneration {
     when: HostBoots(generation)
     requires: generation.status = built
-    requires: host.secrets != null
     let current = host.booted_generation
     ensures:
         for g in current:
@@ -744,40 +631,7 @@ rule OperatorRollsBack {
         for g in current:
             g.status = previous
         generation.status = booted
-
-    @guidance
-        -- The extlinux menu (configurationLimit 10) or
-        -- `nixos-rebuild switch --rollback` on the Pi.
 }
-
--- Hardware verification on the Pi --------------------------------------
-
-rule OperatorVerifiesHardware {
-    when: OperatorVerifies(operator)
-    requires: host.booted_generation.count = 1
-    ensures: HardwareVerified(host: host)
-
-    @guidance
-        -- On the Pi (ssh bismuth@192.168.8.222), each line with its
-        -- expected answer:
-        --   aplay -l                       a card named sndrpihifiberry
-        --   amixer -c sndrpihifiberry scontrols       includes 'DAC'
-        --   systemctl is-active mpd nixtune-websocket nginx shairport-sync
-        --                                  four times active
-        --   systemctl --failed             0 loaded units
-        --   sudo -u mpd ls /srv/music      the library listing
-        --   mpc status                     volume: n% and no ERROR line
-        --   curl -s http://127.0.0.1/capabilities.json
-        --                                  modules ["mpd","airplay"], library true
-        -- From a phone: http://192.168.8.222/ plays GBH; AirPlay target
-        -- "nixtune" appears and, while it plays, `mpc status` on the
-        -- Pi shows [paused] if MPD was playing (the arbitration hook).
-        -- If aplay shows no card, the overlay did not apply: check
-        -- `cat /proc/device-tree/compatible` and the build log of
-        -- hifiberry-dacplushd-bcm2712.dtbo.
-}
-
--- Core and modules ------------------------------------------------------
 
 rule CoreStartsOnBoot {
     when: CoreStarted(host)
@@ -792,49 +646,204 @@ rule CoreStartsOnBoot {
             m.state = active
 
     @guidance
-        -- MPD: audio_output alsa on hw:CARD=sndrpihifiberry,DEV=0,
-        -- mixer_type hardware on control DAC, no auto resample /
-        -- channels / format, close_on_pause yes, replaygain off,
-        -- restore_paused, auto_update. On profile none: the null
-        -- output with a software mixer. alsactl persistence keeps the
-        -- hardware level across reboots. The hifiberry overlay is the
-        -- kernel's own dtbo with its compatible string rewritten to
-        -- brcm,bcm2712, because nixpkgs applies an overlay only when
-        -- it shares a compatible string with the DTB and the Pi 5 is
-        -- not brcm,bcm2835.
+        -- MPD starts after network-online and the library automount,
+        -- with auto_update off, so it reports ready to systemd at once
+        -- regardless of library size.
 }
 
--- Music sources and library -------------------------------------------
+-- Library scanning ------------------------------------------------------
 
-rule SourceMounts {
-    when: SourceMountSucceeds(source)
-    requires: source.mounted = false
+rule RescanTimerFires {
+    when: RescanDue(host)
+    requires: host.library_export != null
+    requires: player.scan != scanning
     ensures:
-        source.mounted = true
-        LibraryRescanRequested(host: host)
-}
-
-rule SourceMountFails {
-    when: SourceMountFails(source)
-    requires: source.mounted = false
-    ensures: source.last_mount_attempt_at = now
+        player.scan = scanning
+        PlayerStatusChanged(player: player)
 
     @guidance
-        -- With nofail and automount the failure is per access, not
-        -- per boot: MPD starts, the library is empty, the next access
-        -- retries. A NAS allowlist that omits 192.168.8.222 presents
-        -- exactly like this.
+        -- nixtune-library-update.timer: OnBootSec 2min, OnUnitActiveSec
+        -- 1d, running `mpc update` as a oneshot. MPD walks the tree in
+        -- its update thread; the main loop keeps serving. On an
+        -- unchanged tree the walk compares mtimes only.
 }
 
-rule LibraryRescans {
-    when: LibraryRescanRequested(host)
-    requires: host.music_sources.any(s => s.mounted)
+rule ScanProgresses {
+    when: MpdDatabaseGrew(player, count)
+    requires: player.scan = scanning
     ensures:
-        player.library_ready = true
+        player.song_count = count
         PlayerStatusChanged(player: player)
+
+    @guidance
+        -- The idle socket reports "database" changes as MPD commits
+        -- batches; the page re-asks `stats` and shows the count. On the
+        -- first scan of Music/ this continues for days; every batch is
+        -- browsable as soon as it is committed.
 }
 
--- Output arbitration (first release: one renderer) ----------------------
+rule ScanCompletes {
+    when: MpdUpdateFinished(player)
+    requires: player.scan = scanning
+    ensures:
+        player.scan = scanned
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- `status` loses its updating_db line. MPD writes the database
+        -- file to /var/lib/mpd at the end of the job and on shutdown, so
+        -- a reboot mid-scan keeps what was committed and the next timer
+        -- run resumes from mtimes.
+}
+
+-- Sessions and roles ----------------------------------------------------
+
+rule GuestOpensSession {
+    when: ClientOpens(client, path)
+    requires: client.on_lan
+    requires: host.has_ui
+    requires: path != host.host_path
+    ensures:
+        if client.nickname = null:
+            client.nickname = GeneratedNickname()
+        Session.created(player: player, client: client, role: guest, status: open, opened_at: now)
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- The guest page is the default page, so the QR encodes
+        -- public_url with no path. The nickname is adjective + animal
+        -- from two short word lists in the bundle, drawn once and kept
+        -- in localStorage; a cleared browser gets a new name.
+}
+
+rule HostOpensSession {
+    when: ClientOpens(client, path)
+    requires: client.on_lan
+    requires: host.has_ui
+    requires: path = host.host_path
+    ensures:
+        Session.created(player: player, client: client, role: host, status: open, opened_at: now)
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- nginx serves the same index.html for / and for host_path
+        -- (tryFiles falls through to it); the page reads
+        -- window.location.pathname against capabilities.hostPath to
+        -- choose the role. No credential. Decision 8 says why.
+}
+
+rule SessionCloses {
+    when: ClientDisconnects(session)
+    requires: session.status = open
+    ensures: session.status = closed
+}
+
+-- What a guest may do -----------------------------------------------------
+
+rule GuestBrowses {
+    when: ClientBrowses(session, path)
+    requires: session.status = open
+    ensures: LibraryListingDelivered(session: session, path: path)
+
+    @guidance
+        -- lsinfo over the command socket, both roles. Browse first: the
+        -- tree is the main view, a search box (MPD `search any`) sits
+        -- above it on the same view.
+}
+
+rule GuestAppends {
+    when: ClientAppends(session, uri)
+    requires: session.status = open
+    requires: session.role = guest
+    ensures:
+        MpdProtocol.apply(player, "add " + uri)
+        MpdProtocol.apply(player, "sticker set song " + uri + " nixtune.added_by " + session.client.nickname)
+        player.queue = player.queue + [ { position: player.queue.count, track: Track{uri: uri}, added_by: session.client.nickname } ]
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- `add` appends by definition; the guest page offers no other
+        -- queue command. A folder URI appends its contents in MPD's
+        -- order, with one sticker per file. If nothing is playing the
+        -- guest page also sends `play`, so a room with a silent player
+        -- and a first guest gets music; that is the one transport
+        -- command a guest can cause, and only from the stopped state.
+}
+
+rule GuestCommandNotOffered {
+    when: ClientCommands(session, command)
+    requires: session.status = open
+    requires: session.role = guest
+    requires: command not in {"add", "lsinfo", "search", "status", "currentsong", "stats", "sticker get", "idle"}
+    ensures: CommandNotOffered(session: session, command: command)
+
+    @guidance
+        -- "Not offered" is exact: the guest page renders no control that
+        -- sends these. The websocket would carry them. See decision 8.
+}
+
+-- What the host may do --------------------------------------------------
+
+rule HostCommands {
+    when: ClientCommands(session, command)
+    requires: session.status = open
+    requires: session.role = host
+    ensures:
+        MpdProtocol.apply(player, command)
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- Everything the page does today: transport, random, repeat,
+        -- setvol clamped to maxVolume, clear/add/play for stations and
+        -- paths, play <pos>, delete <pos>, load <playlist>, plus
+        -- `update` to force a rescan now.
+}
+
+rule HostSeesAttribution {
+    when: PlayerStatusChanged(player)
+    for s in player.open_sessions where role = host:
+        ensures: QueueDelivered(session: s, queue: player.queue)
+
+    @guidance
+        -- The host queue view shows the nickname beside each entry,
+        -- from `sticker get song <uri> nixtune.added_by` per entry,
+        -- fetched when the playlist changes and cached per URI in the
+        -- page. Now playing shows "added by <nickname>" on both pages.
+}
+
+rule HostShowsQr {
+    when: HostOpensQr(session)
+    requires: session.role = host
+    ensures: QrDelivered(session: session, url: host.public_url)
+
+    @guidance
+        -- A QR tab on the host page shows /qr.svg full width with the
+        -- URL printed under it. qrencode -t SVG at build time in ui.nix,
+        -- joined into the static root beside capabilities.json.
+}
+
+-- Status fan-out --------------------------------------------------------
+
+rule StatusPushedToSessions {
+    when: PlayerStatusChanged(player)
+    for s in player.open_sessions:
+        ensures: StatusDelivered(session: s, status: {
+            state: player.state,
+            current: player.current,
+            volume: output.volume,
+            queue_length: player.queue.count,
+            scan: player.scan,
+            song_count: player.song_count,
+            capabilities: host.capabilities
+        })
+
+    @guidance
+        -- Both pages keep the idle socket. The guest page shows state,
+        -- current track, who added it, and the scan indicator; it hides
+        -- volume and the queue.
+}
+
+-- Output arbitration (unchanged) ------------------------------------------
 
 rule RendererAcquiresOutput {
     when: RendererStreamStarts(module)
@@ -847,14 +856,6 @@ rule RendererAcquiresOutput {
             player.state = paused
         output.owner = module
         PlayerStatusChanged(player: player)
-
-    @guidance
-        -- shairport-sync's run_this_before_play_begins: if `mpc status`
-        -- says [playing], touch /run/shairport-sync/nixtune-paused-mpd
-        -- and `mpc pause`. MPD's close_on_pause frees the card.
-        -- upmpdcli needs no hook: it drives MPD, it does not open the
-        -- card. This is the hook scheme Collision B retires before a
-        -- second card-opening renderer is added.
 }
 
 rule RendererReleasesOutput {
@@ -866,115 +867,15 @@ rule RendererReleasesOutput {
         if config.resume_mpd_after_renderer and player.state = paused:
             player.state = playing
         PlayerStatusChanged(player: player)
-
-    @guidance
-        -- run_this_after_play_ends: if the marker exists, remove it
-        -- and `mpc play` (only when resumeAfterRenderer).
 }
 
--- Web interface and bridge --------------------------------------------
-
-rule ListenerOpensSession {
-    when: ListenerConnects(client)
-    requires: client.on_lan
-    requires: host.has_ui
-    ensures:
-        Session.created(player: player, client: client, status: open, opened_at: now)
-        PlayerStatusChanged(player: player)
-
-    @guidance
-        -- The page fetches capabilities.json ONCE at load. A tab
-        -- opened against an older generation keeps that generation's
-        -- station list until reloaded; this cost an hour on
-        -- 2026-10-28 and is worth a line in the README.
-}
-
-rule ListenerClosesSession {
-    when: ListenerDisconnects(session)
-    requires: session.status = open
-    ensures: session.status = closed
-}
-
-rule ListenerSendsCommand {
-    when: ListenerCommands(session, command)
-    requires: session.status = open
-    ensures:
-        MpdProtocol.apply(player, command)
-        PlayerStatusChanged(player: player)
-
-    @guidance
-        -- The page's own vocabulary: play/pause/stop/previous/next,
-        -- random and repeat toggles, setvol clamped to maxVolume,
-        -- clear/add/play for a station or a library path, play <pos>,
-        -- delete <pos>, lsinfo <path> for browsing, load <playlist>.
-        -- An MPD error line (ACK ...) is shown at the foot of the page
-        -- and MPD keeps the last error in `status` until the next
-        -- play or `clearerror`.
-}
-
-rule ListenerSetsVolume {
-    when: ListenerSetsVolume(session, level)
-    requires: session.status = open
-    requires: level >= 0 and level <= config.max_volume
-    ensures:
-        output.volume = level
-        PlayerStatusChanged(player: player)
-}
-
-rule StatusPushedToSessions {
-    when: PlayerStatusChanged(player)
-    for s in player.open_sessions:
-        ensures: StatusDelivered(session: s, status: {
-            state: player.state,
-            current: player.current,
-            volume: output.volume,
-            queue_length: player.queue.count,
-            library_ready: player.library_ready,
-            capabilities: host.capabilities
-        })
-
-    @guidance
-        -- The idle connection reports which subsystems changed; the
-        -- page re-asks status and currentsong, and playlistinfo only
-        -- when the playlist changed, lsinfo only when the database
-        -- changed while the library view is open.
-}
-
-rule ListenerBrowsesLibrary {
-    when: ListenerBrowses(session, path)
-    requires: session.status = open
-    ensures: LibraryListingDelivered(session: session, path: path)
-}
-
-rule ListenerPlaysRadio {
-    when: ListenerSelectsStation(session, station)
-    requires: session.status = open
-    requires: station in host.radio_stations
-    ensures:
-        player.current = { uri: station.stream_url, title: station.name }
-        player.state = playing
-        PlayerStatusChanged(player: player)
-
-    @guidance
-        -- A station URL that redirects to an HTML page produces
-        -- "avformat_open_input() failed: Invalid data found" in MPD.
-        -- Verify a candidate from the player itself before declaring
-        -- it: curl -sIL -m 10 <url> | grep -i -E '^(HTTP|content-type)'
-        -- must end in 200 with an audio/* type.
-}
-
--- Project maintenance -------------------------------------------------
+-- Project maintenance ---------------------------------------------------
 
 rule MaintainerOpensUpdateRun {
     when: MaintainerRunsFlakeUpdate(maintainer)
     requires: module_repo.open_runs.count = 0
     ensures:
         UpdateRun.created(repo: module_repo, branch: "update", status: opened, ci_passed: false, lock_revision: "")
-
-    @guidance
-        -- In ~/git/nixtune. While KnownIssue purescript_segfault is
-        -- open, an update that moves nixpkgs past the pin fails CI at
-        -- the page build; the run is abandoned and the pin kept.
 }
 
 rule CiChecksUpdateRun {
@@ -983,13 +884,6 @@ rule CiChecksUpdateRun {
     ensures:
         run.status = checked
         run.ci_passed = passed
-
-    @guidance
-        -- `nix flake check`: checks.<system>.nixtune-web (the page) and
-        -- checks.x86_64-linux.rehearsal (a hostless x86 system with
-        -- profile none and one station). The devShell carries spago
-        -- from purescript-overlay for editing the lock; consumers of
-        -- the module never evaluate that input.
 }
 
 rule MaintainerMergesUpdateRun {
@@ -999,19 +893,7 @@ rule MaintainerMergesUpdateRun {
     ensures:
         run.status = merged
         module_repo.main_revision = run.lock_revision
-}
-
-rule FleetFollowsModule {
-    when: MaintainerMerges(maintainer, run)
-    requires: run.ci_passed
-    ensures: FleetInputBumped(fleet: fleet_repo, revision: run.lock_revision)
-
-    @guidance
-        -- In ~/neoblade-config: `nix flake update nixtune`, then
-        -- `./build check`, then the fleet's own update-branch routine.
-        -- Until the repo is pushed the input is the local checkout and
-        -- reads its committed tree; after the push the URL becomes
-        -- github:harryprayiv/nixtune and nothing else changes.
+        FleetInputBumped(fleet: fleet_repo, revision: run.lock_revision)
 }
 
 rule MaintainerClosesIssue {
@@ -1029,20 +911,20 @@ invariant SingleOutputOwner {
         d.owner != null implies d.owner.state = active
 }
 
-invariant RenderersNeverOwnOutputWhileDisabled {
-    for m in ModuleDeclarations:
-        not m.enabled implies not (output.owner = m)
+invariant GuestsNeverRemove {
+    -- Over the page's own surface. Not over the websocket (decision 8).
+    for s in Sessions where role = guest:
+        s.status = open implies not Offered(s, "delete") and not Offered(s, "clear") and not Offered(s, "move")
 }
 
-invariant WifiNeverWithoutSecretOnWifi {
-    -- A host on wifi has a PSK file; a host without one is on the cable.
-    for h in HostDeclarations:
-        h.network = wifi implies h.wifi_configured
+invariant NicknamesAreBrowserState {
+    for c in Clients:
+        c.nickname != null implies StoredIn(c.nickname, "localStorage")
 }
 
-invariant PersistedPathsAreTheModulesList {
-    for p in PersistedPaths where kind = mpd_state_dir:
-        p.path = "/var/lib/mpd"
+invariant ScanNeverBlocksStart {
+    for p in Players:
+        p.scan = scanning implies ModuleDeclaration{host: p.host, kind: mpd}.state = active
 }
 
 invariant MainIsAlwaysChecked {
@@ -1059,66 +941,96 @@ invariant UpnpOffWhileUnbuilt {
 -- Actor Declarations
 ------------------------------------------------------------
 
-actor Listener {
-    identified_by: Client where on_lan = true
+actor Guest {
+    identified_by: Session where role = guest
+}
+
+actor Host {
+    identified_by: Session where role = host
 }
 
 actor Operator {
-    identified_by: Client where role = operator
+    identified_by: Client where on_lan = true
 }
 
 actor Maintainer {
-    identified_by: Client where role = operator
-}
-
-actor Adopter {
-    identified_by: Client where role = adopter
+    identified_by: Client where on_lan = true
 }
 
 ------------------------------------------------------------
 -- Surfaces
 ------------------------------------------------------------
 
-surface PlayerUi {
-    facing listener: Listener
+surface GuestPage {
+    facing guest: Guest
+
+    exposes:
+        player.state
+        player.current
+        player.current.added_by
+        player.scan
+        player.song_count
+        host.hostname
+        guest.client.nickname
+
+    provides:
+        ClientBrowses(session, path)
+        ClientAppends(session, uri)
+        ClientDisconnects(session)
+
+    contracts:
+        demands MpdBridge
+
+    @guarantee AppendOnlyByConstruction
+        -- The guest page contains no control that sends a queue command
+        -- other than add (and play from the stopped state). This is a
+        -- guarantee about the page, not about the wire.
+
+    @guarantee NoVolumeNoQueue
+        -- No volume slider, no queue view, no transport buttons.
+
+    @guidance
+        -- Two views: Now playing (title, artist/album, progress, "added
+        -- by", the scan indicator in the header, "you are <nickname>" in
+        -- the footer) and Library (breadcrumbs, search box, folders and
+        -- files, a + on each). Phone-first, dark by default.
+}
+
+surface HostPage {
+    facing host: Host
 
     exposes:
         player.state
         player.current
         player.queue
-        player.library_ready
+        player.scan
+        player.song_count
         player.last_error
         output.volume
-        host.hostname
+        host.public_url
         for m in host.enabled_modules:
             m.kind
         for s in host.radio_stations:
             s.name
 
     provides:
-        ListenerConnects(listener)
-        ListenerCommands(session, command)
-        ListenerSetsVolume(session, level)
-        ListenerSelectsStation(session, station)
-        ListenerBrowses(session, path) when host.library_export != null
-        ListenerDisconnects(session)
+        ClientCommands(session, command)
+        ClientBrowses(session, path)
+        HostOpensQr(session)
+        ClientDisconnects(session)
 
     contracts:
         demands MpdBridge
 
     @guarantee NoSettingsSurface
-        -- No page changes system configuration.
-
-    @guarantee DisabledModulesInvisible
-        -- A renderer that is off has no badge; a host with no library
-        -- has no Library tab; no stations means no Radio tab.
+        -- Hardware, modules, sources and stations are shown, never
+        -- edited.
 
     @guidance
-        -- Views: Now playing (title, artist/album line, progress,
-        -- transport, random/repeat, volume slider to maxVolume), Queue
-        -- (play by position, delete, clear), Library (breadcrumbs,
-        -- add/play all, folders, playlists, files), Radio. Dark by
-        -- default, light on prefers-color-scheme, phone-first.
+        -- The page as it exists today (Now playing, Queue, Library,
+        -- Radio) plus a QR tab, the nickname column in the queue,
+        -- "added by" on now playing, the scan indicator, and an Update
+        -- button on the Library view that sends `update`.
 }
 
 surface FleetDeployment {
@@ -1127,65 +1039,50 @@ surface FleetDeployment {
     exposes:
         host.hostname
         host.network
-        host.secrets
         for g in host.generations:
             g.status
-            g.closure.flake_revision
         for i in module_repo.issues where status = open:
             i.name
             i.effect
 
     provides:
-        OperatorBuildsImage(operator)
-        OperatorCreatesSecrets(operator) when host.booted_generation.count = 1 and host.secrets = null
-        OperatorDeploys(operator, revision) when host.secrets != null
-        OperatorVerifies(operator) when host.booted_generation.count = 1
         OperatorRollsBack(operator, generation) when host.generations.any(g => g.status = previous)
 
     contracts:
         demands PlayerModule
 
     @guarantee FleetShape
-        -- One row in targets.nix (roles physical and player, nas.host,
-        -- sdImage, the generic aarch64 sd-image profile in
-        -- extraModules), one adapter module, two host files. The row
-        -- is not special to ./build: deploy-native and boot-native
-        -- treat it as they treat oracle.
+        -- One row, one adapter, two host files; deployAddr is a name.
 
-    @guarantee TwoLayers
-        -- hosts/nixtune.nix sets services.nixtune.* directly for the
-        -- machine's facts and roles.player.musicExport for the fleet's
-        -- one. Nothing under homelab.* is read by the public module.
+    @guidance
+        -- Day to day: edit hosts/nixtune.nix or ~/git/nixtune, `git add`
+        -- there, `nix flake update nixtune`, `./build check`,
+        -- `./build deploy-native nixtune`, live with it,
+        -- `./build boot-native nixtune`. A fresh card: build the image,
+        -- dd, grow OFFLINE (sfdisk, e2fsck -f, resize2fs, e2fsck -fn),
+        -- boot on the cable, ssh-to-age, secrets, deploy, boot-native,
+        -- unplug.
 }
 
 surface CommunityFlake {
-    facing adopter: Adopter
+    facing adopter: Operator
 
     exposes:
         module_repo.public_url
-        module_repo.main_revision
         module_repo.nixpkgs_pin
         for i in module_repo.issues where status = open:
             i.name
-
-    provides:
-        OperatorDeploys(adopter, revision)
 
     contracts:
         demands PlayerModule
 
     @guarantee StandaloneUse
-        -- Importing nixosModules.default, setting services.nixtune.*,
-        -- and importing nixos-hardware's raspberry-pi-5 module for the
-        -- Pi profile is the whole setup. No fleet, no sops, no attic.
-        -- The flake template that makes this one command is step 2.
-
-    @guarantee SharedLockfile
-        -- Adopters build from the flake.lock main was checked with.
+        -- Import nixosModules.default, set services.nixtune.*, import
+        -- nixos-hardware's raspberry-pi-5 for the Pi profile. The flake
+        -- template is the public_release step.
 
     @guidance
-        -- AGPLv3 (LICENSE file still to be added). No moOde code, no
-        -- moOde name.
+        -- AGPLv3 (LICENSE still to be added). No moOde code or name.
 }
 
 ------------------------------------------------------------
@@ -1193,7 +1090,8 @@ surface CommunityFlake {
 ------------------------------------------------------------
 
 deferred MpdProtocol.apply          -- see: https://mpd.readthedocs.io/en/latest/protocol.html
-deferred DeviceTree.overlay         -- see: nixpkgs pkgs/os-specific/linux/device-tree/apply_overlays.py
+deferred MpdProtocol.stickers       -- see: the sticker commands in the same document
+deferred Firmware.configtxt         -- see: nixos-hardware raspberry-pi/README.md
 deferred Renderer.airplay           -- see: shairport-sync documentation
 deferred Renderer.upnp_renderer     -- see: upmpdcli documentation
 deferred Websocket.bridge           -- see: websocat documentation
@@ -1203,7 +1101,8 @@ deferred Fleet.rows                 -- see: neoblade-config.allium
 -- Open Questions
 ------------------------------------------------------------
 
-open question "Whether the Synology export /volume2/music lists 192.168.8.222 (or its subnet) and whether its squash setting lets the mpd user read; both show only on the Pi."
-open question "Whether the rewritten hifiberry-dacplushd overlay binds on the Pi 5 kernel nixos-hardware ships (linux-rpi-6.18.50); aplay -l on first boot answers it."
-open question "Whether WBUR's StreamGuys path is /wbur; verify from the player with curl before adding it."
-open question "Whether the fallback access point (step 3) can coexist with the station connection on the Pi 5's single radio, or needs a second adapter."
+open question "Whether page-side role limits (decision 8) stay acceptable once the player is used by people outside the household; the upgrade is a filtering proxy between websocat and MPD, which is the backend the decision avoided."
+open question "Whether MPD search over a multi-day partial database is useful enough on day one, or whether the guest page should hide search until the first scan completes."
+open question "Whether a guest's `play` from the stopped state is welcome at 2 a.m., or whether the host page needs a 'guests may start playback' switch (browser state on the host device, which only the host's page would honour, so again advisory)."
+open question "Whether the same file added by two guests should show both names; stickers hold one value per URI, so this needs a different store or a convention such as appending."
+open question "Why nixpkgs' online expandOnBoot resize corrupted directory blocks on this card and kernel (linux-rpi 6.18.50, e2fsprogs 1.47.4), and whether it reproduces on a second card; the offline grow is a workaround, not an explanation."
