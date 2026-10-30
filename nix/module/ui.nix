@@ -38,6 +38,11 @@ let
       library = cfg.library.export != null;
       stations = cfg.radio.stations;
       websocketPath = "/ws";
+      # Where volume changes go. Null means MPD's own mixer takes them
+      # (setvol); a path means the helper in volume.nix does, because MPD
+      # cannot write this card's mixer. The page reads the level from MPD
+      # either way.
+      volumePath = cfg.volume.path;
       maxVolume = cfg.mpd.maxVolume;
       publicUrl = cfg.ui.publicUrl;
       hostPath = cfg.ui.hostPath;

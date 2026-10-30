@@ -32,6 +32,9 @@ type Caps =
   , library :: Boolean
   , stations :: Array Station
   , websocketPath :: String
+  -- Null when MPD's own mixer takes volume changes; a path when the
+  -- helper in nix/module/volume.nix does.
+  , volumePath :: Maybe String
   , maxVolume :: Int
   , publicUrl :: String
   , hostPath :: String

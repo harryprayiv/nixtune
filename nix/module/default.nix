@@ -15,6 +15,8 @@
 #   library.nix    the NFS export, mounted read-only at /srv/music
 #   database.nix   what MPD indexes, and dropping its database when the
 #                  export changes
+#   volume.nix     writing the hardware volume, which MPD cannot do on this
+#                  card
 #   ui.nix         nginx, websocat, capabilities.json, the page
 #   airplay.nix    shairport-sync and the arbitration hooks
 #   upnp.nix       upmpdcli
@@ -70,6 +72,7 @@ in
     ./mpd.nix
     ./library.nix
     ./database.nix
+    ./volume.nix
     ./ui.nix
     ./airplay.nix
     ./upnp.nix

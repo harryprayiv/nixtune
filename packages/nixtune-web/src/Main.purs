@@ -124,8 +124,8 @@ type State =
   -- between the command and the report.
   , volDraft :: Maybe Int
   -- The last level actually sent, and whether the sender is running. A
-  -- drag produces an event per pixel; the sender turns that into at most
-  -- one setvol every 80 ms, with the last value always sent.
+  -- drag produces an event per pixel; the sender turns that into a walk
+  -- toward the target, one step every volumeGlideMs.
   , volSent :: Maybe Int
   , volSending :: Boolean
   -- The level to return to when unmuting. MPD has no mute of its own.
@@ -134,6 +134,9 @@ type State =
   -- means the field shows the live level; a report from MPD arriving
   -- mid-keystroke must not overwrite what is being typed.
   , volText :: Maybe String
+  -- The socket volume changes are written to, when the host has one.
+  -- Null in capabilities.json means MPD takes them instead.
+  , volLink :: Maybe { socket :: WebSocket, ready :: Boolean }
   -- Where the seek bar is being held. While this is set the one-second
   -- tick leaves elapsed alone, so the thumb does not fight the clock.
   , seekDraft :: Maybe Number
@@ -165,6 +168,7 @@ initial =
   , volBeforeMute: Nothing
   , volText: Nothing
   , seekDraft: Nothing
+  , volLink: Nothing
   }
 
 data Action
@@ -183,6 +187,8 @@ data Action
   | CommitVolume
   | VolumeKey String
   | MoveQueue Int Int
+  | VolOpened
+  | VolClosed
   | DragSeek String
   | CommitSeek String
   | Browse String
@@ -226,6 +232,7 @@ handle = case _ of
         H.modify_ _ { caps = Just caps, role = role, nickname = nick }
         connect Cmd
         connect Idle
+        for_ caps.volumePath connectVolume
         { emitter, listener } <- liftEffect HS.create
         _ <- liftEffect (setInterval 1000 (HS.notify listener Tick))
         void (H.subscribe emitter)
@@ -318,6 +325,12 @@ handle = case _ of
           back = clamp volumeFloor (maxVolumeOf st) (fromMaybe unmuteFloor st.volBeforeMute)
         H.modify_ _ { volBeforeMute = Nothing }
         setVolume back
+  VolOpened -> H.modify_ \st -> st { volLink = map (_ { ready = true }) st.volLink }
+  VolClosed -> do
+    H.modify_ _ { volLink = Nothing }
+    H.liftAff (delay (Milliseconds 2000.0))
+    path <- H.gets (\st -> st.caps >>= _.volumePath)
+    for_ path connectVolume
   DragSeek raw -> for_ (Number.fromString raw) \t ->
     H.modify_ _ { seekDraft = Just t }
   CommitSeek raw -> for_ (Number.fromString raw) \t -> do
@@ -413,7 +426,7 @@ maxVolumeOf :: State -> Int
 maxVolumeOf st = maybe 100 _.maxVolume st.caps
 
 -- | Ask for a level. The bar reports every pixel of a drag, so the value
--- | is held here and the sender below decides what reaches MPD.
+-- | is held here and the sender below decides what reaches the player.
 setVolume :: forall o m. MonadAff m => Int -> M o m Unit
 setVolume v = do
   H.modify_ _ { volDraft = Just v }
@@ -422,20 +435,71 @@ setVolume v = do
     H.modify_ _ { volSending = true }
     void (H.fork sendVolume)
 
--- | At most one setvol every 80 ms, and the value the drag ended on is
--- | always the last one sent. The draft is not cleared here: it stands
--- | until MPD reports that level back (see reply RStatus), so the thumb
--- | never falls back to the previous value for a frame.
+-- | How far one step of the glide moves, and how long a step lasts. A
+-- | press or a drag sets the target; the level walks to it rather than
+-- | jumping, which is gentler on speakers and reads as deliberate rather
+-- | than abrupt. A full-scale move takes about half a second.
+volumeGlideStep :: Int
+volumeGlideStep = 4
+
+volumeGlideMs :: Number
+volumeGlideMs = 40.0
+
+-- | Walk the level toward the target one step at a time until it arrives.
+-- | The step is proportional to what is left, so the move starts quickly
+-- | and settles softly, with a floor of one so it always finishes. The
+-- | draft is not cleared here: it stands until MPD reports the level
+-- | back (see reply RStatus), so the thumb never falls back for a frame.
 sendVolume :: forall o m. MonadAff m => M o m Unit
 sendVolume = do
   st <- H.get
   case st.volDraft of
-    Just v | st.volSent /= Just v -> do
-      send Cmd RFire ("setvol " <> show v)
-      H.modify_ _ { volSent = Just v }
-      H.liftAff (delay (Milliseconds 80.0))
-      sendVolume
-    _ -> H.modify_ _ { volSending = false }
+    Nothing -> H.modify_ _ { volSending = false }
+    Just target -> do
+      let
+        now = fromMaybe (fromMaybe target st.status.volume) st.volSent
+      if now == target then H.modify_ _ { volSending = false }
+      else do
+        let
+          gap = target - now
+          step = clamp 1 volumeGlideStep ((if gap < 0 then negate gap else gap) / 3)
+          next = if gap > 0 then min target (now + step) else max target (now - step)
+        writeVolume next
+        H.modify_ _ { volSent = Just next }
+        H.liftAff (delay (Milliseconds volumeGlideMs))
+        sendVolume
+
+-- | One level, to whichever thing on this host can actually apply it.
+writeVolume :: forall o m. MonadAff m => Int -> M o m Unit
+writeVolume v = do
+  st <- H.get
+  case st.volLink of
+    Just k | k.ready -> liftEffect (WS.sendString k.socket ("set " <> show v))
+    _ -> case st.caps >>= _.volumePath of
+      -- A host with a helper and no connection to it says so and writes
+      -- nothing. Falling back to setvol here would mute the card, which
+      -- is the whole reason the helper exists.
+      Just _ -> H.modify_ _ { error = Just "The volume control is not reachable; the level was not changed." }
+      Nothing -> send Cmd RFire ("setvol " <> show v)
+
+-- | The volume socket. It carries one line per change and its replies are
+-- | not read: the level the page shows always comes from MPD, which
+-- | reports the mixer whoever moved it.
+connectVolume :: forall o m. MonadAff m => String -> M o m Unit
+connectVolume path = do
+  url <- liftEffect (socketUrl path)
+  socket <- liftEffect (WS.create url [])
+  let
+    target = WS.toEventTarget socket
+  void $ H.subscribe $ HQE.eventListener WSE.onOpen target (const (Just VolOpened))
+  void $ H.subscribe $ HQE.eventListener WSE.onClose target (const (Just VolClosed))
+  H.modify_ _ { volLink = Just { socket, ready: false } }
+
+-- | Has MPD reported the level the page asked for, give or take a step.
+arrived :: Maybe Int -> Maybe Int -> Boolean
+arrived want got = case want, got of
+  Just a, Just b -> a - b <= 1 && b - a <= 1
+  _, _ -> false
 
 -- | The level to show: the press just made, else what MPD last reported.
 shownVolume :: State -> Maybe Int
@@ -485,14 +549,17 @@ animals =
   ]
 
 -- | Open one connection and route its events into actions.
+socketUrl :: String -> Effect String
+socketUrl path = do
+  loc <- window >>= location
+  proto <- Location.protocol loc
+  host <- Location.host loc
+  pure ((if proto == "https:" then "wss://" else "ws://") <> host <> path)
+
 connect :: forall o m. MonadAff m => Conn -> M o m Unit
 connect conn = do
   path <- H.gets (maybe "/ws" _.websocketPath <<< _.caps)
-  url <- liftEffect do
-    loc <- window >>= location
-    proto <- Location.protocol loc
-    host <- Location.host loc
-    pure ((if proto == "https:" then "wss://" else "ws://") <> host <> path)
+  url <- liftEffect (socketUrl path)
   socket <- liftEffect (WS.create url [])
   let
     target = WS.toEventTarget socket
@@ -557,11 +624,17 @@ reply req block = case req of
   RStatus -> do
     let
       status = Mpd.parseStatus block
+      done st = not st.volSending && arrived st.volDraft status.volume
     H.modify_ \st ->
       st
         { status = status
-        , volDraft = if st.volDraft == status.volume then Nothing else st.volDraft
-        , volSent = if st.volDraft == status.volume then Nothing else st.volSent
+        -- Cleared when MPD reports the level that was asked for, but
+        -- only once the glide has finished: a report arriving mid-glide
+        -- would otherwise end it early. One unit of slack, because the
+        -- mapped write lands on the nearest 0.5 dB step and reading that
+        -- back can round the other way.
+        , volDraft = if done st then Nothing else st.volDraft
+        , volSent = if done st then Nothing else st.volSent
         }
   RCurrent -> do
     let
