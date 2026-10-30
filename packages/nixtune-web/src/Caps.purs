@@ -33,6 +33,8 @@ type Caps =
   , stations :: Array Station
   , websocketPath :: String
   , maxVolume :: Int
+  , publicUrl :: String
+  , hostPath :: String
   }
 
 fetch :: Aff (Either String Caps)

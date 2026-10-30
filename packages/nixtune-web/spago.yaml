@@ -19,12 +19,14 @@ package:
     - maybe
     - numbers
     - prelude
+    - random
     - strings
     - transformers
     - tuples
     - web-events
     - web-html
     - web-socket
+    - web-storage
   bundle:
     module: Main
     outfile: index.js

@@ -23,12 +23,14 @@
             "maybe",
             "numbers",
             "prelude",
+            "random",
             "strings",
             "transformers",
             "tuples",
             "web-events",
             "web-html",
-            "web-socket"
+            "web-socket",
+            "web-storage"
           ]
         },
         "test": {
@@ -1353,6 +1355,16 @@
         "newtype",
         "prelude",
         "tuples"
+      ]
+    },
+    "random": {
+      "type": "registry",
+      "version": "6.0.0",
+      "integrity": "sha256-7sZRo6P9UIiXDZ9s2QL9T8h3wlIwLdQrR4+oZKOijQw=",
+      "dependencies": [
+        "effect",
+        "integers",
+        "prelude"
       ]
     },
     "record": {

@@ -163,6 +163,26 @@ in
         type = types.port;
         default = 80;
       };
+      publicUrl = mkOption {
+        type = types.str;
+        default = "http://${config.networking.hostName}.lan/";
+        defaultText = lib.literalExpression ''"http://''${config.networking.hostName}.lan/"'';
+        description = ''
+          The address the QR code on the host page encodes: how a guest's
+          phone reaches the guest page. A name the LAN's DNS resolves, or
+          an address with a reservation behind it.
+        '';
+      };
+      hostPath = mkOption {
+        type = types.strMatching "/.+";
+        default = "/host";
+        description = ''
+          The path that opens the page in the host role, with the queue,
+          transport, volume and the QR. Every other path is the guest
+          page. A convention the page honours, not a credential: both
+          roles reach the same websocket to MPD.
+        '';
+      };
     };
 
     arbitration.resumeAfterRenderer = mkOption {

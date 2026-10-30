@@ -17,6 +17,8 @@ module Mpd
   , parseStatus
   , parseSongs
   , parseEntries
+  , parseStats
+  , parseSticker
   , quote
   , songTitle
   , songLine
@@ -177,6 +179,20 @@ parseEntries ls = flush (foldl step { current: Nothing, done: [] } (pairs ls))
   flush acc = case acc.current of
     Just s -> snoc acc.done (File s)
     Nothing -> acc.done
+
+-- | The song count from a `stats` reply; zero when absent.
+parseStats :: Array String -> Int
+parseStats ls = fromMaybe 0 (lookup "songs" (pairs ls) >>= fromString)
+
+-- | The value of a `sticker get song <uri> <name>` reply, whose one line is
+-- | "sticker: <name>=<value>". Nothing when the song has no such sticker,
+-- | which MPD reports as an error rather than an empty reply.
+parseSticker :: Array String -> Maybe String
+parseSticker ls = case lookup "sticker" (pairs ls) of
+  Just kv -> case indexOf (Pattern "=") kv of
+    Just i -> Just (String.drop (i + 1) kv)
+    Nothing -> Nothing
+  Nothing -> Nothing
 
 -- | A command argument: backslash and double quote escaped, the whole thing
 -- | quoted.

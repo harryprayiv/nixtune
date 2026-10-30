@@ -102,6 +102,18 @@ button:disabled { opacity: .45; cursor: default; }
 .crumb { background: transparent; border-color: transparent; color: var(--accent); padding: .25rem .4rem; }
 .crumb + .crumb::before { content: "/"; color: var(--muted); margin-right: .4rem; }
 
+/* Attribution, the guest footer, search, the QR tab, the scan badge. */
+.added { color: var(--accent); font-size: .85rem; }
+.me { color: var(--muted); font: .8rem var(--mono); text-align: center; padding: .6rem 1rem 1rem; }
+.search { display: flex; gap: .5rem; }
+.search input { flex: 1; min-width: 0; }
+.crumb-static { color: var(--muted); padding: .25rem .4rem; }
+.plus { color: var(--muted); padding: 0 .6rem; font-size: 1.2rem; }
+.badge.scanning { color: var(--accent); border-color: var(--accent); }
+.qr { display: flex; flex-direction: column; align-items: center; gap: .75rem; padding-top: 1rem; }
+.qr img { width: min(80vw, 22rem); height: auto; background: #fff; padding: .75rem; border-radius: 12px; }
+.qr .url { font: 1rem var(--mono); margin: 0; overflow-wrap: anywhere; text-align: center; }
+
 .error { color: var(--error); background: color-mix(in srgb, var(--error) 10%, transparent); border-top: 1px solid color-mix(in srgb, var(--error) 40%, transparent); padding: .6rem 1rem; margin: 0; position: sticky; bottom: 0; }
 
 @media (min-width: 40rem) {

@@ -39,14 +39,30 @@ let
       stations = cfg.radio.stations;
       websocketPath = "/ws";
       maxVolume = cfg.mpd.maxVolume;
+      publicUrl = cfg.ui.publicUrl;
+      hostPath = cfg.ui.hostPath;
     }
   );
+
+  # The QR code the host page shows, rendered once at build time. Nothing
+  # in the bundle knows how to draw one, and the address it encodes is a
+  # build-time fact.
+  qr =
+    pkgs.runCommand "nixtune-qr"
+      {
+        nativeBuildInputs = [ pkgs.qrencode ];
+      }
+      ''
+        mkdir -p $out
+        qrencode -t SVG -m 2 -o $out/qr.svg ${lib.escapeShellArg cfg.ui.publicUrl}
+      '';
 
   root = pkgs.symlinkJoin {
     name = "nixtune-ui-root";
     paths = [
       cfg.ui.package
       capabilities
+      qr
     ];
   };
 
@@ -86,6 +102,8 @@ in
           }
         ];
         inherit root;
+        # Every path that is not a file is the page; the page reads the
+        # path to choose its role (ui.hostPath).
         locations."/" = {
           tryFiles = "$uri $uri/ /index.html";
         };
