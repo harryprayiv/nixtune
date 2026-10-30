@@ -6,25 +6,36 @@
 # overlay as hifiberry-dacplushd.
 #
 # ============================================================================
-# THE OVERLAY'S COMPATIBLE STRING HAS TO BE REWRITTEN
+# TWO WAYS THE OVERLAY CAN REACH THE KERNEL, AND WHICH ONE A PI 5 USES
 # ============================================================================
 #
-# nixpkgs applies a device tree overlay to a DTB only when the two share a
-# compatible string (pkgs/os-specific/linux/device-tree/apply_overlays.py).
-# The kernel ships every HiFiBerry overlay as "brcm,bcm2835", and the Pi 5
-# DTB is "raspberrypi,5-model-b" plus "brcm,bcm2712", so the shipped file is
-# skipped with a one-line message in the build log and the card never
-# appears. The derivation below copies the kernel's own dtbo and changes
-# that one property. Nothing else in the overlay is touched, and the symbols
-# it fixes up against (i2s_clk_consumer, i2c1, sound) exist in the Pi 5 DTB.
+# nixos-hardware's Raspberry Pi profiles carry a firmware-partition module
+# (hardware.raspberry-pi.firmware). On a Pi it owns the firmware partition:
+# GPU boot code, the vendor device trees and overlays, a config.txt rendered
+# from Nix options, and, when firmware.uboot.enable is set, U-Boot. WITHOUT
+# uboot.enable the firmware has no kernel line and the board does not boot
+# at all; the SD image built on 2026-10-29 failed exactly that way. With it,
+# the GPU firmware merges config.txt's dtoverlay lines into its own device
+# tree and hands that to U-Boot, and nixos-hardware turns off
+# useGenerationDeviceTree so U-Boot does not reload a bare tree and lose
+# them. On that path the overlay is a config.txt line, which is what this
+# file writes when those options exist. The firmware's own overlay loader
+# does not check compatible strings, so the vendor hifiberry-dacplushd.dtbo
+# applies as shipped.
 #
-# WHY NOT config.txt. The generic aarch64 SD image boots firmware, then
-# U-Boot, then extlinux, and extlinux hands U-Boot the DTB NixOS built, with
-# the overlays already applied. dtoverlay= lines in config.txt affect only the
-# firmware's copy, which U-Boot then replaces.
+# The other path is nixpkgs' own: hardware.deviceTree.overlays applied at
+# build time to the generation's DTB, which U-Boot loads through extlinux's
+# FDTDIR when useGenerationDeviceTree is true. nixpkgs applies an overlay
+# only when it shares a compatible string with the DTB
+# (pkgs/os-specific/linux/device-tree/apply_overlays.py), the kernel ships
+# every HiFiBerry overlay as "brcm,bcm2835", and the Pi 5 DTB is
+# "brcm,bcm2712", so for that path the dtbo is copied and that one string
+# rewritten. This file writes both, so whichever device tree the kernel is
+# given carries the DAC.
 {
   config,
   lib,
+  options,
   pkgs,
   ...
 }:
@@ -37,16 +48,23 @@ let
       overlay = "hifiberry-dacplushd";
       card = "sndrpihifiberry";
       mixer = "DAC";
+      raspberryPi = true;
     };
     none = {
       kind = "null";
       overlay = null;
       card = null;
       mixer = null;
+      raspberryPi = false;
     };
   };
 
   profile = profiles.${cfg.hardware.profile};
+
+  # nixos-hardware's Raspberry Pi options are present only when one of its
+  # Pi profiles is imported. A host without them (the rehearsal VM, or a
+  # board that is not a Pi) gets nothing from the firmware branch below.
+  haveRpiOptions = options.hardware ? raspberry-pi;
 
   kernel = config.boot.kernelPackages.kernel;
 
@@ -77,6 +95,7 @@ in
         };
       }
 
+      # The generation-DTB path.
       (lib.mkIf (profile.overlay != null) {
         hardware.deviceTree.overlays = [
           {
@@ -85,6 +104,24 @@ in
           }
         ];
       })
+
+      # The firmware path, when nixos-hardware's Pi module is present.
+      # optionalAttrs, not mkIf alone: mkIf keeps the attribute path in the
+      # definition, and a host without the Pi module would then fail with
+      # "option hardware.raspberry-pi does not exist".
+      (lib.optionalAttrs haveRpiOptions (lib.mkIf profile.raspberryPi {
+        # Chainload U-Boot from the GPU firmware. Without this the firmware
+        # partition has no kernel line and the board never boots.
+        hardware.raspberry-pi.firmware.uboot.enable = lib.mkDefault true;
+
+        # The DAC, as a config.txt line. This replaces nixos-hardware's
+        # default list for [all], which is vc4-kms-v3d alone; a headless
+        # player has no use for the KMS display driver, and the firmware's
+        # framebuffer still gives an HDMI console for debugging.
+        hardware.raspberry-pi.configtxt.deviceTreeOverlays.all = [
+          { ${profile.overlay} = { }; }
+        ];
+      }))
     ]
   );
 }
