@@ -13,6 +13,8 @@
 #   hardware.nix   board and DAC facts per profile, the device tree overlay
 #   mpd.nix        the daemon on the card
 #   library.nix    the NFS export, mounted read-only at /srv/music
+#   database.nix   what MPD indexes, and dropping its database when the
+#                  export changes
 #   ui.nix         nginx, websocat, capabilities.json, the page
 #   airplay.nix    shairport-sync and the arbitration hooks
 #   upnp.nix       upmpdcli
@@ -67,6 +69,7 @@ in
     ./hardware.nix
     ./mpd.nix
     ./library.nix
+    ./database.nix
     ./ui.nix
     ./airplay.nix
     ./upnp.nix
