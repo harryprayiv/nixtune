@@ -33,7 +33,7 @@ import Data.Either (Either(..), hush)
 import Data.Foldable (for_, lookup)
 import Data.Int (fromString, toNumber)
 import Data.Maybe (Maybe(..), fromMaybe, isJust, isNothing, maybe)
-import Data.String (Pattern(..), indexOf, joinWith, split, trim)
+import Data.String (Pattern(..), indexOf, joinWith, split, stripSuffix, trim)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), delay)
@@ -91,7 +91,11 @@ data Req
   | RSticker String
   | RFire
 
-type Link = { socket :: WebSocket, ready :: Boolean, lines :: Array String }
+-- | One connection: its socket, whether MPD has greeted on it, the lines
+-- | of the reply being collected, and the unfinished tail of the last
+-- | message. websocat frames messages by TCP read, not by line, so one
+-- | message may hold a whole reply or end in the middle of a line.
+type Link = { socket :: WebSocket, ready :: Boolean, lines :: Array String, partial :: String }
 
 type State =
   { caps :: Maybe Caps
@@ -150,7 +154,7 @@ data Action
   = Init
   | Opened Conn
   | Closed Conn
-  | Line Conn String
+  | Chunk Conn String
   | Tick
   | Open View
   | Command String
@@ -206,31 +210,18 @@ handle = case _ of
     H.modify_ _ { error = Just "The player went away. Reconnecting.", asked = [] }
     H.liftAff (delay (Milliseconds 2000.0))
     connect conn
-  Line conn l
-    | Mpd.isGreeting l -> do
-        modifyLink conn _ { ready = true }
-        H.modify_ _ { error = Nothing }
-        case conn of
-          Cmd -> refreshAll
-          Idle -> send Idle RFire idleCommand
-    | Mpd.isEnd l -> do
-        st <- H.get
-        let
-          block = maybe [] _.lines (linkOf conn st)
-        modifyLink conn _ { lines = [] }
-        case conn of
-          Idle -> do
-            changed block
-            send Idle RFire idleCommand
-          Cmd -> case uncons st.asked of
-            Nothing -> pure unit
-            Just { head: req, tail } -> do
-              H.modify_ _ { asked = tail }
-              -- A missing sticker is reported by MPD as an error; it is
-              -- the normal state of a track nobody attributed.
-              when (Mpd.isError l && not (isSticker req)) (H.modify_ _ { error = Just l })
-              unless (Mpd.isError l) (reply req block)
-    | otherwise -> modifyLink conn \k -> k { lines = snoc k.lines l }
+  Chunk conn raw -> do
+    st <- H.get
+    let
+      text = maybe "" _.partial (linkOf conn st) <> raw
+      pieces = split (Pattern "\n") text
+      complete = fromMaybe [] (Array.init pieces)
+      rest = fromMaybe "" (Array.last pieces)
+    modifyLink conn _ { partial = rest }
+    for_ complete \l -> do
+      let
+        line = fromMaybe l (stripSuffix (Pattern "\r") l)
+      unless (line == "") (received conn line)
   Tick -> do
     H.modify_ \st ->
       let
@@ -307,6 +298,34 @@ handle = case _ of
   PlayPos n -> send Cmd RFire ("play " <> show n)
   DeletePos n -> send Cmd RFire ("delete " <> show n)
   UpdateLibrary -> send Cmd RFire "update"
+
+-- | One complete line from MPD on one connection.
+received :: forall o m. MonadAff m => Conn -> String -> M o m Unit
+received conn l
+  | Mpd.isGreeting l = do
+      modifyLink conn _ { ready = true }
+      H.modify_ _ { error = Nothing }
+      case conn of
+        Cmd -> refreshAll
+        Idle -> send Idle RFire idleCommand
+  | Mpd.isEnd l = do
+      st <- H.get
+      let
+        block = maybe [] _.lines (linkOf conn st)
+      modifyLink conn _ { lines = [] }
+      case conn of
+        Idle -> do
+          changed block
+          send Idle RFire idleCommand
+        Cmd -> case uncons st.asked of
+          Nothing -> pure unit
+          Just { head: req, tail } -> do
+            H.modify_ _ { asked = tail }
+            -- A missing sticker is reported by MPD as an error; it is
+            -- the normal state of a track nobody attributed.
+            when (Mpd.isError l && not (isSticker req)) (H.modify_ _ { error = Just l })
+            unless (Mpd.isError l) (reply req block)
+  | otherwise = modifyLink conn \k -> k { lines = snoc k.lines l }
 
 -- | Send the slider's latest value, at most one setvol per 80 ms, until
 -- | the value stops changing; then let MPD's reports drive the slider again.
@@ -386,8 +405,8 @@ connect conn = do
   void $ H.subscribe $ HQE.eventListener WSE.onMessage target \ev -> do
     me <- ME.fromEvent ev
     s <- hush (runExcept (readString (ME.data_ me)))
-    pure (Line conn s)
-  setLink conn (Just { socket, ready: false, lines: [] })
+    pure (Chunk conn s)
+  setLink conn (Just { socket, ready: false, lines: [], partial: "" })
 
 linkOf :: Conn -> State -> Maybe Link
 linkOf = case _ of
