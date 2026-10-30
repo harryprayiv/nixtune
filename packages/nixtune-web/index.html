@@ -89,11 +89,14 @@ button:disabled { opacity: .45; cursor: default; }
 .mode.on { color: var(--fg); border-color: var(--accent); }
 
 /* The host's volume bar, pinned to the bottom on every view. */
-.volbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: .8rem; }
-.volbar input { flex: 1; min-width: 0; height: 2.4rem; padding: 0; margin: 0; background: transparent; border: 0; accent-color: var(--accent); touch-action: none; }
-.volbar .mute { font-size: 1.25rem; min-width: 3rem; min-height: 3rem; border-radius: 50%; }
+.volbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: .6rem; }
+.volbar .mute, .volbar .step { flex: none; font-size: 1.3rem; min-width: 3.1rem; min-height: 3.1rem; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 .volbar .mute.on { border-color: var(--error); color: var(--error); }
-.volbar .level { font: .9rem var(--mono); color: var(--muted); min-width: 2.2rem; text-align: right; }
+/* Display only. pointer-events off, so a tap that lands here does nothing
+   at all rather than setting a level. */
+.volbar .meter { flex: 1; min-width: 0; height: .5rem; background: var(--raised); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; pointer-events: none; }
+.volbar .fillv { height: 100%; background: var(--accent); }
+.volbar .level { flex: none; font: .95rem var(--mono); color: var(--fg); min-width: 2.2rem; text-align: right; }
 
 /* Lists: the queue, the library, the stations. */
 .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
