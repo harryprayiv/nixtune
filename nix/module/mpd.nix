@@ -65,6 +65,13 @@ in
           # is written on the NAS. library.nix rescans on a timer instead.
           auto_update = false;
           restore_paused = true;
+          # MPD builds a reply in one buffer and drops the client when the
+          # reply does not fit. The default is 8 MB, which `listall` over a
+          # library of this size exceeds, and which the tag browser's
+          # unfiltered `list artist` could reach on a large enough
+          # collection. Raising it costs nothing until a reply is actually
+          # that large, because the buffer grows on demand.
+          max_output_buffer_size = cfg.mpd.maxOutputBuffer;
           # The mixer level the DAC was left at is read back at start; the
           # page clamps changes to maxVolume. No software volume anywhere.
           replaygain = "off";

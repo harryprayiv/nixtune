@@ -37,7 +37,7 @@ import Types
   , underLetter
   , valuesOf
   )
-import Ui (classes, cls, icon, iconSized)
+import Ui (classes, cls, iconSized)
 import Volume (playerBar)
 import Web.Event.Event (EventType(..))
 

@@ -20,6 +20,7 @@ module Mpd
   , parseSongs
   , parseEntries
   , parseStats
+  , parseList
   , parseSticker
   , parseStickers
   , quote
@@ -35,6 +36,7 @@ module Mpd
 import Prelude
 
 import Data.Array (catMaybes, foldl, snoc)
+import Data.Array as Array
 import Data.Int (floor, fromString)
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe)
