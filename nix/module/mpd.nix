@@ -54,7 +54,15 @@ in
           bind_to_address = if cfg.mpd.exposeOnLan then "any" else "127.0.0.1";
           port = cfg.mpd.port;
           music_directory = musicDirectory;
-          auto_update = true;
+          # NOT auto_update. With it on, MPD walks the whole music tree
+          # installing an inotify watch per directory, on its main thread,
+          # before it reports ready to systemd (mpd_inotify_init runs
+          # before sd_notify in Main.cxx). On the first boot against the
+          # NAS that walk outlasted the start timeout and systemd killed
+          # MPD mid-scan. The watches would also never fire: the kernel
+          # emits inotify events for local writes only, and the library
+          # is written on the NAS. library.nix rescans on a timer instead.
+          auto_update = false;
           restore_paused = true;
           # The mixer level the DAC was left at is read back at start; the
           # page clamps changes to maxVolume. No software volume anywhere.

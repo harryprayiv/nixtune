@@ -1,6 +1,6 @@
 # Where the music comes from: one NFS export, mounted read-only at /srv/music,
-# with nofail and automount so a NAS that is down does not block boot and a
-# NAS that comes up later is picked up by MPD's auto_update.
+# with nofail and automount so a NAS that is down does not block boot, and a
+# rescan on a timer so files added on the NAS reach MPD's database.
 {
   config,
   lib,
@@ -9,6 +9,7 @@
 }:
 let
   cfg = config.services.nixtune;
+  mpc = "${lib.getExe pkgs.mpc} --host 127.0.0.1 --port ${toString cfg.mpd.port}";
 in
 {
   config = lib.mkIf (cfg.enable && cfg.library.export != null) {
@@ -57,6 +58,32 @@ in
         "network-online.target"
         "srv-music.automount"
       ];
+    };
+
+    # The rescan that replaces auto_update (see mpd.nix): `mpc update` asks
+    # MPD to walk the tree in its own update thread, which does not block
+    # anything. Two minutes after boot, so the first database is built
+    # without holding up MPD's start, and then daily. A rescan of an
+    # unchanged tree is cheap: MPD compares mtimes and reads nothing else.
+    systemd.services.nixtune-library-update = {
+      description = "nixtune: rescan the music library";
+      after = [ "mpd.service" ];
+      requires = [ "mpd.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${mpc} update";
+        DynamicUser = true;
+      };
+    };
+
+    systemd.timers.nixtune-library-update = {
+      description = "nixtune: rescan the music library after boot and daily";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "2min";
+        OnUnitActiveSec = "1d";
+        Unit = "nixtune-library-update.service";
+      };
     };
 
     environment.systemPackages = [ pkgs.nfs-utils ];
