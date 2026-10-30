@@ -34,4 +34,4 @@ package:
     type: app
 workspace:
   packageSet:
-    registry: 60.0.0
+    registry: 81.6.0
