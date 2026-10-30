@@ -32,7 +32,9 @@ import Data.Array as Array
 import Data.Either (Either(..), hush)
 import Data.Foldable (for_, lookup)
 import Data.Int (fromString, toNumber)
+import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe, isJust, isNothing, maybe)
+import Data.Number as Number
 import Data.String (Pattern(..), indexOf, joinWith, split, stripSuffix, trim)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
@@ -60,6 +62,7 @@ import Web.Socket.Event.EventTypes as WSE
 import Web.Socket.Event.MessageEvent as ME
 import Web.Socket.WebSocket (WebSocket)
 import Web.Socket.WebSocket as WS
+import Web.UIEvent.KeyboardEvent as KE
 import Web.Storage.Storage as Storage
 
 main :: Effect Unit
@@ -127,6 +130,13 @@ type State =
   , volSending :: Boolean
   -- The level to return to when unmuting. MPD has no mute of its own.
   , volBeforeMute :: Maybe Int
+  -- What is in the typed volume field while it is being edited. Nothing
+  -- means the field shows the live level; a report from MPD arriving
+  -- mid-keystroke must not overwrite what is being typed.
+  , volText :: Maybe String
+  -- Where the seek bar is being held. While this is set the one-second
+  -- tick leaves elapsed alone, so the thumb does not fight the clock.
+  , seekDraft :: Maybe Number
   }
 
 initial :: State
@@ -153,6 +163,8 @@ initial =
   , volSent: Nothing
   , volSending: false
   , volBeforeMute: Nothing
+  , volText: Nothing
+  , seekDraft: Nothing
   }
 
 data Action
@@ -164,7 +176,15 @@ data Action
   | Open View
   | Command String
   | SetVolume String
+  | Nudge Int
   | ToggleMute
+  | VolumeFocus
+  | VolumeText String
+  | CommitVolume
+  | VolumeKey String
+  | MoveQueue Int Int
+  | DragSeek String
+  | CommitSeek String
   | Browse String
   | SetQuery String
   | Search Event
@@ -232,7 +252,7 @@ handle = case _ of
       let
         st' = st { ticks = st.ticks + 1 }
       in
-        if st.status.state == Playing && st.status.duration > 0.0 && st.status.elapsed < st.status.duration then
+        if isNothing st.seekDraft && st.status.state == Playing && st.status.duration > 0.0 && st.status.elapsed < st.status.duration then
           st' { status = st.status { elapsed = st.status.elapsed + 1.0 } }
         else st'
     st <- H.get
@@ -251,6 +271,38 @@ handle = case _ of
     top <- H.gets maxVolumeOf
     H.modify_ _ { volBeforeMute = Nothing }
     setVolume (clamp volumeFloor top v)
+  Nudge by -> do
+    st <- H.get
+    for_ (shownVolume st) \now -> do
+      -- Floored like the bar, so a stepper can never silence the player.
+      let
+        v = clamp volumeFloor (maxVolumeOf st) (now + by)
+      when (v /= now) do
+        H.modify_ _ { volBeforeMute = Nothing }
+        setVolume v
+  VolumeFocus -> do
+    st <- H.get
+    H.modify_ _ { volText = Just (maybe "" show (shownVolume st)) }
+  VolumeText t -> H.modify_ _ { volText = Just t }
+  -- Committed on Enter and on leaving the field, not on the change event:
+  -- Halogen writes the value property on every render, which clears the
+  -- browser's dirty flag, and an input the browser thinks is unmodified
+  -- never fires change. Typing a level and pressing Done would have been
+  -- silently dropped.
+  CommitVolume -> do
+    st <- H.get
+    H.modify_ _ { volText = Nothing }
+    for_ (st.volText >>= (fromString <<< trim)) \typed -> do
+      -- A typed zero is a deliberate silence, so it is allowed where the
+      -- bar's floor forbids it, and it remembers where to come back to.
+      if typed <= 0 then do
+        for_ (shownVolume st) \now -> when (now > 0) (H.modify_ _ { volBeforeMute = Just now })
+        setVolume 0
+      else do
+        H.modify_ _ { volBeforeMute = Nothing }
+        setVolume (clamp volumeFloor (maxVolumeOf st) typed)
+  VolumeKey k -> when (k == "Enter") (handle CommitVolume)
+  MoveQueue from to -> send Cmd RFire ("move " <> show from <> " " <> show to)
   ToggleMute -> do
     st <- H.get
     for_ (shownVolume st) \now ->
@@ -266,6 +318,11 @@ handle = case _ of
           back = clamp volumeFloor (maxVolumeOf st) (fromMaybe unmuteFloor st.volBeforeMute)
         H.modify_ _ { volBeforeMute = Nothing }
         setVolume back
+  DragSeek raw -> for_ (Number.fromString raw) \t ->
+    H.modify_ _ { seekDraft = Just t }
+  CommitSeek raw -> for_ (Number.fromString raw) \t -> do
+    H.modify_ \st -> st { seekDraft = Nothing, status = st.status { elapsed = t } }
+    send Cmd RFire ("seekcur " <> show t)
   Browse p -> do
     H.modify_ _ { searched = Nothing, query = "" }
     browse p
@@ -275,7 +332,10 @@ handle = case _ of
     q <- H.gets (trim <<< _.query)
     unless (q == "") do
       H.modify_ _ { searched = Just q }
-      send Cmd (RSearch q) ("search any " <> Mpd.quote q)
+      -- window, because MPD closes a connection whose reply overruns its
+      -- output buffer, and "any" over a library this size can do that on
+      -- a common word. The page says when a result set was cut.
+      send Cmd (RSearch q) ("search any " <> Mpd.quote q <> " window 0:" <> show searchLimit)
   PlayStation s -> do
     send Cmd RFire "clear"
     send Cmd RFire ("add " <> Mpd.quote s.url)
@@ -329,11 +389,21 @@ received conn l
             unless (Mpd.isError l) (reply req block)
   | otherwise = modifyLink conn \k -> k { lines = snoc k.lines l }
 
+-- | The most results one search returns. MPD sends a reply in one piece
+-- | and drops the client if it does not fit its output buffer, so the
+-- | page asks for a window rather than everything that matches.
+searchLimit :: Int
+searchLimit = 200
+
 -- | The lowest level the bar itself can reach. The bar cannot silence the
 -- | player: zero belongs to the mute button, which remembers what to come
 -- | back to.
 volumeFloor :: Int
 volumeFloor = 1
+
+-- | What one press of a stepper moves the level by.
+volumeStep :: Int
+volumeStep = 5
 
 -- | Where unmute lands when no earlier level is remembered.
 unmuteFloor :: Int
@@ -593,20 +663,22 @@ nowPlaying st =
       , case st.current >>= \s -> whoAdded st s.file of
           Just who -> HH.div [ cls "added" ] [ HH.text ("added by " <> who) ]
           Nothing -> HH.text ""
-      , if st.status.duration > 0.0 then progress st.status else HH.text ""
+      , if st.status.duration > 0.0 then progress st else HH.text ""
       ]
   ]
     <>
       ( if st.role == Host then
           [ HH.div [ cls "controls" ]
-              [ HH.button [ HE.onClick \_ -> Command "previous" ] [ HH.text "⏮" ]
-              , HH.button [ cls "primary big", HE.onClick \_ -> Command playPause ] [ HH.text playGlyph ]
-              , HH.button [ HE.onClick \_ -> Command "stop" ] [ HH.text "⏹" ]
-              , HH.button [ HE.onClick \_ -> Command "next" ] [ HH.text "⏭" ]
+              [ HH.button [ HP.title "Previous", HE.onClick \_ -> Command "previous" ] [ icon "prev" ]
+              , HH.button [ cls "primary big", HP.title playTitle, HE.onClick \_ -> Command playPause ] [ iconSized "lg" playGlyph ]
+              , HH.button [ HP.title "Stop", HE.onClick \_ -> Command "stop" ] [ icon "stop" ]
+              , HH.button [ HP.title "Next", HE.onClick \_ -> Command "next" ] [ icon "next" ]
               ]
           , HH.div [ cls "modes" ]
               [ toggle "Random" st.status.random ("random " <> flag st.status.random)
               , toggle "Repeat" st.status.repeat ("repeat " <> flag st.status.repeat)
+              , toggle "Single" st.status.single ("single " <> flag st.status.single)
+              , toggle "Consume" st.status.consume ("consume " <> flag st.status.consume)
               ]
           ]
         else
@@ -617,7 +689,8 @@ nowPlaying st =
     Playing -> "pause 1"
     Paused -> "pause 0"
     Stopped -> "play"
-  playGlyph = if st.status.state == Playing then "⏸" else "▶"
+  playGlyph = if st.status.state == Playing then "pause" else "play"
+  playTitle = if st.status.state == Playing then "Pause" else "Play"
   flag b = if b then "0" else "1"
   stateLine = case st.status.state of
     Playing -> "Playing. Add something from the library and it joins the queue."
@@ -651,7 +724,7 @@ volumeBar st = case shownVolume st of
           , HP.title (if v == 0 then "Unmute" else "Mute")
           , HE.onClick \_ -> ToggleMute
           ]
-          [ HH.text (if v == 0 then "\x1f507" else "\x1f50a") ]
+          [ icon (if v == 0 then "mute" else "vol") ]
       , HH.div [ cls "track" ]
           [ HH.input
               [ HP.type_ HP.InputRange
@@ -664,38 +737,104 @@ volumeBar st = case shownVolume st of
               , HE.onValueInput SetVolume
               ]
           ]
-      , HH.span [ cls "level" ] [ HH.text (show v) ]
+      , HH.input
+          [ cls "level"
+          , HP.type_ HP.InputNumber
+          , HP.min 0.0
+          , HP.max (toNumber top)
+          , HP.step (HP.Step 1.0)
+          -- While the field has focus it shows what is being typed, so a
+          -- report from MPD landing between keystrokes cannot rewrite it.
+          , HP.value (fromMaybe (show v) st.volText)
+          , HP.title "Type a level"
+          , HE.onFocus \_ -> VolumeFocus
+          , HE.onValueInput VolumeText
+          , HE.onKeyDown (KE.key >>> VolumeKey)
+          , HE.onBlur \_ -> CommitVolume
+          ]
+      , HH.div [ cls "steps" ]
+          [ HH.button
+              [ HP.title ("Louder by " <> show volumeStep)
+              , HP.disabled (v >= top)
+              , HE.onClick \_ -> Nudge volumeStep
+              ]
+              [ iconSized "sm" "plus" ]
+          , HH.button
+              [ HP.title ("Quieter by " <> show volumeStep)
+              , HP.disabled (v <= volumeFloor)
+              , HE.onClick \_ -> Nudge (negate volumeStep)
+              ]
+              [ iconSized "sm" "minus" ]
+          ]
       ]
     where
     top = maxVolumeOf st
     span = top - volumeFloor
     pct =
-      if span > 0 then clamp 0.0 100.0 (toNumber (v - volumeFloor) / toNumber span * 100.0)
+      if span > 0 then clamp 0.0 100.0 (toNumber (max volumeFloor v - volumeFloor) / toNumber span * 100.0)
       else 0.0
 
-progress :: forall w i. Status -> HH.HTML w i
-progress s =
+-- | Elapsed, the bar, and the length. For the host the bar seeks: the
+-- | drag is held in seekDraft so the one-second tick does not move the
+-- | thumb under the finger, and the position is sent once, on release.
+progress :: forall m. State -> H.ComponentHTML Action () m
+progress st =
   HH.div [ cls "progress" ]
-    [ HH.span_ [ HH.text (Mpd.clock s.elapsed) ]
-    , HH.div [ cls "bar" ]
-        [ HH.div [ cls "fill", HP.style ("width:" <> show pct <> "%") ] [] ]
+    [ HH.span_ [ HH.text (Mpd.clock at) ]
+    , if st.role == Host then
+        HH.div [ cls "seek" ]
+          [ HH.input
+              [ HP.type_ HP.InputRange
+              , HP.min 0.0
+              , HP.max s.duration
+              , HP.step (HP.Step 1.0)
+              , HP.value (show (Int.round at))
+              , HP.style ("--pct:" <> show pct <> "%")
+              , HP.title "Seek"
+              , HE.onValueInput DragSeek
+              , HE.onValueChange CommitSeek
+              ]
+          ]
+      else
+        HH.div [ cls "bar" ]
+          [ HH.div [ cls "fill", HP.style ("width:" <> show pct <> "%") ] [] ]
     , HH.span_ [ HH.text (Mpd.clock s.duration) ]
     ]
   where
-  pct = if s.duration > 0.0 then clamp 0.0 100.0 (s.elapsed / s.duration * 100.0) else 0.0
+  s = st.status
+  at = fromMaybe s.elapsed st.seekDraft
+  pct = if s.duration > 0.0 then clamp 0.0 100.0 (at / s.duration * 100.0) else 0.0
 
 queueView :: forall m. State -> Array (H.ComponentHTML Action () m)
 queueView st =
   [ HH.div [ cls "row-actions" ]
       [ HH.button [ HP.disabled (null st.queue), HE.onClick \_ -> Command "clear" ] [ HH.text "Clear queue" ] ]
   , if null st.queue then HH.p [ cls "empty" ] [ HH.text "The queue is empty. Add something from the library or pick a station." ]
-    else HH.ul [ cls "list" ] (map item st.queue)
+    else HH.ul [ cls "list" ] (Array.mapWithIndex item st.queue)
   ]
   where
-  item s =
+  lastIndex = length st.queue - 1
+  -- Where the player is. Everything before it has been played, which is
+  -- what dims those rows; with random on the order is not the order they
+  -- were heard in, so nothing is dimmed.
+  playing = st.status.song
+  item i s =
     HH.li
-      [ classes ([ "song" ] <> (if s.pos /= Nothing && s.pos == st.status.song then [ "current" ] else [])) ]
-      [ HH.button [ cls "grow", HE.onClick \_ -> PlayPos (fromMaybe 0 s.pos) ]
+      [ classes
+          ( [ "song" ]
+              <> (if Just pos == playing then [ "current" ] else [])
+              <> (if not st.status.random && playing /= Nothing && Just pos < playing then [ "past" ] else [])
+          )
+      ]
+      [ HH.div [ cls "reorder" ]
+          [ HH.button
+              [ HP.title "Move up", HP.disabled (i == 0), HE.onClick \_ -> MoveQueue pos (pos - 1) ]
+              [ iconSized "sm" "up" ]
+          , HH.button
+              [ HP.title "Move down", HP.disabled (i == lastIndex), HE.onClick \_ -> MoveQueue pos (pos + 1) ]
+              [ iconSized "sm" "down" ]
+          ]
+      , HH.button [ cls "grow", HE.onClick \_ -> PlayPos pos ]
           [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
           , HH.div [ cls "line" ]
               [ HH.text
@@ -705,8 +844,13 @@ queueView st =
               ]
           ]
       , HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ]
-      , HH.button [ cls "ghost", HE.onClick \_ -> DeletePos (fromMaybe 0 s.pos) ] [ HH.text "✕" ]
+      , HH.button [ cls "ghost icon-btn", HP.title "Remove", HE.onClick \_ -> DeletePos pos ] [ iconSized "sm" "x" ]
       ]
+    where
+    -- The queue arrives in order, so the index is the position. Pos from
+    -- MPD is used when it is there and the index covers a reply that left
+    -- it out.
+    pos = fromMaybe i s.pos
 
 libraryView :: forall m. State -> Array (H.ComponentHTML Action () m)
 libraryView st =
@@ -723,7 +867,12 @@ libraryView st =
   , case st.searched of
       Just q ->
         HH.div [ cls "crumbs" ]
-          [ HH.span [ cls "crumb-static" ] [ HH.text ("Results for \"" <> q <> "\"") ]
+          [ HH.span [ cls "crumb-static" ]
+              [ HH.text
+                  ( "Results for \"" <> q <> "\""
+                      <> (if length st.entries >= searchLimit then " (first " <> show searchLimit <> ")" else "")
+                  )
+              ]
           , HH.button [ cls "crumb", HE.onClick \_ -> Browse st.path ] [ HH.text "✕ back to folders" ]
           ]
       Nothing -> HH.div [ cls "crumbs" ] (crumb "" "Library" : Array.mapWithIndex part parts)
@@ -752,13 +901,16 @@ libraryView st =
   entry = case _ of
     Dir d ->
       HH.li [ cls "dir" ]
-        [ HH.button [ cls "grow", HE.onClick \_ -> Browse d ] [ HH.text ("📁 " <> Mpd.basename d) ]
-        , HH.button [ cls "ghost", HE.onClick \_ -> AddPath d ] [ HH.text "+" ]
+        [ HH.button [ cls "grow", HE.onClick \_ -> Browse d ]
+            [ HH.span [ cls "rowicon" ] [ iconSized "sm" "folder" ], HH.text (Mpd.basename d) ]
+        , HH.button [ cls "ghost icon-btn", HP.title "Add this folder", HE.onClick \_ -> AddPath d ] [ iconSized "sm" "plus" ]
         ]
     Playlist p ->
       if st.role == Host then
         HH.li [ cls "dir" ]
-          [ HH.button [ cls "grow", HE.onClick \_ -> Command ("load " <> Mpd.quote p) ] [ HH.text ("📄 " <> p) ] ]
+          [ HH.button [ cls "grow", HE.onClick \_ -> Command ("load " <> Mpd.quote p) ]
+              [ HH.span [ cls "rowicon" ] [ iconSized "sm" "list" ], HH.text p ]
+          ]
       else HH.text ""
     File s ->
       HH.li [ cls "song" ]
@@ -768,7 +920,7 @@ libraryView st =
               ]
           , HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ]
           ]
-            <> (if st.role == Host then [ HH.button [ cls "ghost", HE.onClick \_ -> PlayPath s.file ] [ HH.text "▶" ] ] else [ HH.span [ cls "plus" ] [ HH.text "+" ] ])
+            <> (if st.role == Host then [ HH.button [ cls "ghost icon-btn", HP.title "Play this now", HE.onClick \_ -> PlayPath s.file ] [ iconSized "sm" "play" ] ] else [ HH.span [ cls "plus" ] [ iconSized "sm" "plus" ] ])
         )
 
 -- | What the library is doing, said plainly above the listing.
@@ -809,6 +961,14 @@ errorView :: forall w i. Maybe String -> HH.HTML w i
 errorView = case _ of
   Just e -> HH.p [ cls "error" ] [ HH.text e ]
   Nothing -> HH.text ""
+
+-- | One glyph from the set in index.html, painted with the colour of
+-- | whatever contains it.
+icon :: forall w i. String -> HH.HTML w i
+icon name = HH.span [ classes [ "i", "i-" <> name ] ] []
+
+iconSized :: forall w i. String -> String -> HH.HTML w i
+iconSized size name = HH.span [ classes [ "i", size, "i-" <> name ] ] []
 
 cls :: forall r i. String -> HP.IProp (class :: String | r) i
 cls = HP.class_ <<< HH.ClassName

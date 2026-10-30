@@ -50,6 +50,8 @@ type Status =
   , song :: Maybe Int
   , random :: Boolean
   , repeat :: Boolean
+  , single :: Boolean
+  , consume :: Boolean
   , updating :: Boolean
   , error :: Maybe String
   }
@@ -63,6 +65,8 @@ emptyStatus =
   , song: Nothing
   , random: false
   , repeat: false
+  , single: false
+  , consume: false
   , updating: false
   , error: Nothing
   }
@@ -114,12 +118,17 @@ parseStatus ls =
       Just "play" -> Playing
       Just "pause" -> Paused
       _ -> Stopped
-  , volume: lookup "volume" ps >>= fromString
+  -- MPD reports volume -1 when the output has no mixer at all. That is
+  -- not a level, so it reads as absent and the page shows no volume
+  -- control rather than a bar sitting at minus one.
+  , volume: lookup "volume" ps >>= fromString >>= \v -> if v < 0 then Nothing else Just v
   , elapsed: number "elapsed"
   , duration: number "duration"
   , song: lookup "song" ps >>= fromString
   , random: lookup "random" ps == Just "1"
   , repeat: lookup "repeat" ps == Just "1"
+  , single: lookup "single" ps == Just "1"
+  , consume: lookup "consume" ps == Just "1"
   , updating: lookup "updating_db" ps /= Nothing
   , error: lookup "error" ps
   }

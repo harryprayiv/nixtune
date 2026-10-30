@@ -81,18 +81,52 @@ button:disabled { opacity: .45; cursor: default; }
 .progress { display: flex; align-items: center; gap: .6rem; margin-top: .6rem; font: .8rem var(--mono); color: var(--muted); }
 .bar { flex: 1; height: .35rem; background: var(--raised); border-radius: 999px; overflow: hidden; }
 .fill { height: 100%; background: var(--accent); }
+/* The host's seek bar replaces the plain progress bar. Same styling rules
+   as the volume bar, so both read as the same control. */
+.progress .seek { flex: 1; min-width: 0; display: flex; align-items: center; }
+.progress input[type=range] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 2rem; margin: 0; padding: 0;
+  background: transparent; border: 0; touch-action: pan-y;
+}
+.progress input[type=range]::-webkit-slider-runnable-track {
+  height: .35rem; border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--pct), var(--raised) var(--pct));
+}
+.progress input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 1.1rem; height: 1.1rem; border-radius: 50%;
+  background: var(--fg); border: 2px solid var(--panel);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .45);
+  margin-top: -.4rem;
+}
+.progress input[type=range]::-moz-range-track {
+  height: .35rem; border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--pct), var(--raised) var(--pct));
+}
+.progress input[type=range]::-moz-range-thumb {
+  width: 1.1rem; height: 1.1rem; border-radius: 50%;
+  background: var(--fg); border: 2px solid var(--panel);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .45);
+}
 .controls { display: flex; justify-content: center; align-items: center; gap: .6rem; }
-.controls button { font-size: 1.25rem; min-width: 3.2rem; min-height: 3.2rem; border-radius: 50%; }
-.controls button.big { font-size: 1.6rem; min-width: 4.2rem; min-height: 4.2rem; }
+.controls button { min-width: 3.2rem; min-height: 3.2rem; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.controls button.big { min-width: 4.2rem; min-height: 4.2rem; }
 .modes { display: flex; justify-content: center; gap: .5rem; }
 .mode { color: var(--muted); }
 .mode.on { color: var(--fg); border-color: var(--accent); }
 
 /* The host's volume bar, pinned to the bottom on every view. */
 .volbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .5rem 1rem calc(.5rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 1rem; }
-.volbar .mute { flex: none; font-size: 1.3rem; width: 3.1rem; height: 3.1rem; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.volbar .mute { flex: none; width: 3.1rem; height: 3.1rem; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 .volbar .mute.on { border-color: var(--error); color: var(--error); }
-.volbar .level { flex: none; font: 1rem var(--mono); color: var(--fg); min-width: 2.4rem; text-align: right; }
+/* Type a level. A number input, so a phone offers digits and the browser
+   enforces the range. It commits on Enter and on leaving the field, never
+   per keystroke, so typing "45" does not pass through 4. */
+.volbar .level { flex: none; width: 3.4rem; padding: .35rem .3rem; font: 1rem var(--mono); text-align: center; -moz-appearance: textfield; }
+.volbar .level::-webkit-outer-spin-button, .volbar .level::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.volbar .steps { flex: none; display: flex; flex-direction: column; gap: .25rem; }
+.volbar .steps button { width: 2.4rem; height: 1.5rem; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 
 /* The bar. A range input, styled: the track is .5rem of colour and the
    whole control is 2.75rem tall, so the hit area is a thumb's worth while
@@ -130,14 +164,53 @@ button:disabled { opacity: .45; cursor: default; }
   box-shadow: 0 1px 4px rgba(0, 0, 0, .45);
 }
 
+/* ============================================================
+   ICONS
+   ============================================================
+   Every glyph on the page is an SVG drawn here and painted with
+   currentColor through a CSS mask, so it inherits the button's colour and
+   is exactly the same size in every browser. Emoji were doing neither: a
+   platform picks its own glyph, its own advance width and its own
+   baseline for them, which is what made the speaker shift in place
+   whenever it was redrawn. */
+.i { display: inline-block; width: 1.35rem; height: 1.35rem; flex: none; background: currentColor; -webkit-mask: var(--i) center / contain no-repeat; mask: var(--i) center / contain no-repeat; }
+.i.sm { width: 1.05rem; height: 1.05rem; }
+.i.lg { width: 1.7rem; height: 1.7rem; }
+.i-vol { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9h3l5-4v14l-5-4H4z' fill='%23000'/%3E%3Cpath d='M16.5 8.8a4.6 4.6 0 0 1 0 6.4'/%3E%3Cpath d='M19.3 6a8.5 8.5 0 0 1 0 12'/%3E%3C/svg%3E"); }
+.i-mute { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9h3l5-4v14l-5-4H4z' fill='%23000'/%3E%3Cpath d='M16.5 9.5l5 5M21.5 9.5l-5 5'/%3E%3C/svg%3E"); }
+.i-prev { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M19 5l-9 7 9 7z'/%3E%3Cpath d='M6 5v14' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.i-next { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M5 5l9 7-9 7z'/%3E%3Cpath d='M18 5v14' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.i-play { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M7 4.5l12 7.5-12 7.5z'/%3E%3C/svg%3E"); }
+.i-pause { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000'%3E%3Crect x='6.5' y='5' width='3.8' height='14' rx='1.2'/%3E%3Crect x='13.7' y='5' width='3.8' height='14' rx='1.2'/%3E%3C/svg%3E"); }
+.i-stop { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23000'%3E%3Crect x='6' y='6' width='12' height='12' rx='1.6'/%3E%3C/svg%3E"); }
+.i-plus { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E"); }
+.i-minus { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M5 12h14'/%3E%3C/svg%3E"); }
+.i-x { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E"); }
+.i-up { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 14.5l6-6 6 6'/%3E%3C/svg%3E"); }
+.i-down { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9.5l6 6 6-6'/%3E%3C/svg%3E"); }
+.i-folder { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M3 6.5h6l2 2.5h10v9.5H3z'/%3E%3C/svg%3E"); }
+.i-list { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M4 7h16M4 12h16M4 17h10'/%3E%3C/svg%3E"); }
+
 /* Lists: the queue, the library, the stations. */
 .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
 .list li { display: flex; align-items: center; gap: .4rem; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .25rem .25rem .25rem .5rem; }
 .list li.current { border-color: var(--accent); }
 .list .grow { flex: 1; text-align: left; background: transparent; border-color: transparent; padding: .5rem .4rem; min-width: 0; }
 .list .title { overflow-wrap: anywhere; }
+.rowicon { display: inline-flex; align-items: center; vertical-align: -.22rem; margin-right: .45rem; color: var(--muted); }
 .list .time { font: .8rem var(--mono); color: var(--muted); }
 .row-actions { display: flex; gap: .5rem; justify-content: flex-end; }
+
+/* Queue rows. The two arrows sit together on the left as one compact
+   column, so reordering is a thumb's width and never near the remove
+   button. A row the player has already passed is dimmed and struck
+   through, and stays in the queue until the queue is cleared. */
+.reorder { flex: none; display: flex; flex-direction: column; gap: .15rem; }
+.reorder button { width: 1.9rem; height: 1.35rem; padding: 0; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: var(--muted); background: transparent; border-color: transparent; }
+.reorder button:hover:not(:disabled) { background: var(--raised); border-color: var(--line); color: var(--fg); }
+.list li.past { opacity: .5; }
+.list li.past .title { text-decoration: line-through; }
+.list li .icon-btn { padding: .5rem; display: flex; align-items: center; justify-content: center; }
 .crumbs { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; }
 .crumb { background: transparent; border-color: transparent; color: var(--accent); padding: .25rem .4rem; }
 .crumb + .crumb::before { content: "/"; color: var(--muted); margin-right: .4rem; }

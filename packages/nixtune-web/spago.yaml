@@ -27,6 +27,7 @@ package:
     - web-html
     - web-socket
     - web-storage
+    - web-uievents
   bundle:
     module: Main
     outfile: index.js
