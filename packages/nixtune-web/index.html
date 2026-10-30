@@ -87,8 +87,13 @@ button:disabled { opacity: .45; cursor: default; }
 .modes { display: flex; justify-content: center; gap: .5rem; }
 .mode { color: var(--muted); }
 .mode.on { color: var(--fg); border-color: var(--accent); }
-.volume { display: flex; flex-direction: column; gap: .3rem; font-size: .85rem; color: var(--muted); }
-.volume input { width: 100%; padding: 0; background: transparent; border: 0; accent-color: var(--accent); }
+
+/* The host's volume bar, pinned to the bottom on every view. */
+.volbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: .8rem; }
+.volbar input { flex: 1; min-width: 0; height: 2.4rem; padding: 0; margin: 0; background: transparent; border: 0; accent-color: var(--accent); touch-action: none; }
+.volbar .mute { font-size: 1.25rem; min-width: 3rem; min-height: 3rem; border-radius: 50%; }
+.volbar .mute.on { border-color: var(--error); color: var(--error); }
+.volbar .level { font: .9rem var(--mono); color: var(--muted); min-width: 2.2rem; text-align: right; }
 
 /* Lists: the queue, the library, the stations. */
 .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
@@ -110,6 +115,12 @@ button:disabled { opacity: .45; cursor: default; }
 .crumb-static { color: var(--muted); padding: .25rem .4rem; }
 .plus { color: var(--muted); padding: 0 .6rem; font-size: 1.2rem; }
 .badge.scanning { color: var(--accent); border-color: var(--accent); }
+
+/* The library's own status line. */
+.scan { display: flex; align-items: center; gap: .7rem; background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 10px; padding: .6rem .8rem; font-size: .9rem; }
+.scan.idle { background: var(--raised); border-color: var(--line); color: var(--muted); }
+.spin { width: .9rem; height: .9rem; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .qr { display: flex; flex-direction: column; align-items: center; gap: .75rem; padding-top: 1rem; }
 .qr img { width: min(80vw, 22rem); height: auto; background: #fff; padding: .75rem; border-radius: 12px; }
 .qr .url { font: 1rem var(--mono); margin: 0; overflow-wrap: anywhere; text-align: center; }

@@ -111,6 +111,14 @@ type State =
   , entries :: Array Entry
   , addedBy :: Array (Tuple String String)
   , error :: Maybe String
+  , ticks :: Int
+  -- Volume the slider shows while a drag is in flight, and whether a
+  -- setvol is being sent for it. While a draft exists, MPD's own reports
+  -- do not move the slider under the finger.
+  , volDraft :: Maybe Int
+  , volBusy :: Boolean
+  -- The level to return to when unmuting. MPD has no mute of its own.
+  , volBeforeMute :: Maybe Int
   }
 
 initial :: State
@@ -132,6 +140,10 @@ initial =
   , entries: []
   , addedBy: []
   , error: Nothing
+  , ticks: 0
+  , volDraft: Nothing
+  , volBusy: false
+  , volBeforeMute: Nothing
   }
 
 data Action
@@ -143,6 +155,7 @@ data Action
   | Open View
   | Command String
   | SetVolume String
+  | ToggleMute
   | Browse String
   | SetQuery String
   | Search Event
@@ -218,10 +231,20 @@ handle = case _ of
               when (Mpd.isError l && not (isSticker req)) (H.modify_ _ { error = Just l })
               unless (Mpd.isError l) (reply req block)
     | otherwise -> modifyLink conn \k -> k { lines = snoc k.lines l }
-  Tick -> H.modify_ \st ->
-    if st.status.state == Playing && st.status.duration > 0.0 && st.status.elapsed < st.status.duration then
-      st { status = st.status { elapsed = st.status.elapsed + 1.0 } }
-    else st
+  Tick -> do
+    H.modify_ \st ->
+      let
+        st' = st { ticks = st.ticks + 1 }
+      in
+        if st.status.state == Playing && st.status.duration > 0.0 && st.status.elapsed < st.status.duration then
+          st' { status = st.status { elapsed = st.status.elapsed + 1.0 } }
+        else st'
+    st <- H.get
+    -- A scan that runs for days changes the "database" subsystem only at
+    -- its end, so the count is asked for every ten seconds while it runs.
+    when (st.status.updating && st.ticks `mod` 10 == 0) do
+      send Cmd RStats "stats"
+      when (st.view == Library && isNothing st.searched) (browse st.path)
   Open v -> do
     H.modify_ _ { view = v }
     when (v == Library) do
@@ -231,8 +254,25 @@ handle = case _ of
   SetVolume s -> do
     top <- H.gets (maybe 100 _.maxVolume <<< _.caps)
     case fromString s of
-      Just v -> send Cmd RFire ("setvol " <> show (clamp 0 top v))
       Nothing -> pure unit
+      Just raw -> do
+        let
+          v = clamp 0 top raw
+        busy <- H.gets _.volBusy
+        H.modify_ _ { volDraft = Just v, volBeforeMute = Nothing }
+        unless busy do
+          H.modify_ _ { volBusy = true }
+          void (H.fork flushVolume)
+  ToggleMute -> do
+    st <- H.get
+    case st.volBeforeMute, shownVolume st of
+      Just back, _ -> do
+        H.modify_ _ { volBeforeMute = Nothing, volDraft = Just back }
+        send Cmd RFire ("setvol " <> show back)
+      Nothing, Just v | v > 0 -> do
+        H.modify_ _ { volBeforeMute = Just v, volDraft = Just 0 }
+        send Cmd RFire "setvol 0"
+      _, _ -> pure unit
   Browse p -> do
     H.modify_ _ { searched = Nothing, query = "" }
     browse p
@@ -267,6 +307,26 @@ handle = case _ of
   PlayPos n -> send Cmd RFire ("play " <> show n)
   DeletePos n -> send Cmd RFire ("delete " <> show n)
   UpdateLibrary -> send Cmd RFire "update"
+
+-- | Send the slider's latest value, at most one setvol per 80 ms, until
+-- | the value stops changing; then let MPD's reports drive the slider again.
+flushVolume :: forall o m. MonadAff m => M o m Unit
+flushVolume = do
+  draft <- H.gets _.volDraft
+  case draft of
+    Nothing -> H.modify_ _ { volBusy = false }
+    Just v -> do
+      send Cmd RFire ("setvol " <> show v)
+      H.liftAff (delay (Milliseconds 80.0))
+      again <- H.gets _.volDraft
+      if again == Just v then H.modify_ _ { volBusy = false, volDraft = Nothing }
+      else flushVolume
+
+-- | The level the slider shows: the drag in flight, else MPD's.
+shownVolume :: State -> Maybe Int
+shownVolume st = case st.volDraft of
+  Just v -> Just v
+  Nothing -> st.status.volume
 
 isSticker :: Req -> Boolean
 isSticker = case _ of
@@ -433,7 +493,7 @@ render st = HH.main_
       Radio -> radioView stations
       Qr -> qrView st
   , errorView st.error
-  , if st.role == Guest then HH.footer [ cls "me" ] [ HH.text ("you are " <> st.nickname) ] else HH.text ""
+  , if st.role == Host then volumeBar st else HH.footer [ cls "me" ] [ HH.text ("you are " <> st.nickname) ]
   ]
   where
   online = maybe false _.ready st.cmd
@@ -495,26 +555,11 @@ nowPlaying st =
               [ toggle "Random" st.status.random ("random " <> flag st.status.random)
               , toggle "Repeat" st.status.repeat ("repeat " <> flag st.status.repeat)
               ]
-          , case st.status.volume of
-              Just v ->
-                HH.label [ cls "volume" ]
-                  [ HH.span_ [ HH.text ("Volume " <> show v) ]
-                  , HH.input
-                      [ HP.type_ HP.InputRange
-                      , HP.min 0.0
-                      , HP.max (toNumber top)
-                      , HP.step (HP.Step 1.0)
-                      , HP.value (show v)
-                      , HE.onValueInput SetVolume
-                      ]
-                  ]
-              Nothing -> HH.text ""
           ]
         else
           [ HH.p [ cls "note" ] [ HH.text stateLine ] ]
       )
   where
-  top = maybe 100 _.maxVolume st.caps
   playPause = case st.status.state of
     Playing -> "pause 1"
     Paused -> "pause 0"
@@ -531,6 +576,35 @@ nowPlaying st =
       , HE.onClick \_ -> Command command
       ]
       [ HH.text label ]
+
+-- | The host's volume, on every view: mute, slider, level. Pinned to the
+-- | bottom of the page so it is under the thumb whatever is on screen.
+volumeBar :: forall m. State -> H.ComponentHTML Action () m
+volumeBar st = case shownVolume st of
+  Nothing -> HH.text ""
+  Just v ->
+    HH.div [ cls "volbar" ]
+      [ HH.button
+          [ classes ([ "mute" ] <> (if muted then [ "on" ] else []))
+          , HP.title (if muted then "Unmute" else "Mute")
+          , HE.onClick \_ -> ToggleMute
+          ]
+          [ HH.text (if muted then "🔇" else "🔊") ]
+      , HH.input
+          [ HP.type_ HP.InputRange
+          , HP.min 0.0
+          , HP.max (toNumber top)
+          , HP.step (HP.Step 1.0)
+          , HP.value (show v)
+          , HE.onValueInput SetVolume
+          ]
+      , HH.span [ cls "level" ] [ HH.text (show v) ]
+      ]
+  where
+  top = maybe 100 _.maxVolume st.caps
+  muted = isJust st.volBeforeMute || v == 0
+    where
+    v = fromMaybe 0 (shownVolume st)
 
 progress :: forall w i. Status -> HH.HTML w i
 progress s =
@@ -578,6 +652,7 @@ libraryView st =
           ]
       , HH.button [ HP.type_ HP.ButtonSubmit ] [ HH.text "Search" ]
       ]
+  , scanBanner st
   , case st.searched of
       Just q ->
         HH.div [ cls "crumbs" ]
@@ -628,6 +703,19 @@ libraryView st =
           ]
             <> (if st.role == Host then [ HH.button [ cls "ghost", HE.onClick \_ -> PlayPath s.file ] [ HH.text "▶" ] ] else [ HH.span [ cls "plus" ] [ HH.text "+" ] ])
         )
+
+-- | What the library is doing, said plainly above the listing.
+scanBanner :: forall w i. State -> HH.HTML w i
+scanBanner st =
+  if st.status.updating then
+    HH.div [ cls "scan" ]
+      [ HH.span [ cls "spin" ] []
+      , HH.span_ [ HH.text ("Scanning the library: " <> show st.songs <> " songs so far. Folders already read are browsable below; the count refreshes every ten seconds.") ]
+      ]
+  else if st.songs == 0 then
+    HH.div [ cls "scan idle" ]
+      [ HH.span_ [ HH.text "The library has not been scanned. The first scan starts two minutes after boot; if the NAS was down then, the host can start it with Rescan library." ] ]
+  else HH.text ""
 
 radioView :: forall m. Array Station -> Array (H.ComponentHTML Action () m)
 radioView stations =
