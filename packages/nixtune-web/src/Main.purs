@@ -66,12 +66,15 @@ import Page (render)
 import Reorder (dragTarget, rowMiddles)
 import Types
   ( Action(..)
+  , Axis(..)
+  , BrowseMode(..)
   , Conn(..)
   , M
   , Req(..)
   , Role(..)
   , View(..)
   , arrived
+  , tagOf
   , idleCommand
   , initial
   , isSticker
@@ -156,7 +159,9 @@ handle = case _ of
     H.modify_ _ { view = v }
     when (v == Library) do
       st <- H.get
-      when (isNothing st.searched) (browse st.path)
+      when (isNothing st.searched) $ case st.mode of
+        Folders -> browse st.path
+        Tags -> refreshTags
   Command c -> send Cmd RFire c
   SetVolume raw -> for_ (fromString raw) \v -> do
     top <- H.gets maxVolumeOf
@@ -272,8 +277,59 @@ handle = case _ of
     H.modify_ \st -> st { seekDraft = Nothing, status = st.status { elapsed = t } }
     send Cmd RFire ("seekcur " <> show t)
   Browse p -> do
-    H.modify_ _ { searched = Nothing, query = "" }
+    H.modify_ _ { searched = Nothing, query = "", mode = Folders }
     browse p
+  SetMode m -> do
+    H.modify_ _ { mode = m, searched = Nothing, query = "" }
+    st <- H.get
+    case m of
+      Folders -> browse st.path
+      Tags -> refreshTags
+  ToggleGenreColumn -> do
+    on <- H.gets _.genreColumn
+    -- Turning the column off also drops whatever it was filtering by,
+    -- so the artist list is not left narrowed by a column nobody can see.
+    H.modify_ _
+      { genreColumn = not on
+      , selGenre = Nothing
+      , letterGenre = Nothing
+      , selArtist = Nothing
+      , selAlbum = Nothing
+      , albums = []
+      , tagTracks = []
+      }
+    refreshTags
+  Pick axis v -> case axis of
+    AxGenre -> do
+      H.modify_ _
+        { selGenre = v
+        , selArtist = Nothing
+        , selAlbum = Nothing
+        , artists = []
+        , albums = []
+        , tagTracks = []
+        , letterArtist = Nothing
+        , letterAlbum = Nothing
+        }
+      loadArtists
+    AxArtist -> do
+      H.modify_ _
+        { selArtist = v
+        , selAlbum = Nothing
+        , albums = []
+        , tagTracks = []
+        , letterAlbum = Nothing
+        }
+      for_ v \_ -> loadAlbums
+    AxAlbum -> do
+      H.modify_ _ { selAlbum = v, tagTracks = [] }
+      for_ v \_ -> loadTracks
+  PickLetter axis l -> H.modify_ case axis of
+    AxGenre -> _ { letterGenre = l }
+    AxArtist -> _ { letterArtist = l }
+    AxAlbum -> _ { letterAlbum = l }
+  AddAlbum -> albumCommand false
+  PlayAlbum -> albumCommand true
   SetQuery q -> H.modify_ _ { query = q }
   Search ev -> do
     liftEffect (preventDefault ev)
@@ -308,6 +364,51 @@ handle = case _ of
   PlayPos n -> send Cmd RFire ("play " <> show n)
   DeletePos n -> send Cmd RFire ("delete " <> show n)
   UpdateLibrary -> send Cmd RFire "update"
+
+-- | Load whichever columns the current selection calls for. `list genre`
+-- | is a few hundred rows and is asked for unconditionally while the
+-- | column is shown; the columns to its right are always bounded by the
+-- | selection to their left.
+refreshTags :: forall o m. MonadAff m => M o m Unit
+refreshTags = do
+  st <- H.get
+  when st.genreColumn (send Cmd (RTagValues AxGenre) ("list " <> tagOf AxGenre))
+  loadArtists
+
+loadArtists :: forall o m. MonadAff m => M o m Unit
+loadArtists = do
+  st <- H.get
+  send Cmd (RTagValues AxArtist) $ case st.selGenre of
+    Just g | st.genreColumn -> "list artist genre " <> Mpd.quote g
+    _ -> "list artist"
+
+loadAlbums :: forall o m. MonadAff m => M o m Unit
+loadAlbums = do
+  st <- H.get
+  for_ st.selArtist \a ->
+    send Cmd (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
+
+loadTracks :: forall o m. MonadAff m => M o m Unit
+loadTracks = do
+  st <- H.get
+  case st.selArtist, st.selAlbum of
+    Just a, Just alb ->
+      send Cmd RTagTracks ("find album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
+    _, _ -> pure unit
+
+-- | Queue the selected album. `findadd` does it in one command, so a
+-- | twenty track album is one round trip and not twenty.
+albumCommand :: forall o m. MonadAff m => Boolean -> M o m Unit
+albumCommand play = do
+  st <- H.get
+  case st.selArtist, st.selAlbum of
+    Just a, Just alb -> do
+      when play (send Cmd RFire "clear")
+      send Cmd RFire ("findadd album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
+      when play do
+        send Cmd RFire "play"
+        H.modify_ _ { view = NowPlaying }
+    _, _ -> pure unit
 
 -- | One complete line from MPD on one connection.
 received :: forall o m. MonadAff m => Conn -> String -> M o m Unit
@@ -347,7 +448,9 @@ changed block = do
   when (elem "changed: database" block || elem "changed: update" block) do
     send Cmd RStats "stats"
     st <- H.get
-    when (st.view == Library && isNothing st.searched) (browse st.path)
+    when (st.view == Library && isNothing st.searched) $ case st.mode of
+      Folders -> browse st.path
+      Tags -> refreshTags
 
 -- | A command connection's reply, read against what was asked.
 reply :: forall o m. MonadAff m => Req -> Array String -> M o m Unit
@@ -380,4 +483,8 @@ reply req block = case req of
   RBrowse p -> H.modify_ _ { path = p, entries = Mpd.parseEntries block }
   RSearch _ -> H.modify_ _ { entries = Mpd.parseEntries block }
   RStickers -> H.modify_ _ { addedBy = Mpd.parseStickers block }
+  RTagValues AxGenre -> H.modify_ _ { genres = Mpd.parseList "Genre" block }
+  RTagValues AxArtist -> H.modify_ _ { artists = Mpd.parseList "Artist" block }
+  RTagValues AxAlbum -> H.modify_ _ { albums = Mpd.parseList "Album" block }
+  RTagTracks -> H.modify_ _ { tagTracks = Mpd.parseSongs block }
   RFire -> pure unit

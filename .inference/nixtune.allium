@@ -7,63 +7,89 @@
 -- does, with none of moOde's code, none of its name, and none of its
 -- runtime configuration machinery.
 --
--- STATE OF THE WORLD, 2026-10-30, 03:00. The hardware works. This
--- revision records how it got there and specifies the next thing,
--- the page as a shared player for a room.
+-- STATE OF THE WORLD, 2026-10-30, 19:30. The hardware works, the room
+-- page works, and the ambition has grown: this revision records what
+-- shipped since 03:00, specifies the next page (one transport bar and a
+-- three-column tag browser), and names the point at which the DJ
+-- ambition stops being an extension of this design and becomes a
+-- different one.
 --
---   Repositories (both on winsmuth; neither pushed):
---     ~/git/nixtune             the public flake: flake.nix, nix/module/
---                               {default,hardware,mpd,library,ui,airplay,
---                               upnp}.nix, packages/upmpdcli.nix,
---                               packages/nixtune-web/. Its flake.lock pins
---                               nixpkgs to 6510408d (KnownIssue
+--   Repositories:
+--     ~/git/nixtune             the public flake, PUSHED to
+--                               github:harryprayiv/nixtune. nix/module/
+--                               {default,hardware,mpd,library,database,
+--                               volume,art,ui,airplay,upnp}.nix,
+--                               packages/upmpdcli.nix,
+--                               packages/nixtune-web/. Its flake.lock
+--                               pins nixpkgs to 6510408d (KnownIssue
 --                               purescript_segfault). A devShell carries
 --                               spago from purescript-overlay for editing
 --                               the lock; consumers never evaluate it.
 --     ~/neoblade-config         the fleet. Input `nixtune` =
---                               git+file:///home/bismuth/git/nixtune,
---                               nixpkgs following. Adapter role
+--                               github:harryprayiv/nixtune, nixpkgs
+--                               following. The input is a GITHUB input,
+--                               so a change in the working tree is
+--                               invisible to the fleet until it is
+--                               pushed and `nix flake update nixtune
+--                               --tarball-ttl 0` has run. A night was
+--                               lost to that once. Adapter role
 --                               modules/system/player.nix; rows `nixtune`
 --                               (aarch64, Pi) and `nixtune-vm` (x86 QEMU);
 --                               facts in hosts/nixtune.nix and
 --                               hosts/nixtune-vm.nix. deployAddr is the
 --                               NAME nixtune.lan, which the router's DNS
 --                               gives to whichever interface holds the
---                               lease; the earlier plan of one reserved
---                               address per MAC was abandoned because the
---                               wired and wireless MACs differ.
+--                               lease.
+--
+--   The library, measured 2026-10-30: about 55k MP3 and 18.5k FLAC
+--   entries in MPD's tag_cache. Roughly a quarter lossless. No cover
+--   files beside the audio anywhere; the art is inside the files, as
+--   ID3v2 APIC frames and FLAC PICTURE blocks. Every album directory
+--   also carries Synology's @eaDir and .checksums, which are pruned
+--   everywhere the player walks the tree. A queue of 220 entries is an
+--   ordinary working size, which is the load the page is measured at.
 --
 --   Verified on the Pi (Raspberry Pi 5 Model B Rev 1.1, HiFiBerry DAC2
 --   HD, Samsung 128 GB card):
 --     - Boots the generic aarch64 SD image with U-Boot chainloaded by the
---       GPU firmware (hardware.raspberry-pi.firmware.uboot.enable, set
---       by the module when nixos-hardware's Pi options are present).
+--       GPU firmware.
 --     - The DAC appears as ALSA card sndrpihifiberry with mixer control
---       DAC; MPD plays GBH 89.7 through it with hardware volume. The
---       overlay arrives as a config.txt dtoverlay line rendered by
---       nixos-hardware; the compatible-string rewrite for the generation
---       DTB path is kept but unused on this boot path.
---     - mpd, nixtune-websocket, nginx, shairport-sync active; no failed
---       units after the ordering fix in library.nix and auto_update off.
+--       DAC, limits 0 to 240 in 0.5 dB steps.
+--     - mpd, nixtune-websocket, nginx, shairport-sync, nixtune-volume
+--       and its websocat bridge all active.
 --     - /srv/music mounts from the Synology; the rescan timer runs two
 --       minutes after boot and daily.
---     - Wifi: secrets/nixtune.yaml holds user-password and wifi-psk
---       (PSK=... form), the profile PissiNet-5G is written from the sops
---       path, and the cable has come out.
+--     - Wifi: secrets/nixtune.yaml holds user-password and wifi-psk.
+--
 --   Lessons that cost a night, written down so they are not paid twice:
---     - nixpkgs' online first-boot resize of the ext4 root (sd-image's
---       expandOnBoot) corrupted directory blocks across the nixpkgs
---       source in the store; the image file was clean (e2fsck -fn on a
---       loop device), the card stored the image byte for byte (sha256
---       over the image length, modulo the few bytes a desktop automount
---       writes), and a card grown OFFLINE on winsmuth (sfdisk, e2fsck,
---       resize2fs) booted clean. KnownIssue sd_resize below.
+--     - nixpkgs' online first-boot resize of the ext4 root corrupted
+--       directory blocks across the store; grow the card OFFLINE on
+--       winsmuth. KnownIssue sd_resize.
 --     - MPD's auto_update installs inotify watches over the whole tree
 --       on its main thread before notifying systemd; on a vast NFS
---       library this exceeded the start timeout. inotify never fires for
---       NFS writes anyway. Off; a timer runs `mpc update`.
---     - A host reads capabilities.json once at page load; a stale tab
---       keeps a stale station list.
+--       library this exceeded the start timeout, and inotify never fires
+--       for NFS writes anyway. Off; a timer runs `mpc update`.
+--     - websocat -t frames by TCP READ, not by line. One websocket
+--       message can hold a whole MPD reply or stop in the middle of a
+--       line. The page accumulates a partial tail and splits on newline.
+--       Before that fix the page had never read a single reply from the
+--       real player, and three rounds of blaming browser caching went by
+--       first.
+--     - Every file in the Nix store has mtime 1970-01-01. nginx sends
+--       that as Last-Modified with no lifetime and a browser applies
+--       heuristic freshness, about five years. The page is served
+--       no-store with etag and if_modified_since off.
+--     - MPD URIs are relative to music_directory. Changing the export
+--       silently invalidates every URI in the database and the queue
+--       fails without saying why. database.nix stamps the export beside
+--       the database and drops the database on a mismatch.
+--     - MPD closes a client whose reply overruns its output buffer.
+--       `listall` on this library does it; so does an unwindowed
+--       `search any` on a common word. Every unbounded listing command
+--       is either windowed or not used. KnownIssue listall_overruns.
+--     - Halogen writes an input's value property on every render, which
+--       clears the browser's dirty flag, so a controlled input never
+--       fires `change`. A typed value is committed on Enter and on blur.
 --     - e2fsprogs and parted are not on winsmuth; every tool outside
 --       coreutils and util-linux is invoked through `nix shell`.
 --
@@ -71,64 +97,201 @@
 --
 --   1. The only source of configuration is the Nix declaration. No
 --      settings database, no settings page, no daemon that rewrites
---      /etc or /boot.
+--      /etc or /boot. Decision 21 is where this is under pressure.
 --   2. Every optional capability is a sub-option with an enable flag
 --      defaulting to false; a disabled one contributes nothing.
 --   3. The page is a Halogen single page application that speaks the
 --      MPD protocol itself over websockets bridged by websocat. There is
---      no backend code on the Pi, and decision 8 below is made under
---      that constraint.
+--      no application server on the Pi. Decisions 8, 14 and 15 are all
+--      consequences of holding this line, and decision 22 is where it
+--      would have to break.
 --   4. No over the air updates. Updates arrive only as new generations.
 --   5. The root filesystem is NOT ephemeral yet; the module publishes
 --      persistPaths and the fleet adapter maps it into the manifest.
+--      persistPaths is no longer readOnly: more than one part of the
+--      module owns state, and the definitions merge.
 --   6. Two layers, one boundary: the public module knows no fleet; the
 --      adapter maps fleet facts into its options.
 --   7. Maintenance is `nix flake update` on an update branch, CI, merge.
 --
--- Decisions taken 2026-10-30 (the page as a room's player, from a
--- questionnaire):
+-- Decisions taken 2026-10-30 (the page as a room's player):
 --   8. ROLES WITHOUT A BACKEND. Two pages from one bundle: the guest
 --      page at / and the host page at /host. The QR code on the host
---      page encodes the guest URL. There is no token and no rotation:
---      a rotating token needs something on the Pi that issues and
---      checks it, and the decision was to keep the Pi free of
---      application servers rather than add one for this. The host URL
---      is a path known to the host; it is not a secret in any strong
---      sense. THE CONSEQUENCE, stated plainly: role limits are enforced
---      by the page, not by the Pi. Both pages reach the same websocket,
---      and a guest who opens a browser console can send any MPD command.
---      This is accepted for a LAN of invited people. A filtering proxy
---      between websocat and MPD is the upgrade path if that stops being
---      acceptable; it is an open question, not a plan.
+--      page encodes the guest URL. There is no token and no rotation.
+--      THE CONSEQUENCE, stated plainly: role limits are enforced by the
+--      page, not by the Pi. Both pages reach the same websocket, and a
+--      guest who opens a browser console can send any MPD command. This
+--      is accepted for a LAN of invited people. A filtering proxy
+--      between websocat and MPD is the upgrade path.
 --   9. GUESTS APPEND ONLY. A guest sees now playing (read-only) and the
---      library (browse first; search secondary), and may add a track or
---      a folder to the END of the queue. Guests do not see the queue, do
---      not remove or reorder, do not skip, do not touch transport or
---      volume. The host page has everything the page has today plus the
---      QR, the attribution column and the scan indicator.
+--      library, and may add a track or a folder to the END of the queue.
+--      Guests do not see the queue, do not remove or reorder, do not
+--      skip, do not touch transport or volume.
 --  10. GUEST IDENTITY IS A NICKNAME PER DEVICE, generated by the page on
---      first visit (adjective plus animal, from word lists in the
---      bundle), kept in that browser's localStorage, never prompted for.
---      Attribution lives in MPD stickers: on append the page sets
---      sticker song <uri> nixtune.added_by <nickname>; the host's queue
---      view reads it back. Stickers are per URI, not per queue entry,
---      so the same file added twice shows the latest adder; accepted.
+--      first visit (adjective plus animal), kept in that browser's
+--      localStorage, never prompted for. Attribution lives in MPD
+--      stickers under nixtune.added_by.
 --  11. LIBRARY = Music/ ONLY. library.export points at
---      /volume2/music/Music; audiobooks, ringtones and the rename
---      queues are outside MPD's world. The first scan runs for days in
---      the background on the Pi; the page shows a quiet indicator (song
---      count and "scanning") in the header until updating_db clears,
---      and everything already scanned is browsable meanwhile.
---  12. NO COVER ART in this release; text only.
---  13. THE QR IS BUILT BY NIX: qrencode renders the guest URL
---      (services.nixtune.ui.publicUrl, default http://<hostname>.lan/)
---      to qr.svg in the closure, served beside the page. No QR library
---      in the bundle, nothing generated at runtime.
+--      /volume2/music/Music. The first scan runs for days in the
+--      background; the page shows a quiet indicator until updating_db
+--      clears, and everything already scanned is browsable meanwhile.
+--      database.nix disables all nine playlist plugins so only audio is
+--      indexed.
+--  13. THE QR IS BUILT BY NIX: qrencode renders the guest URL to qr.svg
+--      in the closure. No QR library in the bundle.
+--
+-- Decisions taken 2026-10-30 evening, from running the thing:
+--
+--  12. SUPERSEDED. "No cover art" lasted one day. See decision 15.
+--
+--  14. THE HARDWARE VOLUME IS WRITTEN BY A HELPER, NOT BY MPD.
+--      MPD sets volume through snd_mixer_selem_set_playback_dB_all
+--      (src/mixer/plugins/VolumeMapping.cxx) whenever the control's dB
+--      range exceeds 24 dB. The DAC2 HD's range is 120 dB, so MPD always
+--      takes that path, and on this card every setvol through it lands
+--      on raw 0, a hard mute that stays. Measured: five consecutive
+--      setvol commands at 30, 60, 90, 40 and 75 all left the control at
+--      0. The same card takes amixer writes, raw and mapped, and they
+--      hold.
+--      So: MPD keeps the mixer for READING, which is how the page and
+--      every other client learn the level and how AirPlay changes show
+--      up. WRITES go to a systemd socket-activated shell helper running
+--      `amixer -M`, reached from the browser through websocat and nginx
+--      at /volume. This is the split moOde uses (www/util/vol.sh calls
+--      `amixer -M -c $CARDNUM sset "$AMIXNAME" $LEVEL%`), without
+--      moOde's database or PHP.
+--      The scale is ALSA's normalized mapping, percent = 10^(dB/60),
+--      which is what both amixer -M and MPD report, so the number the
+--      page sends and the number MPD sends back mean the same thing.
+--      This is already perceptual: a level that looks linear on the bar
+--      is logarithmic in power, which is the behaviour wanted.
+--      capabilities.volumePath is the path or null; null means the host
+--      has no such card and MPD's own setvol is used.
+--
+--  15. COVER ART IS A CACHE THE PLAYER BUILDS. This library keeps its
+--      art inside the files and nothing in the serving path can read
+--      that: nginx serves files, and MPD's albumart and readpicture
+--      answer with binary that a text-mode websocket cannot carry.
+--      art.nix walks the library on a timer, takes a picture file beside
+--      the audio when there is one and otherwise pulls the embedded
+--      picture out of the first track with ffmpeg, and writes exactly
+--      one cover.jpg per album directory under /var/lib/nixtune/art,
+--      mirroring the library's layout. nginx serves that tree and only
+--      that tree, so /art/ can never reach audio. The page asks for one
+--      URL per album and gets one 404 at worst.
+--      The unit is niced to 19 with idle IO and idle CPU scheduling. The
+--      first pass over tens of thousands of tracks runs for a long while
+--      and must not disturb playback. Afterwards only album directories
+--      whose mtime moved cost anything, so art added later appears
+--      without clearing the cache by hand.
+--
+--  16. THE PAGE IS SEVERAL MODULES, NOT ONE. Main.purs reached 1278
+--      lines and became impossible to hand over in one piece. It is now
+--      Types, Net, Volume, Reorder, Art, Nick, Page, Ui and Main, none
+--      over about 300 lines. This is a delivery constraint made into a
+--      structural one, and the structure is better for it: Types knows
+--      nothing, Page draws and performs no effects, Main is the state
+--      machine and the protocol.
+--
+--  17. ONE ATTRIBUTION QUERY, NOT ONE PER ENTRY. The first version asked
+--      `sticker get song <uri> nixtune.added_by` for every queue entry
+--      and never recorded a miss, so a queue of 220 cost 220 round trips
+--      on every queue change, forever. `sticker find song "" <name>`
+--      returns every attribution in one command. The page subscribes to
+--      MPD's `sticker` idle subsystem to stay current. At 220 entries
+--      this is the difference between a page that answers a drag and one
+--      that appears broken.
+--
+--  18. ONE TRANSPORT BAR. NEW, not yet built. Today the transport sits
+--      on the Now playing view and the volume sits in a bar pinned to
+--      the bottom of every view. That means browsing the library with
+--      music playing offers no way to skip a track. Transport and volume
+--      become ONE bottom frame, present on every host view: previous,
+--      play/pause, next, then the level. The bar is the player; the
+--      views above it are the library, the queue and what is on now.
+--      Crowding is the risk and the answer is a budget, not a
+--      compromise: at phone width the bar shows previous, play/pause,
+--      next, mute and the slider, and the typed level field and the
+--      steppers appear only at 30rem and up. Nothing is removed at any
+--      width; the two controls that have keyboard and gesture
+--      equivalents are the ones that fold away.
+--
+--  19. BROWSE BY TAG, NOT ONLY BY FOLDER. NEW, not yet built. A
+--      directory tree is the wrong shape for choosing music in a room.
+--      The Library view gains a three-column browser over MPD's tag
+--      database: genre, then artist, then album, each column filtered by
+--      the selection to its left, with the track list below or beside
+--      the third column. The folder tree stays as a fourth way in, not
+--      as the default.
+--      The protocol is `list genre`, `list artist genre "<g>"`,
+--      `list album artist "<a>"` and `find album "<x>" artist "<a>"`.
+--      Every one of those is bounded by the selection above it, so none
+--      of them can overrun MPD's output buffer the way `listall` does,
+--      with one exception: `list artist` with no filter over this
+--      library is large and is windowed.
+--      A LETTER RAIL runs down the side of any column over about fifty
+--      entries: A to Z plus #, tapping one scrolls that column to the
+--      first entry under that letter. It is page-side arithmetic over a
+--      list the page already holds, so it costs no request and no
+--      backend. This is the thing most missed while scrolling a library
+--      this size.
+--
+--  20. HOME ASSISTANT TALKS TO MPD DIRECTLY. It ships an MPD
+--      integration that speaks the same protocol nixtune's page speaks.
+--      Nothing is added to the module: services.nixtune.mpd.exposeOnLan
+--      = true opens 6600 on the LAN and HA connects to nixtune.lan:6600.
+--      It can then play, pause, skip, set volume and load playlists, and
+--      can be triggered by anything HA can trigger on.
+--      Two things follow from decision 14. HA's volume control calls
+--      setvol, which on this card mutes it. Until that is handled, HA
+--      should be used for transport and not for volume, and the handling
+--      is an open question below. HA is also an unauthenticated client
+--      on the LAN with full MPD rights, which is the same trust model as
+--      decision 8 and is accepted on the same grounds.
+--
+--  21. DSP IS A CONFIG-TIME CHOICE. MPD's filter plugins are declared in
+--      mpd.conf, so a parametric EQ or a room correction curve is a
+--      services.nixtune.dsp.* option and a rebuild to change it. That is
+--      slower than a slider and it is the honest consequence of decision
+--      1. The alternative, a daemon that rewrites mpd.conf and restarts
+--      MPD, is the beginning of moOde's settings database and is
+--      refused. A middle path exists and is not yet chosen: ALSA plugins
+--      (ladspa, camilladsp) read their own coefficient files, which
+--      could live in a persisted path that a page writes, leaving the
+--      declaration to say THAT there is DSP and the file to say what it
+--      does. That still needs something on the Pi that can write a file
+--      on request, which is decision 22's problem.
+--
+--  22. THE DJ AMBITION FORKS HERE, AND THE FORK IS NAMED NOW. The stated
+--      goal is a party DJ device: crossfade, DSP, beat matching. These
+--      are three different distances from what exists.
+--        CROSSFADE is free. `crossfade <seconds>` and `mixrampdb` are
+--        MPD protocol commands. A control on the transport bar and a
+--        default in the declaration, nothing more. In scope.
+--        DSP is decision 21: an option and a rebuild, or a coefficient
+--        file and a writer. Partly in scope.
+--        BEAT MATCHING IS NOT AN EXTENSION OF THIS DESIGN. It needs two
+--        decks sounding at once, independent tempo and pitch on each, a
+--        cue point and preview path, and a crossfader. MPD is one deck
+--        and one queue; its crossfade overlaps the tail of one track
+--        with the head of the next and that is the whole of it. There is
+--        no MPD protocol command that will ever do this.
+--        A DJ console therefore means a second audio path beside MPD, an
+--        audio engine on the Pi, and an application server to drive it,
+--        which contradicts decision 3. The spec records this as a
+--        SEPARATE PRODUCT sharing the library, the hardware profile and
+--        the fleet row, not as a later release of this one. Calling it
+--        nixtune's next version would quietly delete the property that
+--        makes nixtune worth having, which is that the whole player is
+--        one declaration and nothing on the box holds state.
+--        What IS in scope, and worth doing first because it covers most
+--        of a party: crossfade, consume as the default queue discipline,
+--        a queue that is pleasant to reorder under load, replay gain,
+--        and the tag browser that makes finding the next record fast.
 --
 -- Earlier decisions still in force: AirPlay on, UPnP off until upmpdcli
--- builds, DSP out of scope, SD card on oracle's boot path, hardware
--- profile from the datasheet, the staged scope of 2026-10-28 (public
--- release, then arbiter and renderers, then the long tail).
+-- builds, SD card on oracle's boot path, hardware profile from the
+-- datasheet.
 
 ------------------------------------------------------------
 -- Given
@@ -167,6 +330,14 @@ external entity Nas {
     allows: Set<String>
 }
 
+-- Anything on the LAN speaking the MPD protocol to port 6600 directly:
+-- Home Assistant, mpc, a phone client. Not a session; it has no page
+-- and no nickname, and the player cannot tell it from any other client.
+external entity ProtocolClient {
+    kind: home_assistant | mpc | other
+    address: String
+}
+
 ------------------------------------------------------------
 -- Value Types
 ------------------------------------------------------------
@@ -181,7 +352,16 @@ value Track {
     title: String?
     artist: String?
     album: String?
+    genre: String?
     duration: Duration?
+    format: AudioFormat?
+}
+
+-- What a file is, from its container. MPD's own audio figures describe
+-- what the decoder hands the DAC, which is a different question.
+value AudioFormat {
+    label: String
+    quality: lossless | lossy
 }
 
 -- What nix/module/ui.nix writes to capabilities.json at build time.
@@ -195,9 +375,19 @@ value Capabilities {
     library: Boolean
     stations: List<RadioStation>
     websocket_path: String
+    volume_path: String?
+    art_path: String?
     max_volume: Integer
     public_url: String
     host_path: String
+}
+
+-- One column of the tag browser and the state of its selection.
+value BrowseColumn {
+    axis: BrowseAxis
+    entries: List<String>
+    selected: String?
+    windowed: Boolean
 }
 
 ------------------------------------------------------------
@@ -209,8 +399,6 @@ contract PlayerModule {
 
     @invariant Purity
         -- Evaluation reads only the Nix declaration and pinned inputs.
-        -- The page's dependencies are fixed-output fetches checked
-        -- against spago.lock; nothing fetches during evaluation.
 
     @invariant Determinism
         -- Same declaration, same lock, same closure.
@@ -220,33 +408,45 @@ contract PlayerModule {
 
     @invariant NoRuntimeConfiguration
         -- Nothing in the closure writes to /etc, /boot or the store at
-        -- runtime. The nickname and the host path are browser-side.
+        -- runtime. The art cache under /var/lib/nixtune is derived data,
+        -- rebuildable from the library at any time, and is declared in
+        -- persistPaths only because rebuilding it is expensive.
 
     @invariant FleetAgnostic
         -- The module references only nixpkgs' option tree, its own
         -- services.nixtune.*, and, when present, nixos-hardware's
-        -- hardware.raspberry-pi.* (guarded by `options.hardware ?
-        -- raspberry-pi`, with optionalAttrs rather than mkIf so a host
-        -- without those options never sees the attribute path).
+        -- hardware.raspberry-pi.* (guarded).
 
     @guidance
-        -- Options, as implemented plus the two this revision adds:
+        -- Options as implemented:
         --   enable
         --   hardware.profile            "pi5-dac2hd" | "none"
         --   library.export              "host:/path" or null
         --   wifi.ssid, wifi.pskFile
         --   mpd.port, mpd.exposeOnLan, mpd.maxVolume
+        --   mpd.consume                 null to remember, true/false to
+        --                               set at every MPD start
         --   radio.stations
         --   ui.enable, ui.package, ui.port
-        --   ui.publicUrl                NEW: what the QR encodes; default
-        --                               "http://<hostname>.lan/"
-        --   ui.hostPath                 NEW: default "/host"
+        --   ui.publicUrl, ui.hostPath
+        --   ui.albumArt, ui.albumArtSize
         --   arbitration.resumeAfterRenderer
         --   renderers.airplay.{enable,name}
         --   renderers.upnp.{enable,friendlyName,package}
-        --   persistPaths (read-only), output.* (internal)
-        -- On a Pi: firmware.uboot.enable = true and the DAC overlay as a
-        -- config.txt line (hardware.nix).
+        --   persistPaths (merged), output.* (internal)
+        --   volume.path (internal, set by volume.nix)
+        --   art.path (internal, set by art.nix)
+        -- Options this revision adds:
+        --   mpd.crossfade               Integer seconds, 0 for none;
+        --                               applied at every MPD start the
+        --                               way mpd.consume is
+        --   mpd.mixRampDb               Number or null; MPD's mixramp
+        --                               threshold, which crossfades on
+        --                               measured loudness rather than a
+        --                               fixed overlap when the files
+        --                               carry mixramp tags
+        --   mpd.replayGain              off | track | album | auto
+        --   ui.browseDefault            tags | folders
 }
 
 contract MpdBridge {
@@ -258,17 +458,73 @@ contract MpdBridge {
         -- Only the MPD protocol passes; the capability file is static.
 
     @invariant LanOnly
-        -- nginx on 0.0.0.0:<ui.port>; websocat and MPD on loopback.
+        -- nginx on 0.0.0.0:<ui.port>; websocat and MPD on loopback,
+        -- unless mpd.exposeOnLan opens 6600 for protocol clients.
 
     @invariant NoRoleEnforcement
-        -- The bridge does not know which page a socket came from. Role
-        -- limits are the page's (decision 8).
+        -- The bridge does not know which page a socket came from.
+
+    @invariant BoundedReplies
+        -- No command the page sends can produce a reply larger than
+        -- MPD's output buffer. Search is windowed to 200. Unfiltered
+        -- tag listings are windowed. `listall` is never sent.
 
     @guidance
         -- websocat -t -E ws-l:127.0.0.1:8600 tcp:127.0.0.1:<mpd.port> as
         -- nixtune-websocket.service; nginx /ws proxies it; the page
         -- holds one command socket with a reply queue and one idle
-        -- socket. Both pages use the same two sockets.
+        -- socket. websocat frames by TCP read, so the page accumulates a
+        -- partial tail and splits on newline.
+}
+
+contract VolumeWriter {
+    set: (level: Integer) -> Result
+
+    @invariant NeverMpdSetvol
+        -- On a host where volume.path is non-null, the page never sends
+        -- setvol. A host with the helper configured and no connection to
+        -- it reports that and writes nothing, because falling back to
+        -- setvol would mute the card (decision 14).
+
+    @invariant SameScaleAsMpd
+        -- The helper writes with amixer -M, ALSA's normalized mapping,
+        -- which is the scale MPD reports. The page's number and MPD's
+        -- number mean the same thing.
+
+    @invariant Glides
+        -- A level change walks to its target a few units at a time
+        -- rather than jumping, with the step proportional to what is
+        -- left, so a tap at the far end of the bar is a fast ramp and
+        -- not a step change into the speakers.
+
+    @guidance
+        -- systemd socket on 127.0.0.1:8601 with Accept=yes; the
+        -- templated unit runs a shell helper with stdin and stdout on
+        -- the socket; websocat bridges 8602 to it; nginx serves /volume.
+        -- One line per request, "set N". The helper resolves the card
+        -- index from /proc/asound/cards because alsa-lib reports a
+        -- missing control device as an invalid card number.
+}
+
+contract ArtCache {
+    cover: (album_path: String) -> Image?
+
+    @invariant OneNamePerAlbum
+        -- The cache writes exactly one file, cover.jpg, per album
+        -- directory, so the page asks for one URL and never walks a list
+        -- of names a ripper might have used.
+
+    @invariant NeverServesAudio
+        -- The nginx location matches only .jpg and .jpeg under the cache
+        -- root, which contains no audio.
+
+    @invariant Incremental
+        -- An album directory whose mtime has not moved since the cache
+        -- entry was written costs a stat and nothing else.
+
+    @invariant YieldsToPlayback
+        -- Nice 19, idle IO class, idle CPU policy. The first pass runs
+        -- for a long while and must not be audible.
 }
 
 ------------------------------------------------------------
@@ -293,7 +549,16 @@ enum PlaybackState { playing | paused | stopped }
 
 enum ScanState { never_scanned | scanning | scanned }
 
-enum ReleaseStep { pi_plays | room_page | public_release | arbiter_and_renderers | long_tail }
+enum BrowseAxis { genre | artist | album | folder }
+
+enum ReleaseStep {
+    pi_plays
+    | room_page
+    | one_bar_and_tags
+    | public_release
+    | arbiter_and_renderers
+    | long_tail
+}
 
 ------------------------------------------------------------
 -- Entities and Variants
@@ -306,6 +571,7 @@ entity HardwareProfile {
     card: String?
     mixer_control: String?
     hardware_volume: Boolean
+    mpd_can_write_mixer: Boolean
     needs_pi_kernel: Boolean
 }
 
@@ -318,6 +584,8 @@ entity HostDeclaration {
     library_export: String?
     public_url: String
     host_path: String
+    crossfade_seconds: Integer
+    expose_mpd_on_lan: Boolean
     fleet: FleetConfig?
 
     modules: ModuleDeclaration with host = this
@@ -335,6 +603,7 @@ entity HostDeclaration {
     has_core: modules.any(m => m.kind = mpd and m.enabled)
     has_ui: modules.any(m => m.kind = web_ui and m.enabled)
     wifi_configured: ssid != null and psk_file != null
+    needs_volume_helper: hardware.hardware_volume and not hardware.mpd_can_write_mixer
 
     invariant CoreIsMandatory {
         has_core
@@ -352,13 +621,21 @@ entity HostDeclaration {
         host_path != "/"
     }
 
+    invariant RendererDoesNotOwnTheMixer {
+        -- A renderer given the mixer control writes it behind the
+        -- page's back and behind the helper's. shairport-sync is
+        -- configured without mixer_control_name and mixer_device, so
+        -- AirPlay volume is software gain inside its own stream.
+        enabled_renderers.all(r => not OwnsMixer(r))
+    }
+
     @guidance
         -- The fleet member: hostname nixtune, deployAddr nixtune.lan,
         -- pi5-dac2hd, ssid PissiNet-5G, library export
-        -- 192.168.8.110:/volume2/music/Music (roles.player.musicExport =
-        -- "/volume2/music/Music" in hosts/nixtune.nix), AirPlay on as
-        -- "nixtune", UPnP off, stations GBH 89.7 and CRB Classical 99.5,
-        -- public_url http://nixtune.lan/, host_path /host.
+        -- 192.168.8.110:/volume2/music/Music, AirPlay on as "nixtune",
+        -- UPnP off, stations GBH 89.7 and CRB Classical 99.5,
+        -- public_url http://nixtune.lan/, host_path /host,
+        -- mpd.consume = true.
 }
 
 entity ModuleDeclaration {
@@ -380,13 +657,10 @@ entity SecretsFile {
     has_wifi_psk: Boolean
 
     @guidance
-        -- Created without an editor session: the hash from mkpasswd and
-        -- the passphrase are staged in $XDG_RUNTIME_DIR (RAM), their
-        -- lengths checked (a yescrypt hash is 73 characters; sops
-        -- rejects a YAML null for a key it must install), encrypted with
-        -- `sops --encrypt --filename-override secrets/<host>.yaml`, and
-        -- the staging file removed. Verification prints lengths and
-        -- prefixes, never values.
+        -- Created without an editor session: values staged in
+        -- $XDG_RUNTIME_DIR, lengths checked, encrypted with
+        -- `sops --encrypt --filename-override`, staging removed.
+        -- Verification prints lengths and prefixes, never values.
 }
 
 entity OutputDevice {
@@ -394,6 +668,7 @@ entity OutputDevice {
     profile: HardwareProfile
     owner: ModuleDeclaration?
     volume: Integer
+    written_by: mpd | helper
 
     invariant VolumeInRange {
         volume >= 0 and volume <= 100
@@ -402,6 +677,10 @@ entity OutputDevice {
     invariant OwnerIsEnabled {
         owner != null implies owner.enabled
     }
+
+    invariant HelperWhereMpdCannotWrite {
+        host.needs_volume_helper implies written_by = helper
+    }
 }
 
 entity Player {
@@ -409,6 +688,8 @@ entity Player {
     state: PlaybackState
     current: QueueEntry?
     queue: List<QueueEntry>
+    consume: Boolean
+    crossfade: Integer
     scan: ScanState
     song_count: Integer
     last_error: String?
@@ -416,13 +697,12 @@ entity Player {
     open_sessions: sessions where status = open
 }
 
--- A track in the queue with who put it there. The attribution is an
--- MPD sticker on the track's URI (nixtune.added_by); null for tracks
--- the host queued or that predate the sticker.
+-- A track in the queue with who put it there.
 entity QueueEntry {
     position: Integer
     track: Track
     added_by: String?
+    played: Boolean
 }
 
 value PlayerStatus {
@@ -430,6 +710,8 @@ value PlayerStatus {
     current: QueueEntry?
     volume: Integer?
     queue_length: Integer
+    consume: Boolean
+    crossfade: Integer
     scan: ScanState
     song_count: Integer
     capabilities: Set<ModuleKind>
@@ -441,6 +723,7 @@ entity Session {
     role: Role
     status: open | closed
     opened_at: Timestamp
+    browse: List<BrowseColumn>
 
     invariant GuestsAreNamed {
         role = guest implies client.nickname != null
@@ -521,11 +804,22 @@ config {
     mpd_port: Integer = 6600
     ui_port: Integer = 80
     websocket_port: Integer = 8600
+    volume_socket_port: Integer = 8601
+    volume_bridge_port: Integer = 8602
     max_volume: Integer = 100
     rescan_after_boot: Duration = 2.minutes
     rescan_every: Duration = 1.day
+    art_scan_after_boot: Duration = 10.minutes
+    art_scan_every: Duration = 6.hours
+    art_long_edge: Integer = 600
+    search_window: Integer = 200
+    tag_window: Integer = 2000
+    letter_rail_threshold: Integer = 50
+    volume_glide_step: Integer = 4
+    volume_glide_interval: Duration = 40.milliseconds
+    default_crossfade: Integer = 0
     resume_mpd_after_renderer: Boolean = true
-    current_step: ReleaseStep = room_page
+    current_step: ReleaseStep = one_bar_and_tags
 }
 
 ------------------------------------------------------------
@@ -539,6 +833,7 @@ default HardwareProfile pi5_dac2hd = {
     card: "sndrpihifiberry",
     mixer_control: "DAC",
     hardware_volume: true,
+    mpd_can_write_mixer: false,
     needs_pi_kernel: true
 }
 
@@ -549,19 +844,20 @@ default HardwareProfile none = {
     card: null,
     mixer_control: null,
     hardware_volume: false,
+    mpd_can_write_mixer: true,
     needs_pi_kernel: false
 }
 
 default FleetConfig neoblade = {
     repo_path: "/home/bismuth/neoblade-config",
-    input_url: "git+file:///home/bismuth/git/nixtune",
+    input_url: "github:harryprayiv/nixtune",
     adapter_module: "modules/system/player.nix",
     build_command: "./build boot-native nixtune"
 }
 
 default ProjectRepository nixtune = {
     path: "/home/bismuth/git/nixtune",
-    public_url: null,
+    public_url: "https://github.com/harryprayiv/nixtune",
     main_revision: "",
     nixpkgs_pin: "6510408d147d8c5e6d76043e899e9251756f6a75"
 }
@@ -602,8 +898,32 @@ default KnownIssue oracle_uboot = {
     repo: nixtune,
     name: "oracle's image would not boot if rebuilt",
     status: open,
-    effect: "hosts/oracle.nix does not set hardware.raspberry-pi.firmware.uboot.enable; its running install is unaffected",
+    effect: "hosts/oracle.nix does not set hardware.raspberry-pi.firmware.uboot.enable",
     closes_when: "the option is added to hosts/oracle.nix in its own fleet commit"
+}
+
+default KnownIssue mpd_setvol_mutes_dac2hd = {
+    repo: nixtune,
+    name: "MPD's dB write path hard-mutes the HiFiBerry DAC2 HD",
+    status: open,
+    effect: "every setvol on this card lands on raw 0; worked around by volume.nix, which means any OTHER MPD client on the LAN, Home Assistant included, still mutes the room when it sets volume",
+    closes_when: "MPD is patched or configured to take the raw write path on a control with a wide dB range, or the helper is reachable to every client, which it is not"
+}
+
+default KnownIssue listall_overruns = {
+    repo: nixtune,
+    name: "MPD closes the connection when a reply overruns its output buffer",
+    status: open,
+    effect: "`mpc listall` and an unwindowed `search any` both drop the client on this library; any new listing command must be windowed before it is used",
+    closes_when: "max_output_buffer_size is raised in mpd.conf with a measured figure, or every listing path in the page is windowed and the rule is written into MpdBridge.BoundedReplies, which it now is"
+}
+
+default KnownIssue airplay_owns_mixer = {
+    repo: nixtune,
+    name: "shairport-sync is still given the hardware mixer",
+    status: open,
+    effect: "an AirPlay sender can move the room's level behind the page and behind the volume helper",
+    closes_when: "mixer_control_name and mixer_device are removed from airplay.nix so AirPlay volume is software gain in its own stream"
 }
 
 ------------------------------------------------------------
@@ -642,13 +962,32 @@ rule CoreStartsOnBoot {
         core.state = active
         output.owner = core
         player.state = stopped
+        PlaybackModesApplied(player: player)
         for m in host.enabled_modules where kind != mpd:
             m.state = active
 
     @guidance
         -- MPD starts after network-online and the library automount,
-        -- with auto_update off, so it reports ready to systemd at once
-        -- regardless of library size.
+        -- with auto_update off, so it reports ready at once regardless
+        -- of library size.
+}
+
+rule PlaybackModesApplied {
+    when: PlaybackModesApplied(player)
+    ensures:
+        if host.consume_default != null:
+            player.consume = host.consume_default
+        player.crossfade = host.crossfade_seconds
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- nixtune-mpd-defaults.service, a oneshot after mpd.service that
+        -- retries mpc for five seconds. MPD remembers consume, random,
+        -- repeat, single and crossfade in its state file across
+        -- restarts, so a declared value overrides that remembered state
+        -- at every start, which is what makes it a DEFAULT rather than a
+        -- preference: the page's own toggle still changes it until the
+        -- next start.
 }
 
 -- Library scanning ------------------------------------------------------
@@ -660,12 +999,21 @@ rule RescanTimerFires {
     ensures:
         player.scan = scanning
         PlayerStatusChanged(player: player)
+}
+
+rule DatabaseDroppedOnExportChange {
+    when: CoreStarted(host)
+    requires: RecordedExport(host) != host.library_export
+    ensures:
+        MpdDatabaseRemoved(host: host)
+        RecordedExport(host) = host.library_export
 
     @guidance
-        -- nixtune-library-update.timer: OnBootSec 2min, OnUnitActiveSec
-        -- 1d, running `mpc update` as a oneshot. MPD walks the tree in
-        -- its update thread; the main loop keeps serving. On an
-        -- unchanged tree the walk compares mtimes only.
+        -- nixtune-database-stamp, a oneshot before mpd.service. MPD's
+        -- URIs are relative to music_directory, so a changed export
+        -- leaves a database full of URIs that resolve to nothing and a
+        -- queue that fails silently. The stamp file sits beside the
+        -- database and the database is deleted when they disagree.
 }
 
 rule ScanProgresses {
@@ -674,12 +1022,6 @@ rule ScanProgresses {
     ensures:
         player.song_count = count
         PlayerStatusChanged(player: player)
-
-    @guidance
-        -- The idle socket reports "database" changes as MPD commits
-        -- batches; the page re-asks `stats` and shows the count. On the
-        -- first scan of Music/ this continues for days; every batch is
-        -- browsable as soon as it is committed.
 }
 
 rule ScanCompletes {
@@ -688,12 +1030,35 @@ rule ScanCompletes {
     ensures:
         player.scan = scanned
         PlayerStatusChanged(player: player)
+}
+
+-- Cover art ---------------------------------------------------------------
+
+rule ArtScanRuns {
+    when: ArtScanDue(host)
+    requires: host.library_export != null
+    requires: host.album_art_enabled
+    ensures:
+        for d in AlbumDirectories(host) where Changed(d):
+            if PictureFileIn(d) != null:
+                CoverWritten(album: d, from: PictureFileIn(d))
+            else if EmbeddedPictureIn(FirstTrackOf(d)) != null:
+                CoverWritten(album: d, from: FirstTrackOf(d))
+            else:
+                NoCoverMarked(album: d)
 
     @guidance
-        -- `status` loses its updating_db line. MPD writes the database
-        -- file to /var/lib/mpd at the end of the job and on shutdown, so
-        -- a reboot mid-scan keeps what was committed and the next timer
-        -- run resumes from mtimes.
+        -- art.nix: a oneshot with a timer, OnBootSec 10min and
+        -- OnUnitActiveSec 6h, running as a fixed system user so nginx
+        -- can read what it writes. A DynamicUser's state directory lives
+        -- under /var/lib/private, which nginx cannot traverse, which is
+        -- why the user is fixed. @eaDir and .checksums are pruned.
+        -- ffmpeg takes one frame of the first video stream, which is
+        -- what an attached picture is in every container it reads, and
+        -- scales it down only if it is wider than art_long_edge.
+        -- The unit declares RequiresMountsFor on the library, because a
+        -- service runs in its own mount namespace and an automount that
+        -- happens after the unit starts never appears inside it.
 }
 
 -- Sessions and roles ----------------------------------------------------
@@ -708,12 +1073,6 @@ rule GuestOpensSession {
             client.nickname = GeneratedNickname()
         Session.created(player: player, client: client, role: guest, status: open, opened_at: now)
         PlayerStatusChanged(player: player)
-
-    @guidance
-        -- The guest page is the default page, so the QR encodes
-        -- public_url with no path. The nickname is adjective + animal
-        -- from two short word lists in the bundle, drawn once and kept
-        -- in localStorage; a cleared browser gets a new name.
 }
 
 rule HostOpensSession {
@@ -724,12 +1083,6 @@ rule HostOpensSession {
     ensures:
         Session.created(player: player, client: client, role: host, status: open, opened_at: now)
         PlayerStatusChanged(player: player)
-
-    @guidance
-        -- nginx serves the same index.html for / and for host_path
-        -- (tryFiles falls through to it); the page reads
-        -- window.location.pathname against capabilities.hostPath to
-        -- choose the role. No credential. Decision 8 says why.
 }
 
 rule SessionCloses {
@@ -738,18 +1091,54 @@ rule SessionCloses {
     ensures: session.status = closed
 }
 
--- What a guest may do -----------------------------------------------------
+-- Browsing ----------------------------------------------------------------
 
-rule GuestBrowses {
+rule ClientBrowsesFolders {
     when: ClientBrowses(session, path)
     requires: session.status = open
     ensures: LibraryListingDelivered(session: session, path: path)
 
     @guidance
-        -- lsinfo over the command socket, both roles. Browse first: the
-        -- tree is the main view, a search box (MPD `search any`) sits
-        -- above it on the same view.
+        -- lsinfo over the command socket, both roles.
 }
+
+rule ClientBrowsesTags {
+    when: ClientSelectsTag(session, axis, value)
+    requires: session.status = open
+    ensures:
+        for c in session.browse where c.axis is after axis:
+            c.selected = null
+            c.entries = TagValues(axis: c.axis, filter: SelectionsLeftOf(c))
+        TagColumnsDelivered(session: session, columns: session.browse)
+
+    @guidance
+        -- `list genre`, then `list artist genre "<g>"`, then
+        -- `list album artist "<a>"`, then
+        -- `find album "<x>" artist "<a>"` for the tracks. Each column is
+        -- bounded by the selection to its left. The exception is the
+        -- leftmost column with no selection at all: `list artist` over
+        -- this library is large and is windowed to tag_window, with the
+        -- page saying so when it truncates.
+        -- Selecting a value clears every column to its right, which is
+        -- what makes the browser a path rather than a set of filters
+        -- that can disagree with each other.
+}
+
+rule ClientJumpsToLetter {
+    when: ClientPicksLetter(session, axis, letter)
+    requires: session.status = open
+    ensures: ColumnScrolledTo(session: session, axis: axis, index: FirstIndexUnder(axis, letter))
+
+    @guidance
+        -- Page-side arithmetic over a list the page already holds: no
+        -- request, no backend. The rail appears on a column over
+        -- letter_rail_threshold entries. A leading article is not
+        -- stripped, because MPD's tag values are what they are and a
+        -- page that silently reindexes them disagrees with search.
+        -- Entries that do not begin with a letter land under #.
+}
+
+-- What a guest may do -----------------------------------------------------
 
 rule GuestAppends {
     when: ClientAppends(session, uri)
@@ -762,24 +1151,17 @@ rule GuestAppends {
         PlayerStatusChanged(player: player)
 
     @guidance
-        -- `add` appends by definition; the guest page offers no other
-        -- queue command. A folder URI appends its contents in MPD's
-        -- order, with one sticker per file. If nothing is playing the
-        -- guest page also sends `play`, so a room with a silent player
-        -- and a first guest gets music; that is the one transport
-        -- command a guest can cause, and only from the stopped state.
+        -- If nothing is playing the guest page also sends `play`. That
+        -- is the one transport command a guest can cause, and only from
+        -- the stopped state.
 }
 
 rule GuestCommandNotOffered {
     when: ClientCommands(session, command)
     requires: session.status = open
     requires: session.role = guest
-    requires: command not in {"add", "lsinfo", "search", "status", "currentsong", "stats", "sticker get", "idle"}
+    requires: command not in {"add", "lsinfo", "list", "find", "search", "status", "currentsong", "stats", "sticker find", "idle"}
     ensures: CommandNotOffered(session: session, command: command)
-
-    @guidance
-        -- "Not offered" is exact: the guest page renders no control that
-        -- sends these. The websocket would carry them. See decision 8.
 }
 
 -- What the host may do --------------------------------------------------
@@ -793,10 +1175,30 @@ rule HostCommands {
         PlayerStatusChanged(player: player)
 
     @guidance
-        -- Everything the page does today: transport, random, repeat,
-        -- setvol clamped to maxVolume, clear/add/play for stations and
-        -- paths, play <pos>, delete <pos>, load <playlist>, plus
-        -- `update` to force a rescan now.
+        -- Transport, random, repeat, single, consume, crossfade,
+        -- clear/add/play, play <pos>, delete <pos>, move <from> <to>,
+        -- seekcur <t>, load <playlist>, update. Volume is NOT here: it
+        -- goes to the helper (contract VolumeWriter).
+}
+
+rule HostReordersQueue {
+    when: HostDragsRow(session, from, to)
+    requires: session.role = host
+    requires: from != to
+    ensures:
+        MpdProtocol.apply(player, "move " + from + " " + to)
+        PlayerStatusChanged(player: player)
+
+    @guidance
+        -- The list is never reordered under the finger. Rows are
+        -- measured once, at the moment of grabbing, and each row is then
+        -- DRAWN offset from where it sits, so the geometry the drag is
+        -- reckoned against stays still while the gap appears to open.
+        -- One move goes out when the pointer lifts and the real order
+        -- comes back through the idle connection like any other change.
+        -- Pointer events on the handle and arrow keys when the handle
+        -- has focus reach the same command, so there is no mouse-only
+        -- path. No FFI: Halogen's own event handling covers all of it.
 }
 
 rule HostSeesAttribution {
@@ -805,21 +1207,48 @@ rule HostSeesAttribution {
         ensures: QueueDelivered(session: s, queue: player.queue)
 
     @guidance
-        -- The host queue view shows the nickname beside each entry,
-        -- from `sticker get song <uri> nixtune.added_by` per entry,
-        -- fetched when the playlist changes and cached per URI in the
-        -- page. Now playing shows "added by <nickname>" on both pages.
+        -- ONE command: `sticker find song "" nixtune.added_by` returns
+        -- every attribution in the database, and the page subscribes to
+        -- the `sticker` idle subsystem to stay current. The per-entry
+        -- form this replaced cost one round trip per queue entry on
+        -- every queue change and never recorded a miss. See decision 17.
 }
 
 rule HostShowsQr {
     when: HostOpensQr(session)
     requires: session.role = host
     ensures: QrDelivered(session: session, url: host.public_url)
+}
+
+-- Volume -----------------------------------------------------------------
+
+rule ClientSetsVolume {
+    when: HostSetsVolume(session, level)
+    requires: session.role = host
+    requires: level >= 0 and level <= host.max_volume
+    ensures:
+        if host.needs_volume_helper:
+            VolumeWriter.set(level)
+        else:
+            MpdProtocol.apply(player, "setvol " + level)
+        -- The level the page SHOWS always comes back from MPD's mixer
+        -- idle event, whoever moved it.
+        PlayerStatusChanged(player: player)
+}
+
+rule ProtocolClientSetsVolume {
+    when: ProtocolClientCommands(protocol_client, "setvol", level)
+    requires: host.expose_mpd_on_lan
+    ensures:
+        MpdProtocol.apply(player, "setvol " + level)
+        if host.needs_volume_helper:
+            OutputMuted(output: output)
 
     @guidance
-        -- A QR tab on the host page shows /qr.svg full width with the
-        -- URL printed under it. qrencode -t SVG at build time in ui.nix,
-        -- joined into the static root beside capabilities.json.
+        -- Stated as a rule because it is a real consequence and not a
+        -- hypothetical: Home Assistant's media_player.volume_set sends
+        -- setvol, and on this card that silences the room. Use HA for
+        -- transport until KnownIssue mpd_setvol_mutes_dac2hd closes.
 }
 
 -- Status fan-out --------------------------------------------------------
@@ -832,18 +1261,15 @@ rule StatusPushedToSessions {
             current: player.current,
             volume: output.volume,
             queue_length: player.queue.count,
+            consume: player.consume,
+            crossfade: player.crossfade,
             scan: player.scan,
             song_count: player.song_count,
             capabilities: host.capabilities
         })
-
-    @guidance
-        -- Both pages keep the idle socket. The guest page shows state,
-        -- current track, who added it, and the scan indicator; it hides
-        -- volume and the queue.
 }
 
--- Output arbitration (unchanged) ------------------------------------------
+-- Output arbitration ------------------------------------------------------
 
 rule RendererAcquiresOutput {
     when: RendererStreamStarts(module)
@@ -927,6 +1353,25 @@ invariant ScanNeverBlocksStart {
         p.scan = scanning implies ModuleDeclaration{host: p.host, kind: mpd}.state = active
 }
 
+invariant TransportIsAlwaysReachable {
+    -- Decision 18. Browsing a library the size of this one takes minutes,
+    -- and a track that needs skipping does not wait for the browse to
+    -- finish.
+    for s in Sessions where role = host:
+        s.status = open implies Offered(s, "transport") and Offered(s, "volume")
+}
+
+invariant NoUnboundedListing {
+    -- KnownIssue listall_overruns.
+    for c in CommandsThePageSends:
+        Unbounded(c) implies Windowed(c)
+}
+
+invariant PageNeverSetvolsAHelperHost {
+    for h in HostDeclarations where needs_volume_helper:
+        not PageSends(h, "setvol")
+}
+
 invariant MainIsAlwaysChecked {
     for r in UpdateRuns:
         r.status = merged implies r.ci_passed
@@ -957,6 +1402,10 @@ actor Maintainer {
     identified_by: Client where on_lan = true
 }
 
+actor Automation {
+    identified_by: ProtocolClient where kind = home_assistant
+}
+
 ------------------------------------------------------------
 -- Surfaces
 ------------------------------------------------------------
@@ -968,6 +1417,7 @@ surface GuestPage {
         player.state
         player.current
         player.current.added_by
+        player.current.track.format
         player.scan
         player.song_count
         host.hostname
@@ -975,6 +1425,8 @@ surface GuestPage {
 
     provides:
         ClientBrowses(session, path)
+        ClientSelectsTag(session, axis, value)
+        ClientPicksLetter(session, axis, letter)
         ClientAppends(session, uri)
         ClientDisconnects(session)
 
@@ -982,18 +1434,18 @@ surface GuestPage {
         demands MpdBridge
 
     @guarantee AppendOnlyByConstruction
-        -- The guest page contains no control that sends a queue command
-        -- other than add (and play from the stopped state). This is a
-        -- guarantee about the page, not about the wire.
+        -- No control that sends a queue command other than add (and play
+        -- from the stopped state).
 
     @guarantee NoVolumeNoQueue
-        -- No volume slider, no queue view, no transport buttons.
+        -- No volume, no queue view, no transport.
 
     @guidance
-        -- Two views: Now playing (title, artist/album, progress, "added
-        -- by", the scan indicator in the header, "you are <nickname>" in
-        -- the footer) and Library (breadcrumbs, search box, folders and
-        -- files, a + on each). Phone-first, dark by default.
+        -- Two views: Now playing (cover, title, artist/album, the format
+        -- badge, progress, "added by", the scan indicator in the header,
+        -- "you are <nickname>" in the footer) and Library (the tag
+        -- browser with the folder tree as a fourth axis, a search box, a
+        -- + on each entry). Phone-first, dark by default.
 }
 
 surface HostPage {
@@ -1003,6 +1455,8 @@ surface HostPage {
         player.state
         player.current
         player.queue
+        player.consume
+        player.crossfade
         player.scan
         player.song_count
         player.last_error
@@ -1015,22 +1469,69 @@ surface HostPage {
 
     provides:
         ClientCommands(session, command)
+        HostSetsVolume(session, level)
+        HostDragsRow(session, from, to)
         ClientBrowses(session, path)
+        ClientSelectsTag(session, axis, value)
+        ClientPicksLetter(session, axis, letter)
         HostOpensQr(session)
         ClientDisconnects(session)
 
     contracts:
         demands MpdBridge
+        demands VolumeWriter
+        demands ArtCache
 
     @guarantee NoSettingsSurface
         -- Hardware, modules, sources and stations are shown, never
-        -- edited.
+        -- edited. Playback modes are not settings: consume, random,
+        -- repeat, single and crossfade are MPD state and the page
+        -- changes them.
 
     @guidance
-        -- The page as it exists today (Now playing, Queue, Library,
-        -- Radio) plus a QR tab, the nickname column in the queue,
-        -- "added by" on now playing, the scan indicator, and an Update
-        -- button on the Library view that sends `update`.
+        -- Views: Now playing, Queue, Library, Radio, QR. Below all of
+        -- them, on every view, ONE transport bar: previous,
+        -- play/pause, next, mute, the level slider, and at 30rem and up
+        -- the typed level field and the steppers. Decision 18.
+        -- Now playing keeps the cover, the format badges and the seek
+        -- bar; it loses the transport row, which moved into the bar.
+        -- Queue rows carry a drag handle, the format badge, the
+        -- attribution and a remove button; rows the player has passed
+        -- are dimmed and struck through unless random is on, in which
+        -- case the order is not the order they were heard in and nothing
+        -- is dimmed.
+}
+
+surface Automation {
+    facing automation: Automation
+
+    exposes:
+        player.state
+        player.current
+        player.queue
+        output.volume
+
+    provides:
+        ProtocolClientCommands(protocol_client, command, argument)
+
+    contracts:
+        demands MpdBridge
+
+    @guarantee NothingIsAdded
+        -- Home Assistant speaks the MPD protocol on port 6600. The
+        -- module contributes one boolean, mpd.exposeOnLan, and a
+        -- firewall port. There is no nixtune-specific integration, no
+        -- API and no second protocol.
+
+    @guarantee SameTrustAsTheRoom
+        -- An unauthenticated client on the LAN with full MPD rights,
+        -- which is decision 8's trust model applied to a different kind
+        -- of client.
+
+    @guidance
+        -- Transport, queue and playlist control work. Volume does not:
+        -- see KnownIssue mpd_setvol_mutes_dac2hd and rule
+        -- ProtocolClientSetsVolume.
 }
 
 surface FleetDeployment {
@@ -1055,13 +1556,12 @@ surface FleetDeployment {
         -- One row, one adapter, two host files; deployAddr is a name.
 
     @guidance
-        -- Day to day: edit hosts/nixtune.nix or ~/git/nixtune, `git add`
-        -- there, `nix flake update nixtune`, `./build check`,
-        -- `./build deploy-native nixtune`, live with it,
-        -- `./build boot-native nixtune`. A fresh card: build the image,
-        -- dd, grow OFFLINE (sfdisk, e2fsck -f, resize2fs, e2fsck -fn),
-        -- boot on the cable, ssh-to-age, secrets, deploy, boot-native,
-        -- unplug.
+        -- Day to day: edit ~/git/nixtune, commit, PUSH, then in the
+        -- fleet `nix flake update nixtune --tarball-ttl 0`,
+        -- `./build check`, `./build deploy-native nixtune`, live with
+        -- it, `./build boot-native nixtune`. The push is not optional:
+        -- the input is a GitHub input and an unpushed change is
+        -- invisible to the fleet.
 }
 
 surface CommunityFlake {
@@ -1078,12 +1578,45 @@ surface CommunityFlake {
 
     @guarantee StandaloneUse
         -- Import nixosModules.default, set services.nixtune.*, import
-        -- nixos-hardware's raspberry-pi-5 for the Pi profile. The flake
-        -- template is the public_release step.
+        -- nixos-hardware's raspberry-pi-5 for the Pi profile.
 
     @guidance
         -- AGPLv3 (LICENSE still to be added). No moOde code or name.
 }
+
+------------------------------------------------------------
+-- Out of Scope: the DJ console
+------------------------------------------------------------
+
+-- Recorded here rather than as a release step, because it is a
+-- different product and pretending otherwise would let it erode this
+-- one by increments. Decision 22.
+--
+--   What it needs that MPD cannot give:
+--     - two decks sounding at once, each with its own transport
+--     - independent tempo and pitch, with time-stretch, per deck
+--     - cue points, and a preview path that is not the room's output
+--     - a crossfader, and per-deck gain and EQ
+--     - beat and tempo detection, offline, cached per track
+--   What that implies:
+--     - an audio engine on the Pi, which is an application server, which
+--       contradicts decision 3
+--     - state that outlives a generation (cue points, analysis, crates),
+--       which contradicts decision 1 unless it is declared data rather
+--       than configuration
+--     - a second ALSA client, or one engine that owns the card and MPD
+--       feeding it, which changes the arbitration story completely
+--
+--   What it would SHARE with nixtune: the library and its mount, the
+--   hardware profile, the volume helper, the art cache, the fleet row,
+--   and the page's design language. That sharing is the argument for
+--   building it beside nixtune rather than inside it.
+--
+--   What is in scope for nixtune and covers most of a party anyway:
+--   crossfade (mpd.crossfade and mixramp), consume as the default queue
+--   discipline, replay gain so one record is not twice the volume of the
+--   next, a queue that is pleasant to reorder under load, and the tag
+--   browser and letter rail that make finding the next record fast.
 
 ------------------------------------------------------------
 -- Deferred Specifications
@@ -1091,10 +1624,14 @@ surface CommunityFlake {
 
 deferred MpdProtocol.apply          -- see: https://mpd.readthedocs.io/en/latest/protocol.html
 deferred MpdProtocol.stickers       -- see: the sticker commands in the same document
+deferred MpdProtocol.tagListing     -- see: the `list` and `find` commands in the same document
+deferred MpdProtocol.crossfade      -- see: crossfade, mixrampdb, mixrampdelay
 deferred Firmware.configtxt         -- see: nixos-hardware raspberry-pi/README.md
 deferred Renderer.airplay           -- see: shairport-sync documentation
 deferred Renderer.upnp_renderer     -- see: upmpdcli documentation
 deferred Websocket.bridge           -- see: websocat documentation
+deferred AlsaMixer.mapped           -- see: amixer -M and ALSA's normalized volume mapping
+deferred Automation.homeassistant   -- see: Home Assistant's MPD integration
 deferred Fleet.rows                 -- see: neoblade-config.allium
 
 ------------------------------------------------------------
@@ -1102,7 +1639,11 @@ deferred Fleet.rows                 -- see: neoblade-config.allium
 ------------------------------------------------------------
 
 open question "Whether page-side role limits (decision 8) stay acceptable once the player is used by people outside the household; the upgrade is a filtering proxy between websocat and MPD, which is the backend the decision avoided."
-open question "Whether MPD search over a multi-day partial database is useful enough on day one, or whether the guest page should hide search until the first scan completes."
-open question "Whether a guest's `play` from the stopped state is welcome at 2 a.m., or whether the host page needs a 'guests may start playback' switch (browser state on the host device, which only the host's page would honour, so again advisory)."
-open question "Whether the same file added by two guests should show both names; stickers hold one value per URI, so this needs a different store or a convention such as appending."
-open question "Why nixpkgs' online expandOnBoot resize corrupted directory blocks on this card and kernel (linux-rpi 6.18.50, e2fsprogs 1.47.4), and whether it reproduces on a second card; the offline grow is a workaround, not an explanation."
+open question "How a protocol client such as Home Assistant should set volume on a card MPD cannot write. A filtering proxy on 6600 that rewrites setvol into a call to the helper would fix it and would also give decision 8 its enforcement point, which suggests both problems have one answer."
+open question "Whether DSP should be a declared option with a rebuild to change it, or a declared option plus a coefficient file in a persisted path that something on the Pi can write. The second is better to use and is the first crack in decision 1."
+open question "Whether the DJ console is built beside nixtune sharing its library and hardware layer, or whether nixtune's page grows a second mode and the no-backend decision is dropped. The spec assumes the first; nothing has been built either way."
+open question "Whether the tag browser's leftmost column should be genre at all. Genre tags in a library this size are inconsistent enough that artist-first with genre as a filter chip may be the better shape. This is answerable by looking at `list genre` on the real database and counting."
+open question "Whether the letter rail should strip leading articles. Not stripping disagrees with nobody; stripping disagrees with MPD's own sort order and with search."
+open question "Whether a guest's `play` from the stopped state is welcome at 2 a.m."
+open question "Whether the same file added by two guests should show both names; stickers hold one value per URI."
+open question "Why nixpkgs' online expandOnBoot resize corrupted directory blocks on this card and kernel, and whether it reproduces on a second card."

@@ -229,6 +229,14 @@ parseSticker ls = case lookup "sticker" (pairs ls) of
     Nothing -> Nothing
   Nothing -> Nothing
 
+-- | A `list <tag> ...` reply: one "<Tag>: value" line per distinct
+-- | value, in MPD's own order. Empty values are dropped, because a file
+-- | with no genre answers with an empty string and an empty row in a
+-- | column is not selectable.
+parseList :: String -> Array String -> Array String
+parseList tag ls =
+  Array.filter (_ /= "") (map (\(Tuple _ v) -> v) (Array.filter (\(Tuple k _) -> k == tag) (pairs ls)))
+
 -- | A `sticker find song "" <name>` reply: alternating "file: <uri>" and
 -- | "sticker: <name>=<value>" lines, one pair for every song in the
 -- | database that carries the sticker.

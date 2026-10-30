@@ -7,8 +7,11 @@ module Types where
 import Prelude
 
 import Caps (Caps, Station)
+import Data.Array as Array
+import Data.Enum (enumFromTo)
 import Data.Maybe (Maybe(..), isJust, maybe)
-import Data.String (Pattern(..), indexOf)
+import Data.String (Pattern(..), indexOf, toUpper, trim)
+import Data.String.CodeUnits as CodeUnits
 import Data.Tuple (Tuple)
 import Halogen as H
 import Mpd (Entry, Song, Status)
@@ -29,6 +32,19 @@ data View = NowPlaying | Queue | Library | Radio | Qr
 
 derive instance eqView :: Eq View
 
+-- | How the library is being looked at. The folder tree is what MPD
+-- | indexes; the tag browser is what a person actually chooses music by.
+data BrowseMode = Tags | Folders
+
+derive instance eqBrowseMode :: Eq BrowseMode
+
+-- | A column of the tag browser. The chain runs left to right and a
+-- | choice clears everything to its right, so the browser is a path
+-- | rather than a set of filters that can disagree with each other.
+data Axis = AxGenre | AxArtist | AxAlbum
+
+derive instance eqAxis :: Eq Axis
+
 -- | The two connections. One carries commands and reads their replies in
 -- | order; the other sits in MPD's idle command and is told what changed.
 data Conn = Cmd | Idle
@@ -44,6 +60,8 @@ data Req
   | RBrowse String
   | RSearch String
   | RStickers
+  | RTagValues Axis
+  | RTagTracks
   | RFire
 
 -- | One connection: its socket, whether MPD has greeted on it, the lines
@@ -121,6 +139,27 @@ type State =
   , artTry :: Int
   -- The queue row under the finger, while one is being dragged.
   , drag :: Maybe Drag
+  -- The tag browser. `mode` picks it or the folder tree; `genreColumn`
+  -- says whether the chain starts at genre or at artist. It starts at
+  -- artist because a library of this age has hundreds of distinct genre
+  -- strings, most of them spellings of each other, and a column of
+  -- hundreds is not a way of choosing anything.
+  , mode :: BrowseMode
+  , genreColumn :: Boolean
+  , genres :: Array String
+  , artists :: Array String
+  , albums :: Array String
+  , tagTracks :: Array Song
+  , selGenre :: Maybe String
+  , selArtist :: Maybe String
+  , selAlbum :: Maybe String
+  -- One first-letter filter per column. Filtering rather than scrolling:
+  -- it needs no element measurement and no FFI, it works the same on a
+  -- phone and a desktop, and over tens of thousands of artists it is the
+  -- faster way to arrive anywhere.
+  , letterGenre :: Maybe String
+  , letterArtist :: Maybe String
+  , letterAlbum :: Maybe String
   }
 
 initial :: State
@@ -152,6 +191,18 @@ initial =
   , volLink: Nothing
   , artTry: 0
   , drag: Nothing
+  , mode: Tags
+  , genreColumn: false
+  , genres: []
+  , artists: []
+  , albums: []
+  , tagTracks: []
+  , selGenre: Nothing
+  , selArtist: Nothing
+  , selAlbum: Nothing
+  , letterGenre: Nothing
+  , letterArtist: Nothing
+  , letterAlbum: Nothing
   }
 
 data Action
@@ -179,6 +230,12 @@ data Action
   | DragSeek String
   | CommitSeek String
   | Browse String
+  | SetMode BrowseMode
+  | ToggleGenreColumn
+  | Pick Axis (Maybe String)
+  | PickLetter Axis (Maybe String)
+  | AddAlbum
+  | PlayAlbum
   | SetQuery String
   | Search Event
   | PlayStation Station
@@ -259,3 +316,64 @@ stickerFind = "sticker find song \"\" " <> stickerName
 
 isStream :: String -> Boolean
 isStream uri = isJust (indexOf (Pattern "://") uri)
+
+-- | A column longer than this gets a letter rail. Below it the rail is
+-- | more work to read than the list it would filter.
+letterRailThreshold :: Int
+letterRailThreshold = 40
+
+-- | The letter a tag value files under: its first character in upper
+-- | case, or "#" when that is not A to Z. A leading article is NOT
+-- | stripped. MPD sorts by the value it holds, and a page that silently
+-- | reindexes disagrees with its own search results.
+initialOf :: String -> String
+initialOf s = case CodeUnits.uncons (toUpper (trim s)) of
+  Just { head: c } | c >= 'A' && c <= 'Z' -> CodeUnits.singleton c
+  _ -> "#"
+
+alphabet :: Array String
+alphabet = Array.cons "#" (map CodeUnits.singleton (enumFromTo 'A' 'Z'))
+
+-- | A column narrowed to one initial, or whole when no letter is picked.
+underLetter :: Maybe String -> Array String -> Array String
+underLetter Nothing xs = xs
+underLetter (Just l) xs = Array.filter (\x -> initialOf x == l) xs
+
+-- | Which letters a column actually has entries under, so the rail can
+-- | grey out the rest instead of offering an empty result.
+lettersPresent :: Array String -> Array String
+lettersPresent xs = Array.nub (map initialOf xs)
+
+-- | The letter picked for one column.
+letterOf :: Axis -> State -> Maybe String
+letterOf axis st = case axis of
+  AxGenre -> st.letterGenre
+  AxArtist -> st.letterArtist
+  AxAlbum -> st.letterAlbum
+
+-- | The values in one column, before the letter filter.
+valuesOf :: Axis -> State -> Array String
+valuesOf axis st = case axis of
+  AxGenre -> st.genres
+  AxArtist -> st.artists
+  AxAlbum -> st.albums
+
+-- | What is selected in one column.
+selectionOf :: Axis -> State -> Maybe String
+selectionOf axis st = case axis of
+  AxGenre -> st.selGenre
+  AxArtist -> st.selArtist
+  AxAlbum -> st.selAlbum
+
+-- | The MPD tag name for a column.
+tagOf :: Axis -> String
+tagOf = case _ of
+  AxGenre -> "genre"
+  AxArtist -> "artist"
+  AxAlbum -> "album"
+
+axisLabel :: Axis -> String
+axisLabel = case _ of
+  AxGenre -> "Genre"
+  AxArtist -> "Artist"
+  AxAlbum -> "Album"

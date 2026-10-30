@@ -147,6 +147,17 @@ in
         default = 100;
         description = "Upper bound the page allows for the volume.";
       };
+      maxOutputBuffer = mkOption {
+        type = types.str;
+        default = "32768";
+        description = ''
+          MPD's max_output_buffer_size, in kilobytes. MPD assembles a
+          reply in one buffer and closes the client when the reply will
+          not fit; the default of 8192 is exceeded by `listall` over a
+          library of seventy thousand tracks. The buffer grows on demand,
+          so a larger ceiling costs nothing until a reply needs it.
+        '';
+      };
       consume = mkOption {
         type = types.nullOr types.bool;
         default = null;
