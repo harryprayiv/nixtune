@@ -31,7 +31,7 @@ import Data.Array (elem, filter, head, length, null, snoc, take, uncons, (:))
 import Data.Array as Array
 import Data.Either (Either(..), hush)
 import Data.Foldable (for_, lookup)
-import Data.Int (toNumber)
+import Data.Int (fromString, toNumber)
 import Data.Maybe (Maybe(..), fromMaybe, isJust, isNothing, maybe)
 import Data.String (Pattern(..), indexOf, joinWith, split, stripSuffix, trim)
 import Data.Tuple (Tuple(..))
@@ -116,10 +116,15 @@ type State =
   , addedBy :: Array (Tuple String String)
   , error :: Maybe String
   , ticks :: Int
-  -- The level a press just asked for. Shown immediately, and kept until
-  -- MPD reports that level back, so the meter does not jump to a stale
-  -- value between the command and the report.
+  -- Where the bar is being held. Shown immediately and kept until MPD
+  -- reports that level back, so the thumb does not snap to a stale value
+  -- between the command and the report.
   , volDraft :: Maybe Int
+  -- The last level actually sent, and whether the sender is running. A
+  -- drag produces an event per pixel; the sender turns that into at most
+  -- one setvol every 80 ms, with the last value always sent.
+  , volSent :: Maybe Int
+  , volSending :: Boolean
   -- The level to return to when unmuting. MPD has no mute of its own.
   , volBeforeMute :: Maybe Int
   }
@@ -145,6 +150,8 @@ initial =
   , error: Nothing
   , ticks: 0
   , volDraft: Nothing
+  , volSent: Nothing
+  , volSending: false
   , volBeforeMute: Nothing
   }
 
@@ -156,7 +163,7 @@ data Action
   | Tick
   | Open View
   | Command String
-  | Nudge Int
+  | SetVolume String
   | ToggleMute
   | Browse String
   | SetQuery String
@@ -240,31 +247,25 @@ handle = case _ of
       st <- H.get
       when (isNothing st.searched) (browse st.path)
   Command c -> send Cmd RFire c
-  Nudge by -> do
-    st <- H.get
-    for_ (shownVolume st) \now -> do
-      let
-        v = clamp 0 (maxVolumeOf st) (now + by)
-      -- A press that changes nothing sends nothing, so holding the minus
-      -- button at zero does not flood MPD with setvol 0.
-      when (v /= now) do
-        H.modify_ _ { volDraft = Just v, volBeforeMute = Nothing }
-        send Cmd RFire ("setvol " <> show v)
+  SetVolume raw -> for_ (fromString raw) \v -> do
+    top <- H.gets maxVolumeOf
+    H.modify_ _ { volBeforeMute = Nothing }
+    setVolume (clamp volumeFloor top v)
   ToggleMute -> do
     st <- H.get
     for_ (shownVolume st) \now ->
       if now > 0 then do
-        H.modify_ _ { volBeforeMute = Just now, volDraft = Just 0 }
-        send Cmd RFire "setvol 0"
+        H.modify_ _ { volBeforeMute = Just now }
+        setVolume 0
       else do
-        -- Always restores to something audible. A silent player whose
-        -- level was never remembered (the page was opened at zero, or the
-        -- level reached zero by pressing minus) comes back at unmuteFloor
-        -- rather than leaving the button doing nothing.
+        -- Always restores to something audible. A player left silent with
+        -- no earlier level remembered comes back at unmuteFloor rather
+        -- than leaving the button doing nothing, which is the dead state
+        -- the first version of this had.
         let
-          back = clamp 1 (maxVolumeOf st) (fromMaybe unmuteFloor st.volBeforeMute)
-        H.modify_ _ { volBeforeMute = Nothing, volDraft = Just back }
-        send Cmd RFire ("setvol " <> show back)
+          back = clamp volumeFloor (maxVolumeOf st) (fromMaybe unmuteFloor st.volBeforeMute)
+        H.modify_ _ { volBeforeMute = Nothing }
+        setVolume back
   Browse p -> do
     H.modify_ _ { searched = Nothing, query = "" }
     browse p
@@ -328,9 +329,11 @@ received conn l
             unless (Mpd.isError l) (reply req block)
   | otherwise = modifyLink conn \k -> k { lines = snoc k.lines l }
 
--- | What a single press of plus or minus moves the level by.
-volumeStep :: Int
-volumeStep = 5
+-- | The lowest level the bar itself can reach. The bar cannot silence the
+-- | player: zero belongs to the mute button, which remembers what to come
+-- | back to.
+volumeFloor :: Int
+volumeFloor = 1
 
 -- | Where unmute lands when no earlier level is remembered.
 unmuteFloor :: Int
@@ -338,6 +341,31 @@ unmuteFloor = 20
 
 maxVolumeOf :: State -> Int
 maxVolumeOf st = maybe 100 _.maxVolume st.caps
+
+-- | Ask for a level. The bar reports every pixel of a drag, so the value
+-- | is held here and the sender below decides what reaches MPD.
+setVolume :: forall o m. MonadAff m => Int -> M o m Unit
+setVolume v = do
+  H.modify_ _ { volDraft = Just v }
+  busy <- H.gets _.volSending
+  unless busy do
+    H.modify_ _ { volSending = true }
+    void (H.fork sendVolume)
+
+-- | At most one setvol every 80 ms, and the value the drag ended on is
+-- | always the last one sent. The draft is not cleared here: it stands
+-- | until MPD reports that level back (see reply RStatus), so the thumb
+-- | never falls back to the previous value for a frame.
+sendVolume :: forall o m. MonadAff m => M o m Unit
+sendVolume = do
+  st <- H.get
+  case st.volDraft of
+    Just v | st.volSent /= Just v -> do
+      send Cmd RFire ("setvol " <> show v)
+      H.modify_ _ { volSent = Just v }
+      H.liftAff (delay (Milliseconds 80.0))
+      sendVolume
+    _ -> H.modify_ _ { volSending = false }
 
 -- | The level to show: the press just made, else what MPD last reported.
 shownVolume :: State -> Maybe Int
@@ -463,6 +491,7 @@ reply req block = case req of
       st
         { status = status
         , volDraft = if st.volDraft == status.volume then Nothing else st.volDraft
+        , volSent = if st.volDraft == status.volume then Nothing else st.volSent
         }
   RCurrent -> do
     let
@@ -601,16 +630,17 @@ nowPlaying st =
       ]
       [ HH.text label ]
 
--- | The host's volume, on every view: mute, quieter, the level, louder.
+-- | The host's volume, on every view: mute, the bar, the level.
 -- |
--- | NO SLIDER, AND THE REASON MATTERS. A range input moves its thumb to
--- | wherever it is touched, so a tap anywhere near the low end of the
--- | track sets the level there, and the quiet end of the bar sits beside
--- | the mute button where a thumb is already going. Every one of those
--- | mistakes silenced the room. A press of a button is the whole gesture
--- | here: it moves the level by volumeStep and by nothing else, and the
--- | meter is display only, with pointer events off, so a tap that lands on
--- | it does nothing at all.
+-- | The bar is a range input, so a drag and a tap both work and the arrow
+-- | keys work on a desktop, with no geometry arithmetic and no FFI. What
+-- | broke the first version was its placement: the hit area ran from the
+-- | edge of the mute button, and the left edge of a range input is its
+-- | minimum, so a thumb aimed at mute and landing a few pixels right
+-- | silenced the room. Here the bar is the only thing between the mute
+-- | button and the number, with a gap either side, its minimum is
+-- | volumeFloor rather than zero, and the track is drawn from a CSS
+-- | custom property this sets, so the fill always matches the thumb.
 volumeBar :: forall m. State -> H.ComponentHTML Action () m
 volumeBar st = case shownVolume st of
   Nothing -> HH.text ""
@@ -622,27 +652,26 @@ volumeBar st = case shownVolume st of
           , HE.onClick \_ -> ToggleMute
           ]
           [ HH.text (if v == 0 then "\x1f507" else "\x1f50a") ]
-      , HH.button
-          [ cls "step"
-          , HP.title ("Quieter by " <> show volumeStep)
-          , HP.disabled (v == 0)
-          , HE.onClick \_ -> Nudge (negate volumeStep)
+      , HH.div [ cls "track" ]
+          [ HH.input
+              [ HP.type_ HP.InputRange
+              , HP.min (toNumber volumeFloor)
+              , HP.max (toNumber top)
+              , HP.step (HP.Step 1.0)
+              , HP.value (show (max volumeFloor v))
+              , HP.style ("--pct:" <> show pct <> "%")
+              , HP.title "Volume"
+              , HE.onValueInput SetVolume
+              ]
           ]
-          [ HH.text "\x2212" ]
-      , HH.div [ cls "meter" ]
-          [ HH.div [ cls "fillv", HP.style ("width:" <> show pct <> "%") ] [] ]
       , HH.span [ cls "level" ] [ HH.text (show v) ]
-      , HH.button
-          [ cls "step"
-          , HP.title ("Louder by " <> show volumeStep)
-          , HP.disabled (v >= top)
-          , HE.onClick \_ -> Nudge volumeStep
-          ]
-          [ HH.text "+" ]
       ]
     where
     top = maxVolumeOf st
-    pct = if top > 0 then clamp 0.0 100.0 (toNumber v / toNumber top * 100.0) else 0.0
+    span = top - volumeFloor
+    pct =
+      if span > 0 then clamp 0.0 100.0 (toNumber (v - volumeFloor) / toNumber span * 100.0)
+      else 0.0
 
 progress :: forall w i. Status -> HH.HTML w i
 progress s =
