@@ -1,10 +1,13 @@
--- | Cover images, straight out of the library over HTTP.
+-- | Cover images, from the cache the player builds.
 -- |
 -- | MPD's own albumart and readpicture commands answer with binary, which
--- | a text-mode websocket cannot carry, so nginx serves the image files
--- | that sit beside the audio (nix/module/ui.nix). Nothing is read out of
--- | tags: an album whose art is embedded in the files and has no cover
--- | file beside them shows none.
+-- | a text-mode websocket cannot carry, so the pictures are extracted on
+-- | the player instead (nix/module/art.nix) into a tree that mirrors the
+-- | library, one cover.jpg per album directory, whether the picture was a
+-- | file beside the audio or a frame inside it. That is why there is one
+-- | name to ask for here rather than a list of the names a ripper might
+-- | have used: the cache settles that question before the page is
+-- | involved.
 module Art where
 
 import Prelude
@@ -15,19 +18,10 @@ import Data.String (Pattern(..), Replacement(..), replaceAll)
 import Data.String as String
 import Types (State, isStream)
 
--- | The cover file names a library might use, in the order they are
--- | tried. Case matters on the filesystem the library lives on, so the
--- | capitalised spellings are listed too.
+-- | The names tried, in order. The cache writes exactly one, so an album
+-- | with no art costs a single 404 and the page stops asking.
 artNames :: Array String
-artNames =
-  [ "cover.jpg"
-  , "cover.jpeg"
-  , "cover.png"
-  , "folder.jpg"
-  , "front.jpg"
-  , "Cover.jpg"
-  , "Folder.jpg"
-  ]
+artNames = [ "cover.jpg" ]
 
 -- | The URL of the cover to try for a track, or Nothing when the host
 -- | serves no art, the track is a stream, or every name has been tried.

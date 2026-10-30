@@ -21,6 +21,7 @@ module Mpd
   , parseEntries
   , parseStats
   , parseSticker
+  , parseStickers
   , quote
   , songTitle
   , songLine
@@ -227,6 +228,24 @@ parseSticker ls = case lookup "sticker" (pairs ls) of
     Just i -> Just (String.drop (i + 1) kv)
     Nothing -> Nothing
   Nothing -> Nothing
+
+-- | A `sticker find song "" <name>` reply: alternating "file: <uri>" and
+-- | "sticker: <name>=<value>" lines, one pair for every song in the
+-- | database that carries the sticker.
+-- |
+-- | One command in place of one request per queue entry. At a few hundred
+-- | entries the per-song form put a few hundred round trips on the command
+-- | connection every time the queue changed, which is long enough to make
+-- | the page look broken while it caught up.
+parseStickers :: Array String -> Array (Tuple String String)
+parseStickers ls = (foldl step { uri: Nothing, done: [] } (pairs ls)).done
+  where
+  step acc (Tuple k v) = case k of
+    "file" -> acc { uri = Just v }
+    "sticker" -> case acc.uri, indexOf (Pattern "=") v of
+      Just u, Just i -> acc { done = snoc acc.done (Tuple u (String.drop (i + 1) v)) }
+      _, _ -> acc
+    _ -> acc
 
 -- | A command argument: backslash and double quote escaped, the whole thing
 -- | quoted.

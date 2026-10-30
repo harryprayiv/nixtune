@@ -232,15 +232,23 @@ queueView st =
   held = map _.from st.drag
   item i s =
     HH.li
-      [ HP.ref (rowRef i)
-      , classes
-          ( [ "song" ]
-              <> (if Just pos == playing then [ "current" ] else [])
-              <> (if not st.status.random && playing /= Nothing && Just pos < playing then [ "past" ] else [])
-              <> (if held == Just i then [ "held" ] else [])
-          )
-      , HP.style ("transform: translateY(" <> show (rowShift st.drag i) <> "px)")
-      ]
+      ( [ HP.ref (rowRef i)
+        , classes
+            ( [ "song" ]
+                <> (if Just pos == playing then [ "current" ] else [])
+                <> (if not st.status.random && playing /= Nothing && Just pos < playing then [ "past" ] else [])
+                <> (if held == Just i then [ "held" ] else [])
+            )
+        ]
+          -- The style is left off entirely for a row that is not moving,
+          -- which is almost all of them: a pointer event redraws the whole
+          -- list, and a queue of a few hundred makes the difference between
+          -- one attribute to compare per row and none worth having.
+          <> ( case rowShift st.drag i of
+                 0.0 -> []
+                 dy -> [ HP.style ("transform: translateY(" <> show dy <> "px)") ]
+             )
+      )
       [ HH.button
           [ cls "grip"
           , HP.title "Drag to reorder, or focus and use the arrow keys"

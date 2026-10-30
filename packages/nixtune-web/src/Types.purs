@@ -43,7 +43,7 @@ data Req
   | RStats
   | RBrowse String
   | RSearch String
-  | RSticker String
+  | RStickers
   | RFire
 
 -- | One connection: its socket, whether MPD has greeted on it, the lines
@@ -192,7 +192,7 @@ data Action
 type M o m = H.HalogenM State Action () o m
 
 idleCommand :: String
-idleCommand = "idle player mixer playlist options database update"
+idleCommand = "idle player mixer playlist options database update sticker"
 
 stickerName :: String
 stickerName = "nixtune.added_by"
@@ -245,10 +245,17 @@ arrived want got = case want, got of
   Just a, Just b -> a - b <= 1 && b - a <= 1
   _, _ -> false
 
+-- | A sticker request whose failure is not worth a banner. A player whose
+-- | sticker database is missing answers this with an error, and the only
+-- | consequence is that nobody's name appears beside a queue entry.
 isSticker :: Req -> Boolean
 isSticker = case _ of
-  RSticker _ -> true
+  RStickers -> true
   _ -> false
+
+-- | Every attribution in the database, in one command.
+stickerFind :: String
+stickerFind = "sticker find song \"\" " <> stickerName
 
 isStream :: String -> Boolean
 isStream uri = isJust (indexOf (Pattern "://") uri)

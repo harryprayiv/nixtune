@@ -39,10 +39,10 @@ module Main (main) where
 import Prelude
 
 import Caps as Caps
-import Data.Array (elem, filter, head, length, snoc, uncons, (:))
+import Data.Array (elem, head, length, snoc, uncons, (:))
 import Data.Array as Array
 import Data.Either (Either(..))
-import Data.Foldable (for_, lookup)
+import Data.Foldable (for_)
 import Data.Int (fromString, toNumber)
 import Data.Maybe (Maybe(..), fromMaybe, isNothing, maybe)
 import Data.Number as Number
@@ -75,10 +75,10 @@ import Types
   , idleCommand
   , initial
   , isSticker
-  , isStream
   , maxVolumeOf
   , searchLimit
   , shownVolume
+  , stickerFind
   , stickerName
   , unmuteFloor
   , volumeFloor
@@ -343,6 +343,7 @@ changed block = do
   send Cmd RStatus "status"
   send Cmd RCurrent "currentsong"
   when (elem "changed: playlist" block) (send Cmd RQueue "playlistinfo")
+  when (elem "changed: sticker" block) (send Cmd RStickers stickerFind)
   when (elem "changed: database" block || elem "changed: update" block) do
     send Cmd RStats "stats"
     st <- H.get
@@ -374,23 +375,9 @@ reply req block = case req of
         { current = cur
         , artTry = if map _.file cur == map _.file st.current then st.artTry else 0
         }
-    for_ cur \s -> askSticker s.file
-  RQueue -> do
-    let
-      q = Mpd.parseSongs block
-    H.modify_ _ { queue = q }
-    role <- H.gets _.role
-    when (role == Host) (for_ q \s -> askSticker s.file)
+  RQueue -> H.modify_ _ { queue = Mpd.parseSongs block }
   RStats -> H.modify_ _ { songs = Mpd.parseStats block }
   RBrowse p -> H.modify_ _ { path = p, entries = Mpd.parseEntries block }
   RSearch _ -> H.modify_ _ { entries = Mpd.parseEntries block }
-  RSticker uri -> for_ (Mpd.parseSticker block) \who ->
-    H.modify_ \st -> st { addedBy = (Tuple uri who) : filter (\(Tuple u _) -> u /= uri) st.addedBy }
+  RStickers -> H.modify_ _ { addedBy = Mpd.parseStickers block }
   RFire -> pure unit
-
--- | Ask for a track's attribution once; the reply lands in addedBy.
-askSticker :: forall o m. MonadAff m => String -> M o m Unit
-askSticker uri = do
-  known <- H.gets (lookup uri <<< _.addedBy)
-  when (isNothing known && not (isStream uri)) do
-    send Cmd (RSticker uri) ("sticker get song " <> Mpd.quote uri <> " " <> stickerName)

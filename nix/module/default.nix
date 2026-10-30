@@ -17,6 +17,7 @@
 #                  export changes
 #   volume.nix     writing the hardware volume, which MPD cannot do on this
 #                  card
+#   art.nix        pulling cover art out of the files into a served cache
 #   ui.nix         nginx, websocat, capabilities.json, the page
 #   airplay.nix    shairport-sync and the arbitration hooks
 #   upnp.nix       upmpdcli
@@ -73,6 +74,7 @@ in
     ./library.nix
     ./database.nix
     ./volume.nix
+    ./art.nix
     ./ui.nix
     ./airplay.nix
     ./upnp.nix
@@ -199,15 +201,26 @@ in
         type = types.bool;
         default = true;
         description = ''
-          Serve cover images out of the library, so the page can show the
-          art beside what is playing.
+          Show cover art beside what is playing.
 
-          MPD's own albumart and readpicture commands answer with binary,
-          which the text-mode websocket cannot carry, so the images come
-          from nginx instead: only files ending .jpg, .jpeg, .png or .webp
-          under the library, never the audio. Nothing is extracted from
-          tags, so an album with its art embedded in the files and no
-          cover file beside them shows none.
+          art.nix builds a cache: one cover.jpg per album directory, taken
+          from a picture file beside the audio when there is one and pulled
+          out of the tags with ffmpeg when there is not, since most
+          libraries keep the cover inside the files. nginx serves that
+          cache and nothing else, so no audio is reachable over HTTP. The
+          first scan over a large library runs for a while at idle
+          priority; afterwards only changed album directories cost
+          anything.
+        '';
+      };
+      albumArtSize = mkOption {
+        type = types.ints.between 64 4096;
+        default = 600;
+        description = ''
+          The longest edge, in pixels, a cached cover is scaled down to. A
+          picture already smaller than this is left alone. 600 is about
+          twice what the page draws on a phone, so it still looks right on
+          a desktop and on a high-density screen.
         '';
       };
       hostPath = mkOption {
@@ -256,9 +269,11 @@ in
 
     # What nixtune writes and expects to find again after a reboot. Read by
     # an impermanence setup; nixtune itself does nothing with it.
+    # Not readOnly: more than one part owns state, and each declares its
+    # own, so the definitions merge into one list for the consumer to read.
     persistPaths = mkOption {
       type = types.listOf types.str;
-      readOnly = true;
+      default = [ ];
       description = "Directories holding nixtune's state. Set by the parts that own them.";
     };
 

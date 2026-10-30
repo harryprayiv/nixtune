@@ -17,7 +17,7 @@ import Foreign (readString)
 import Halogen as H
 import Halogen.Query.Event as HQE
 import Mpd as Mpd
-import Types (Action(..), Conn(..), Link, M, Req(..), State)
+import Types (Action(..), Conn(..), Link, M, Req(..), State, stickerFind)
 import Web.HTML (window)
 import Web.HTML.Location as Location
 import Web.HTML.Window (location)
@@ -94,6 +94,7 @@ refreshAll = do
   send Cmd RCurrent "currentsong"
   send Cmd RQueue "playlistinfo"
   send Cmd RStats "stats"
+  send Cmd RStickers stickerFind
 
 browse :: forall o m. MonadAff m => String -> M o m Unit
 browse p = send Cmd (RBrowse p) ("lsinfo " <> Mpd.quote p)

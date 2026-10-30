@@ -25,8 +25,6 @@ let
     }
   ];
 
-  haveArt = cfg.library.export != null && cfg.ui.albumArt;
-
   capabilities = pkgs.writeTextDir "capabilities.json" (
     builtins.toJSON {
       hostname = config.networking.hostName;
@@ -46,8 +44,9 @@ let
       # either way.
       volumePath = cfg.volume.path;
       # Where cover images are served from, or null when there is no
-      # library or album art is off.
-      artPath = if haveArt then "/art" else null;
+      # library or album art is off. art.nix fills that cache and owns the
+      # nginx location that serves it.
+      artPath = cfg.art.path;
       maxVolume = cfg.mpd.maxVolume;
       publicUrl = cfg.ui.publicUrl;
       hostPath = cfg.ui.hostPath;
@@ -138,20 +137,6 @@ in
             proxyWebsockets = true;
             extraConfig = ''
               proxy_read_timeout 1h;
-            '';
-          };
-        }
-        # Cover images out of the library, and nothing else out of it: the
-        # regex admits four image extensions and the alias uses its
-        # capture, so a request for an audio file never matches here. These
-        # are worth caching, unlike the page: a cover changes when the
-        # album does.
-        // lib.optionalAttrs haveArt {
-          "~* ^/art/(.+\\.(?:jpe?g|png|webp))$" = {
-            extraConfig = ''
-              alias /srv/music/$1;
-              expires 1h;
-              add_header Cache-Control "public, max-age=3600";
             '';
           };
         };
