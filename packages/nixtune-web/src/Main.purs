@@ -84,7 +84,7 @@ import Types
   , View(..)
   , arrived
   , tagOf
-  , trackFilter
+  , trackTerms
   , trackHeight
   , trackPage
   , tracksRef
@@ -399,6 +399,7 @@ handle = case _ of
         , tagTracks = []
         }
       loadArtists
+      loadAlbums
       loadTracks
     AxArtist -> do
       H.modify_ _
@@ -408,7 +409,7 @@ handle = case _ of
         , albums = []
         , tagTracks = []
         }
-      for_ v \_ -> loadAlbums
+      loadAlbums
       loadTracks
     AxAlbum -> do
       H.modify_ _ { selAlbum = v }
@@ -553,6 +554,7 @@ refreshTags = do
   st <- H.get
   when st.genreColumn (cachedOrAsk AxGenre ("list " <> tagOf AxGenre))
   loadArtists
+  loadAlbums
   -- The list under the columns is the whole library until a column
   -- narrows it, so it is loaded alongside them rather than waiting for
   -- a choice.
@@ -595,11 +597,16 @@ loadArtists = do
       send Lib (RTagValues AxArtist) ("list artist genre " <> Mpd.quote g)
     _ -> cachedOrAsk AxArtist "list artist"
 
+-- | The album column is a filter like the others, so with no artist
+-- | picked it lists every album in the library, or every album in the
+-- | chosen genre.
 loadAlbums :: forall o m. MonadAff m => M o m Unit
 loadAlbums = do
   st <- H.get
-  for_ st.selArtist \a ->
-    send Lib (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
+  case st.selArtist, st.selGenre of
+    Just a, _ -> send Lib (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
+    Nothing, Just g | st.genreColumn -> send Lib (RTagValues AxAlbum) ("list album genre " <> Mpd.quote g)
+    _, _ -> cachedOrAsk AxAlbum "list album"
 
 -- | Start the track list over for whatever the columns now narrow to.
 -- | The count comes separately so the scrollbar is the real length from
@@ -616,7 +623,12 @@ loadTracks = do
   el <- H.getRef tracksRef
   for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
   st <- H.get
-  send Lib RTrackCount ("count " <> trackFilter st)
+  case trackTerms st of
+    -- Nothing picked: MPD has already counted the library in `stats`,
+    -- and there is no filter expression that `count` will accept for
+    -- "everything".
+    [] -> H.modify_ _ { tracksTotal = st.songs }
+    ts -> send Lib RTrackCount ("count " <> joinWith " " ts)
   trackPageFrom 0
 
 -- | One window of tracks. MPD evaluates the filter and hands back the
@@ -627,13 +639,14 @@ trackPageFrom from = do
   st <- H.get
   unless st.tracksPending do
     H.modify_ _ { tracksPending = true }
+    let
+      -- An empty needle matches every song, which is the only way MPD
+      -- will list the whole library through a filter.
+      query = case trackTerms st of
+        [] -> "search any \"\""
+        ts -> "find " <> joinWith " " ts
     send Lib (RTracks from)
-      ( "find " <> trackFilter st
-          <> " window "
-          <> show from
-          <> ":"
-          <> show (from + trackPage)
-      )
+      (query <> " window " <> show from <> ":" <> show (from + trackPage))
 
 -- | What to send to queue everything under one value of a column. An
 -- | album is qualified by the anchored artist, because album titles
@@ -714,10 +727,11 @@ changed block = do
   -- fetch above.
   when (elem "changed: playlist" block && st.view == Queue) (send Cmd RVetoes vetoFind)
   when (elem "changed: database" block || elem "changed: update" block) do
+    -- Only the folder tree is refreshed here. The tag columns follow
+    -- the database stamp that this `stats` carries, so reloading them
+    -- here as well would fetch the artist list twice for one rescan.
     send Cmd RStats "stats"
-    when (st.view == Library && isNothing st.searched) $ case st.mode of
-      Folders -> browse st.path
-      Tags -> refreshTags
+    when (st.view == Library && isNothing st.searched && st.mode == Folders) (browse st.path)
 
 -- | A command connection's reply, read against what was asked.
 reply :: forall o m. MonadAff m => Req -> Array String -> M o m Unit
@@ -774,8 +788,13 @@ reply req block = case req of
     st <- H.get
     when (not st.genreColumn || st.selGenre == Nothing) (keep AxArtist values)
   RTagValues AxAlbum -> do
-    H.modify_ _ { albums = Mpd.parseList "Album" block }
+    let
+      values = Mpd.parseList "Album" block
+    H.modify_ _ { albums = values }
     toTop AxAlbum
+    st <- H.get
+    -- Only the whole-library list is the one the cache is keyed on.
+    when (st.selArtist == Nothing && st.selGenre == Nothing) (keep AxAlbum values)
   RTrackCount -> H.modify_ _ { tracksTotal = (Mpd.parseCount block) }
   RTracks from -> do
     let

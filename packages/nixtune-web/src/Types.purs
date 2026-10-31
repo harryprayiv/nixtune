@@ -11,7 +11,7 @@ import Data.Array as Array
 import Data.Enum (enumFromTo)
 import Data.Maybe (Maybe(..), isJust, maybe)
 import Data.Foldable (lookup)
-import Data.String (Pattern(..), Replacement(..), indexOf, joinWith, replaceAll, split, toUpper, trim)
+import Data.String (Pattern(..), Replacement(..), indexOf, replaceAll, split, toUpper, trim)
 import Data.String.CodeUnits as CodeUnits
 import Data.Tuple (Tuple)
 import Halogen as H
@@ -516,18 +516,21 @@ trackHeight = 58.0
 tracksRef :: H.RefLabel
 tracksRef = H.RefLabel "tracks"
 
--- | What MPD is asked for, built from whatever the columns have
--- | narrowed to. Nothing picked is the whole library: `base ""` is the
--- | root of the music directory, which every track is under.
-trackFilter :: State -> String
-trackFilter st = case terms of
-  [] -> "base \"\""
-  ts -> joinWith " " ts
+-- | The filter terms the columns narrow to, empty when nothing is
+-- | picked.
+-- |
+-- | There is deliberately no term meaning "everything". MPD rejects
+-- | `base ""` with "Bad URI", and every other way of writing a filter
+-- | that matches all songs is a substring search, which `count` cannot
+-- | do. The unfiltered case is handled by its callers instead: the
+-- | total comes from `stats`, which MPD has already counted, and the
+-- | listing uses `search any ""`.
+trackTerms :: State -> Array String
+trackTerms st =
+  (if st.genreColumn then term "genre" st.selGenre else [])
+    <> term "artist" st.selArtist
+    <> term "album" st.selAlbum
   where
-  terms =
-    (if st.genreColumn then term "genre" st.selGenre else [])
-      <> term "artist" st.selArtist
-      <> term "album" st.selAlbum
   term tag = case _ of
     Nothing -> []
     Just v -> [ tag <> " " <> quoteArg v ]

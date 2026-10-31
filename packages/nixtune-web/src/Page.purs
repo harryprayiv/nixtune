@@ -593,7 +593,7 @@ tagColumn st axis =
     | null values = [ HH.li [ cls "val empty" ] [ HH.text waiting ] ]
     | otherwise = spacer first <> map row shown <> spacer (total - first - length shown)
   waiting = case axis of
-    AxAlbum -> "Pick an artist"
+    AxAlbum -> "Nothing here"
     AxArtist -> if st.genreColumn && sel == Nothing && st.selGenre == Nothing then "Pick a genre" else "Nothing here"
     AxGenre -> "Nothing here"
   marked = markedIn axis st
