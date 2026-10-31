@@ -9,6 +9,7 @@ import Caps (Station)
 import Data.Array (elem, length, null, take, (:))
 import Data.Array as Array
 import Data.Foldable (lookup)
+import Data.Int (toNumber)
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.String (Pattern(..), joinWith, split)
@@ -29,14 +30,16 @@ import Types
   , activeAxis
   , alphabet
   , axisLabel
-  , columnCap
+  , colRef
   , isStream
-  , letterOf
   , letterRailThreshold
   , lettersPresent
+  , initialOf
+  , overscan
+  , rowHeight
+  , viewportOf
   , searchLimit
   , selectionOf
-  , underLetter
   , valuesOf
   , waitingFor
   , waitingForTracks
@@ -472,57 +475,77 @@ tagColumn st axis =
             Nothing -> HH.text ""
         ]
     , HH.div [ cls "colbody" ]
-        [ HH.ul [ cls "vals" ] body
+        [ HH.ul
+            ( [ cls "vals"
+              , HP.ref (colRef axis)
+              -- Every scroll says where the column is now; Main turns
+              -- that into the slice below and nothing else happens
+              -- unless the slice actually moved.
+              , HE.handler (EventType "scroll") (Scrolled axis)
+              ]
+            )
+            body
         , if length values > letterRailThreshold then rail else HH.text ""
         ]
     ]
   where
   values = valuesOf axis st
   busy = waitingFor axis st && null values
-  letter = letterOf axis st
-  matching = underLetter letter values
-  -- An unnarrowed column past the cap draws nothing. The rail is beside
-  -- it and one tap turns it back into a list.
-  tooMany = letter == Nothing && length values > columnCap
-  shown = Array.take columnCap matching
-  hidden = length matching - length shown
+  total = length values
   sel = selectionOf axis st
   present = lettersPresent values
-  countText = case letter of
-    Just _ -> show (length matching) <> " of " <> show (length values)
-    Nothing -> show (length values)
+
+  -- The slice that is on screen. The whole column is still there as far
+  -- as the scrollbar and the scroll position are concerned: the rows
+  -- that are not drawn are stood in for by padding of exactly their
+  -- height, above and below.
+  vp = viewportOf axis st
+  first = clamp 0 (max 0 (total - 1)) (Int.floor (vp.top / rowHeight) - overscan)
+  wanted = Int.ceil (vp.height / rowHeight) + overscan * 2
+  shown = Array.slice first (min total (first + wanted)) values
+  -- The rows that are not drawn are stood in for by two empty rows of
+  -- exactly their height. This has to be CONTENT and not padding on the
+  -- scroller: box-sizing is border-box here, so padding taller than the
+  -- element's own max-height pushes the padding box past it and the
+  -- column stops scrolling altogether.
+  spacer n =
+    if n <= 0 then []
+    else [ HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber n * rowHeight) <> "px") ] [] ]
+
+  countText = show total
   body
     | busy = [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
     | null values = [ HH.li [ cls "val empty" ] [ HH.text waiting ] ]
-    | tooMany =
-        [ HH.li [ cls "val empty" ]
-            [ HH.text (show (length values) <> " entries. Pick a letter on the right, or search.") ]
-        ]
-    | otherwise =
-        map row shown
-          <>
-            ( if hidden > 0 then
-                [ HH.li [ cls "val empty" ]
-                    [ HH.text (show hidden <> " more under " <> fromMaybe "" letter <> ". Search to narrow further.") ]
-                ]
-              else []
-            )
+    | otherwise = spacer first <> map row shown <> spacer (total - first - length shown)
   waiting = case axis of
     AxAlbum -> "Pick an artist"
     AxArtist -> if st.genreColumn && sel == Nothing && st.selGenre == Nothing then "Pick a genre" else "Nothing here"
     AxGenre -> "Nothing here"
   row v =
     HH.li [ classes ([ "val" ] <> (if sel == Just v then [ "on" ] else [])) ]
-      [ HH.button [ cls "grow", HE.onClick \_ -> Pick axis (Just v) ] [ HH.text v ] ]
+      [ HH.button
+          [ cls "grow"
+          -- A row is one line of a fixed height, which is what the slice
+          -- arithmetic above depends on, so a long name is cut and kept
+          -- here in full.
+          , HP.title v
+          , HE.onClick \_ -> Pick axis (Just v)
+          ]
+          [ HH.text v ]
+      ]
+  -- The letter the column is sitting on, which is the one the rail
+  -- marks. It follows the scroll rather than being a thing you set.
+  atLetter = map initialOf (Array.index values (Int.floor (vp.top / rowHeight)))
   rail = HH.div [ cls "rail" ] (map letterButton alphabet)
   letterButton l =
     HH.button
-      [ classes (if letter == Just l then [ "on" ] else [])
+      [ classes (if atLetter == Just l then [ "on" ] else [])
       , HP.disabled (not (elem l present))
-      , HP.title ("Show entries under " <> l)
-      -- Tapping the letter already picked clears the filter, so the rail
-      -- is one control rather than a filter plus a way out of it.
-      , HE.onClick \_ -> PickLetter axis (if letter == Just l then Nothing else Just l)
+      , HP.title ("Scroll to " <> l)
+      -- The rail scrolls the column. Nothing is filtered and nothing is
+      -- hidden: the whole list is there to scroll through, and this is
+      -- the shortcut for not doing that over ten thousand names.
+      , HE.onClick \_ -> JumpTo axis l
       ]
       [ HH.text l ]
 

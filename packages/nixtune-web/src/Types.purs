@@ -176,9 +176,11 @@ type State =
   -- it needs no element measurement and no FFI, it works the same on a
   -- phone and a desktop, and over tens of thousands of artists it is the
   -- faster way to arrive anywhere.
-  , letterGenre :: Maybe String
-  , letterArtist :: Maybe String
-  , letterAlbum :: Maybe String
+  -- Where each column is scrolled to and how tall it is, which is all
+  -- the page needs to work out which rows are worth drawing.
+  , vpGenre :: Viewport
+  , vpArtist :: Viewport
+  , vpAlbum :: Viewport
   }
 
 initial :: State
@@ -219,9 +221,9 @@ initial =
   , selGenre: Nothing
   , selArtist: Nothing
   , selAlbum: Nothing
-  , letterGenre: Nothing
-  , letterArtist: Nothing
-  , letterAlbum: Nothing
+  , vpGenre: emptyViewport
+  , vpArtist: emptyViewport
+  , vpAlbum: emptyViewport
   }
 
 data Action
@@ -252,7 +254,8 @@ data Action
   | SetMode BrowseMode
   | ToggleGenreColumn
   | Pick Axis (Maybe String)
-  | PickLetter Axis (Maybe String)
+  | JumpTo Axis String
+  | Scrolled Axis Event
   | AddAlbum
   | PlayAlbum
   | SetQuery String
@@ -341,17 +344,42 @@ isStream uri = isJust (indexOf (Pattern "://") uri)
 letterRailThreshold :: Int
 letterRailThreshold = 40
 
--- | The most rows one column puts in the page.
+-- | A column shows every entry it has. Only the rows inside the scroll
+-- | viewport are put in the page, with a blank block above and below
+-- | standing in for the rest, so the scrollbar is the true length of the
+-- | list and the DOM holds a few dozen nodes instead of twelve thousand.
 -- |
--- | `list artist` over a library of seventy thousand tracks answers with
--- | something like twelve thousand names. Drawing them is two DOM nodes
--- | each, and every later redraw walks all of them: measured at 1190 ms
--- | to first paint on a desktop, and every state change after that
--- | repeated the cost. A column past this cap draws nothing until a
--- | letter narrows it, which is one tap and makes the rail the way in
--- | rather than an extra.
-columnCap :: Int
-columnCap = 400
+-- | That is what makes this work: the page has to know how tall a row is
+-- | rather than measure every one. index.html sets the same number on
+-- | .val, and the two have to agree.
+rowHeight :: Number
+rowHeight = 40.0
+
+-- | Rows drawn above and below the viewport, so a fast scroll does not
+-- | show a gap before the next frame lands.
+overscan :: Int
+overscan = 8
+
+-- | A column's scroll position and how much of it is on screen.
+type Viewport = { top :: Number, height :: Number }
+
+-- | Before a column has been scrolled or measured. The height is
+-- | deliberately larger than any column gets, so the first paint
+-- | overdraws rather than leaving the bottom of a tall column blank
+-- | until the first scroll event.
+emptyViewport :: Viewport
+emptyViewport = { top: 0.0, height: 760.0 }
+
+viewportOf :: Axis -> State -> Viewport
+viewportOf axis st = case axis of
+  AxGenre -> st.vpGenre
+  AxArtist -> st.vpArtist
+  AxAlbum -> st.vpAlbum
+
+-- | The scroll element of one column, so a new selection can put it
+-- | back at the top.
+colRef :: Axis -> H.RefLabel
+colRef axis = H.RefLabel ("col-" <> tagOf axis)
 
 -- | The letter a tag value files under: its first character in upper
 -- | case, or "#" when that is not A to Z. A leading article is NOT
@@ -365,22 +393,15 @@ initialOf s = case CodeUnits.uncons (toUpper (trim s)) of
 alphabet :: Array String
 alphabet = Array.cons "#" (map CodeUnits.singleton (enumFromTo 'A' 'Z'))
 
--- | A column narrowed to one initial, or whole when no letter is picked.
-underLetter :: Maybe String -> Array String -> Array String
-underLetter Nothing xs = xs
-underLetter (Just l) xs = Array.filter (\x -> initialOf x == l) xs
+-- | Where a letter starts in a column, so the rail can scroll to it.
+-- | The rail moves the column; it never hides any of it.
+firstUnder :: String -> Array String -> Maybe Int
+firstUnder l = Array.findIndex (\v -> initialOf v == l)
 
 -- | Which letters a column actually has entries under, so the rail can
--- | grey out the rest instead of offering an empty result.
+-- | grey out the rest instead of scrolling nowhere.
 lettersPresent :: Array String -> Array String
 lettersPresent xs = Array.nub (map initialOf xs)
-
--- | The letter picked for one column.
-letterOf :: Axis -> State -> Maybe String
-letterOf axis st = case axis of
-  AxGenre -> st.letterGenre
-  AxArtist -> st.letterArtist
-  AxAlbum -> st.letterAlbum
 
 -- | The values in one column, before the letter filter.
 valuesOf :: Axis -> State -> Array String

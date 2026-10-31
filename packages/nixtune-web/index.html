@@ -302,9 +302,20 @@ button:disabled { opacity: .45; cursor: default; }
 .col:not(.cur) { display: none; }
 .tagcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
 .tagcrumbs .crumb { background: var(--raised); border-color: var(--line); border-radius: 999px; padding: .3rem .7rem; }
-.vals { list-style: none; margin: 0; padding: .25rem; flex: 1; min-width: 0; overflow-y: auto; max-height: clamp(14rem, calc(100vh - 22rem), 40rem); overscroll-behavior: contain; }
-.val { display: flex; border-radius: 7px; }
-.val .grow { flex: 1; text-align: left; background: transparent; border-color: transparent; padding: .45rem .5rem; min-width: 0; overflow-wrap: anywhere; }
+/* Only the rows in view are in the page; the rest of the column's
+   height is padding of exactly their size, above and below, so the
+   scrollbar is the true length of the list and every entry is reachable
+   by scrolling. That arithmetic needs a row to be exactly 40px, which
+   is why a long name is cut here instead of wrapping. */
+/* overflow-anchor: none is load-bearing. The browser compensates for
+   content above the viewport changing height by shifting scrollTop,
+   which is precisely what the spacer above the slice does on every
+   update, so with anchoring on the column drifts and a jump from the
+   rail lands in the wrong place. */
+.vals { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; overflow-y: auto; overflow-anchor: none; max-height: clamp(14rem, calc(100vh - 22rem), 40rem); overscroll-behavior: contain; }
+.val { display: flex; height: 40px; }
+.vals .spacer { display: block; flex: none; }
+.val .grow { flex: 1; height: 40px; line-height: 40px; text-align: left; background: transparent; border-color: transparent; border-radius: 0; padding: 0 .65rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .val:hover { background: var(--raised); }
 .val.on { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .val.on .grow { color: var(--fg); font-weight: 600; }
@@ -333,7 +344,7 @@ button:disabled { opacity: .45; cursor: default; }
      usable on a short laptop screen and the ceiling stops a tall display
      from making one column taller than anybody scans. */
   .vals { max-height: clamp(16rem, calc(100vh - 24rem), 42rem); }
-  .val .grow { padding: .5rem .6rem; }
+  .val .grow { padding: 0 .75rem; }
 }
 
 /* Attribution, the guest footer, search, the QR tab, the scan badge. */

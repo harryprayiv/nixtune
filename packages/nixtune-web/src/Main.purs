@@ -67,6 +67,12 @@ import Reorder (dragTarget, rowMiddles)
 import Types
   ( Action(..)
   , Axis(..)
+  , Viewport
+  , colRef
+  , firstUnder
+  , rowHeight
+  , valuesOf
+  , viewportOf
   , BrowseMode(..)
   , Conn(..)
   , M
@@ -87,7 +93,8 @@ import Types
   , volumeFloor
   )
 import Volume (setVolume)
-import Web.Event.Event (EventType(..), preventDefault)
+import Web.DOM.Element as Element
+import Web.Event.Event (EventType(..), preventDefault, target)
 import Web.HTML (window)
 import Web.HTML.HTMLDocument as HTMLDocument
 import Web.HTML.Window (document)
@@ -314,12 +321,11 @@ handle = case _ of
       Tags -> refreshTags
   ToggleGenreColumn -> do
     on <- H.gets _.genreColumn
-    -- Turning the column off also drops whatever it was filtering by,
-    -- so the artist list is not left narrowed by a column nobody can see.
+    -- Turning the column off also drops whatever it was narrowing by,
+    -- so the artist list is not left filtered by a column nobody can see.
     H.modify_ _
       { genreColumn = not on
       , selGenre = Nothing
-      , letterGenre = Nothing
       , selArtist = Nothing
       , selAlbum = Nothing
       , albums = []
@@ -335,8 +341,6 @@ handle = case _ of
         , artists = []
         , albums = []
         , tagTracks = []
-        , letterArtist = Nothing
-        , letterAlbum = Nothing
         }
       loadArtists
     AxArtist -> do
@@ -345,16 +349,33 @@ handle = case _ of
         , selAlbum = Nothing
         , albums = []
         , tagTracks = []
-        , letterAlbum = Nothing
         }
       for_ v \_ -> loadAlbums
     AxAlbum -> do
       H.modify_ _ { selAlbum = v, tagTracks = [] }
       for_ v \_ -> loadTracks
-  PickLetter axis l -> H.modify_ case axis of
-    AxGenre -> _ { letterGenre = l }
-    AxArtist -> _ { letterArtist = l }
-    AxAlbum -> _ { letterAlbum = l }
+  -- The rail scrolls the column to where that letter starts. Nothing is
+  -- filtered and nothing is hidden: the scroll position moves, the
+  -- scroll event that follows recomputes the slice, and everything
+  -- above and below is still there to scroll to.
+  JumpTo axis l -> do
+    st <- H.get
+    for_ (firstUnder l (valuesOf axis st)) \i -> do
+      el <- H.getRef (colRef axis)
+      for_ el \e -> do
+        liftEffect (Element.setScrollTop (toNumber i * rowHeight) e)
+        -- Setting scrollTop fires no scroll event in every browser, so
+        -- the viewport is written here as well as read back later.
+        setViewport axis ((viewportOf axis st) { top = toNumber i * rowHeight })
+  -- A scroll is the one thing that happens sixty times a second, so it
+  -- writes nothing when the numbers have not moved.
+  Scrolled axis ev -> for_ (target ev >>= Element.fromEventTarget) \el -> do
+    top <- liftEffect (Element.scrollTop el)
+    height <- liftEffect (Element.clientHeight el)
+    st <- H.get
+    let
+      vp = viewportOf axis st
+    when (vp.top /= top || vp.height /= height) (setViewport axis { top, height })
   AddAlbum -> albumCommand false
   PlayAlbum -> albumCommand true
   SetQuery q -> H.modify_ _ { query = q }
@@ -391,6 +412,24 @@ handle = case _ of
   PlayPos n -> send Cmd RFire ("play " <> show n)
   DeletePos n -> send Cmd RFire ("delete " <> show n)
   UpdateLibrary -> send Cmd RFire "update"
+
+-- | Put a column back at the top, in the page and in the state, after
+-- | its contents have been replaced. The browser keeps an element's
+-- | scroll position across a patch, so without this a column scrolled
+-- | halfway down twelve thousand artists would open its replacement
+-- | halfway down as well.
+toTop :: forall o m. MonadAff m => Axis -> M o m Unit
+toTop axis = do
+  st <- H.get
+  setViewport axis ((viewportOf axis st) { top = 0.0 })
+  el <- H.getRef (colRef axis)
+  for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
+
+setViewport :: forall o m. Axis -> Viewport -> M o m Unit
+setViewport axis vp = H.modify_ case axis of
+  AxGenre -> _ { vpGenre = vp }
+  AxArtist -> _ { vpArtist = vp }
+  AxAlbum -> _ { vpAlbum = vp }
 
 -- | Load whichever columns the current selection calls for. `list genre`
 -- | is a few hundred rows and is asked for unconditionally while the
@@ -517,8 +556,14 @@ reply req block = case req of
   RBrowse p -> H.modify_ _ { path = p, entries = Mpd.parseEntries block }
   RSearch _ -> H.modify_ _ { entries = Mpd.parseEntries block }
   RStickers -> H.modify_ _ { addedBy = Mpd.parseStickers block }
-  RTagValues AxGenre -> H.modify_ _ { genres = Mpd.parseList "Genre" block }
-  RTagValues AxArtist -> H.modify_ _ { artists = Mpd.parseList "Artist" block }
-  RTagValues AxAlbum -> H.modify_ _ { albums = Mpd.parseList "Album" block }
+  RTagValues AxGenre -> do
+    H.modify_ _ { genres = Mpd.parseList "Genre" block }
+    toTop AxGenre
+  RTagValues AxArtist -> do
+    H.modify_ _ { artists = Mpd.parseList "Artist" block }
+    toTop AxArtist
+  RTagValues AxAlbum -> do
+    H.modify_ _ { albums = Mpd.parseList "Album" block }
+    toTop AxAlbum
   RTagTracks -> H.modify_ _ { tagTracks = Mpd.parseSongs block }
   RFire -> pure unit
