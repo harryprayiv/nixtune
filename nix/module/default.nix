@@ -246,6 +246,36 @@ in
       };
     };
 
+    party = {
+      enable = lib.mkEnableOption ''
+        party mode.
+
+        The guest page gains the queue, read only, with a veto button on
+        each entry. A guest's vote is written as an MPD sticker on the
+        track's URI, so every browser sees the same count without
+        anything on the player keeping score, and when the count reaches
+        party.vetoes the track leaves the queue and its votes are
+        cleared.
+
+        This adds no security and removes none. The guest page already
+        reaches the same websocket as the host page, so this is about
+        what the page OFFERS a guest, not about what the player permits.
+        A vote is one per browser per track, named by the nickname that
+        browser made up for itself, and anyone who clears their browser
+        storage votes again under a new name. For a room of invited
+        people that is the right trade. It is not a voting system and
+        should not be mistaken for one
+      '';
+      vetoes = mkOption {
+        type = types.ints.positive;
+        default = 3;
+        description = ''
+          How many distinct guests have to vote against a track before it
+          leaves the queue.
+        '';
+      };
+    };
+
     arbitration.resumeAfterRenderer = mkOption {
       type = types.bool;
       default = true;
