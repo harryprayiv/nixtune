@@ -65,29 +65,22 @@ data Req
   | RQueue
   | RStats
   | RBrowse String
-  | RSearch String
   | RStickers
   | RVetoes
-  -- One of the replies that make up a column, with the generation it
-  -- was asked at. A column narrowed by several values is several `list`
-  -- commands, so several replies build one column and each has to be
-  -- recognisable as belonging to the request that is still current.
+  -- A column's reply, with the generation it was asked at. A column is
+  -- one `list` command whatever is selected, so one reply builds it.
   | RTagValues Axis Int
-  -- A window of the track list. Which query it went to is recorded here
-  -- rather than worked out again when the reply lands: by then the
-  -- counts may have moved, and a count of zero on an earlier query makes
-  -- the same row number name a different query than it did when the
-  -- request went out.
+  -- A window of the track list:
   --
   --   gen     the selection it belongs to
-  --   from    the row it starts at in the whole result
-  --   query   which of the selection's queries was asked
-  --   offset  how far into that query the window started
+  --   from    the row it starts at
   --   want    how many rows were asked for, so a short reply is visible
-  | RTracks { gen :: Int, from :: Int, query :: Int, offset :: Int, want :: Int }
-  -- How many tracks one of the track queries matches: the generation,
-  -- and which query it is.
-  | RTrackCount Int Int
+  | RTracks { gen :: Int, from :: Int, want :: Int }
+  -- How many tracks the list's filter matches, at a generation.
+  | RTrackCount Int
+  -- Whether MPD takes regular expression filters, asked once per
+  -- command connection. An ACK means it was built without pcre.
+  | RProbe
   | RFire
 
 -- | One connection: its socket, whether MPD has greeted on it, and two
@@ -164,8 +157,12 @@ type State =
   -- the key the browser's copy of the library index is stored under.
   , dbStamp :: Int
   , path :: String
+  -- What is in the search box. The committed search is the browser's
+  -- own (Browse.Browser.query); this is the text being typed, and
+  -- queryTick names the latest keystroke so a pause can tell whether
+  -- another came after it.
   , query :: String
-  , searched :: Maybe String
+  , queryTick :: Int
   , entries :: Array Entry
   , addedBy :: Array (Tuple String String)
   -- Who has voted against what, read from the nixtune.vetoes sticker.
@@ -225,7 +222,7 @@ initial =
   , dbStamp: 0
   , path: ""
   , query: ""
-  , searched: Nothing
+  , queryTick: 0
   , entries: []
   , addedBy: []
   , vetoes: []
@@ -289,8 +286,12 @@ data Action
   | Veto String (Maybe Int)
   | AddFilter
   | PlayFilter
+  -- A keystroke in the search box, a pause after one, Enter, and the
+  -- clear button.
   | SetQuery String
+  | QueryPaused Int
   | Search Event
+  | ClearQuery
   | PlayStation Station
   | AddPath String
   | PlayPath String
@@ -313,11 +314,13 @@ vetoName = "nixtune.vetoes"
 nicknameKey :: String
 nicknameKey = "nixtune.nickname"
 
--- | The most results one search returns. MPD sends a reply in one piece
--- | and drops the client if it does not fit its output buffer, so the
--- | page asks for a window rather than everything that matches.
-searchLimit :: Int
-searchLimit = 200
+-- | How long typing has to pause before the search is applied, and how
+-- | many characters it needs. Enter applies any length at once.
+searchPauseMs :: Number
+searchPauseMs = 250.0
+
+searchMinChars :: Int
+searchMinChars = 2
 
 -- | The lowest level the bar itself can reach. The bar cannot silence the
 -- | player: zero belongs to the mute button, which remembers what to come
@@ -358,13 +361,15 @@ arrived want got = case want, got of
   Just a, Just b -> a - b <= 1 && b - a <= 1
   _, _ -> false
 
--- | A sticker request whose failure is not worth a banner. A player whose
--- | sticker database is missing answers this with an error, and the only
--- | consequence is that nobody's name appears beside a queue entry.
-isSticker :: Req -> Boolean
-isSticker = case _ of
+-- | A request whose failure is not worth a banner. A player whose
+-- | sticker database is missing answers a sticker request with an error,
+-- | and the only consequence is that nobody's name appears beside a queue
+-- | entry. The regex probe failing is its answer, not a fault.
+isQuiet :: Req -> Boolean
+isQuiet = case _ of
   RStickers -> true
   RVetoes -> true
+  RProbe -> true
   _ -> false
 
 -- | Every attribution in the database, in one command.

@@ -22,7 +22,8 @@ module Mpd
   , Stats
   , parseStats
   , parseCount
-  , parseList
+  , Grouped
+  , parseGrouped
   , parseSticker
   , parseStickers
   , quote
@@ -256,13 +257,29 @@ parseSticker ls = case lookup "sticker" (pairs ls) of
 parseCount :: Array String -> Int
 parseCount ls = fromMaybe 0 (lookup "songs" (pairs ls) >>= fromString)
 
--- | A `list <tag> ...` reply: one "<Tag>: value" line per distinct
--- | value, in MPD's own order. Empty values are dropped, because a file
--- | with no genre answers with an empty string and an empty row in a
--- | column is not selectable.
-parseList :: String -> Array String -> Array String
-parseList tag ls =
-  Array.filter (_ /= "") (map (\(Tuple _ v) -> v) (Array.filter (\(Tuple k _) -> k == tag) (pairs ls)))
+-- | One value of a `list <tag> ... group <g> ...` reply, with the group
+-- | values it was printed under.
+type Grouped = { value :: String, context :: Array (Tuple String String) }
+
+-- | A `list` reply, grouped or not. MPD prints each group value on its
+-- | own line before the values nested under it, so the group lines seen
+-- | so far, latest per label, are the context of every value line that
+-- | follows. `target` is the label of the value lines ("AlbumArtist").
+-- |
+-- | Built with scanl and one pass of mapMaybe rather than a fold that
+-- | appends, because a whole-library list is ten thousand lines and an
+-- | append copies the array it appends to.
+parseGrouped :: String -> Array String -> Array Grouped
+parseGrouped target ls = Array.catMaybes (Array.zipWith pick ps contexts)
+  where
+  ps = pairs ls
+  contexts = Array.scanl step [] ps
+  step ctx (Tuple k v)
+    | k == target = ctx
+    | otherwise = Array.cons (Tuple k v) (Array.filter (\(Tuple k' _) -> k' /= k) ctx)
+  pick (Tuple k v) ctx
+    | k == target = Just { value: v, context: ctx }
+    | otherwise = Nothing
 
 -- | A `sticker find song "" <name>` reply: alternating "file: <uri>" and
 -- | "sticker: <name>=<value>" lines, one pair for every song in the

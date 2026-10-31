@@ -181,15 +181,20 @@ send conn req line = do
       when (conn /= Idle) (modifyLink conn \l -> l { asked = snoc l.asked req })
     _ -> pure unit
 
--- | What the page asks for the moment a connection comes up. The queue
--- | itself is NOT here: `status` carries its length, which is all any
--- | view but the Queue needs, and fetching a few hundred entries nobody
--- | is looking at is what made browsing stall after queueing a track.
+-- | What the page asks for the moment the command connection comes up.
+-- | The queue itself is NOT here: `status` carries its length, which is
+-- | all any view but the Queue needs, and fetching a few hundred entries
+-- | nobody is looking at is what made browsing stall after queueing a
+-- | track.
 refreshAll :: forall o m. MonadAff m => M o m Unit
 refreshAll = do
   send Cmd RStatus "status"
   send Cmd RCurrent "currentsong"
   send Cmd RStats "stats"
+  -- Whether MPD can match a regular expression. Multi-value selections
+  -- in the tag browser depend on it; the answer changes only with a
+  -- different MPD build, so it is asked once per connection.
+  send Cmd RProbe "find \"(title =~ '^$')\" window 0:1"
 
 browse :: forall o m. MonadAff m => String -> M o m Unit
 browse p = send Lib (RBrowse p) ("lsinfo " <> Mpd.quote p)

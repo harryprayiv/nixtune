@@ -34,8 +34,10 @@
 -- |   Art.purs      cover images from the library
 -- |   Nick.purs     the role and the guest nickname
 -- |   Cache.purs    the library index, kept between visits
--- |   Page.purs     everything drawn
--- |   Ui.purs       class attributes and glyphs
+-- |   Page.purs     everything drawn but the Library view
+-- |   Library.purs  the Library view: search, tag browser, folders
+-- |   Filter.purs   MPD filter expressions and their escaping
+-- |   Ui.purs       class attributes, glyphs, the format badge
 -- |   Mpd.purs      the protocol's text, parsed
 -- |   Caps.purs     capabilities.json
 module Main (main) where
@@ -52,6 +54,7 @@ import Data.Int (fromString, toNumber)
 import Data.Maybe (Maybe(..), fromMaybe, isJust, isNothing, maybe)
 import Data.Number as Number
 import Data.String (joinWith, trim)
+import Data.String.CodeUnits (toCharArray)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), delay)
@@ -81,9 +84,10 @@ import Types
   , arrived
   , idleCommand
   , initial
-  , isSticker
+  , isQuiet
   , maxVolumeOf
-  , searchLimit
+  , searchMinChars
+  , searchPauseMs
   , shownVolume
   , stickerFind
   , stickerName
@@ -190,7 +194,7 @@ handle = case _ of
       st <- H.get
       when (st.ticks `mod` 10 == 0) do
         send Cmd RStats "stats"
-        when (st.view == Library && isNothing st.searched) $ case st.mode of
+        when (st.view == Library) $ case st.mode of
           Folders -> browse st.path
           Tags -> Tags.recount
   Open v -> do
@@ -209,7 +213,7 @@ handle = case _ of
       send Cmd RVetoes vetoFind
     when (v == Library) do
       st <- H.get
-      when (isNothing st.searched) $ case st.mode of
+      case st.mode of
         Folders -> browse st.path
         Tags -> showTags
   Measure -> Tags.measure
@@ -328,10 +332,10 @@ handle = case _ of
     H.modify_ \st -> st { seekDraft = Nothing, status = st.status { elapsed = t } }
     send Cmd RFire ("seekcur " <> show t)
   Browse p -> do
-    H.modify_ _ { searched = Nothing, query = "", mode = Folders }
+    H.modify_ _ { mode = Folders }
     browse p
   SetMode m -> do
-    H.modify_ _ { mode = m, searched = Nothing, query = "" }
+    H.modify_ _ { mode = m }
     st <- H.get
     case m of
       Folders -> browse st.path
@@ -369,16 +373,27 @@ handle = case _ of
       for_ songId \i -> when (not (any (\q -> q.file == uri) st.queue)) (send Cmd RFire ("deleteid " <> show i))
       send Cmd RFire ("sticker delete song " <> Mpd.quote uri <> " " <> vetoName)
       H.modify_ \s -> s { vetoes = filter (\(Tuple u _) -> u /= uri) s.vetoes }
-  SetQuery q -> H.modify_ _ { query = q }
+  -- The search narrows the columns and the list as it is typed, once
+  -- typing pauses. Each keystroke takes a number; a pause applies the
+  -- search only if no keystroke came after the one it was waiting on.
+  SetQuery q -> do
+    st <- H.modify \s -> s { query = q, queryTick = s.queryTick + 1 }
+    let
+      tick = st.queryTick
+    void $ H.fork do
+      H.liftAff (delay (Milliseconds searchPauseMs))
+      handle (QueryPaused tick)
+  QueryPaused tick -> do
+    st <- H.get
+    when (tick == st.queryTick) (Tags.commitQuery (typedQuery false st.query))
+  -- Enter applies whatever is there, however short, at once.
   Search ev -> do
     liftEffect (preventDefault ev)
-    q <- H.gets (trim <<< _.query)
-    unless (q == "") do
-      H.modify_ _ { searched = Just q }
-      -- window, because MPD closes a connection whose reply overruns its
-      -- output buffer, and "any" over a library this size can do that on
-      -- a common word. The page says when a result set was cut.
-      send Lib (RSearch q) ("search any " <> Mpd.quote q <> " window 0:" <> show searchLimit)
+    st <- H.modify \s -> s { queryTick = s.queryTick + 1 }
+    Tags.commitQuery (typedQuery true st.query)
+  ClearQuery -> do
+    H.modify_ \s -> s { query = "", queryTick = s.queryTick + 1 }
+    Tags.commitQuery Nothing
   PlayStation s -> do
     send Cmd RFire "clear"
     send Cmd RFire ("add " <> Mpd.quote s.url)
@@ -412,7 +427,7 @@ handle = case _ of
 showTags :: forall o m. MonadAff m => M o m Unit
 showTags = do
   st <- H.get
-  when (null st.browser.artist.values && st.browser.artist.pending == 0) Tags.reload
+  when (null st.browser.artist.values && not st.browser.artist.pending) Tags.reload
   Tags.sync
 
 -- | A greeting, or the line that ends a reply. These are the only two
@@ -435,7 +450,7 @@ finished conn l
         -- ask again.
         Lib -> when (Array.null held) do
           st <- H.get
-          when (st.view == Library && isNothing st.searched) $ case st.mode of
+          when (st.view == Library) $ case st.mode of
             Folders -> browse st.path
             Tags -> Tags.reload
   | otherwise = do
@@ -453,7 +468,7 @@ finished conn l
             modifyLink conn _ { asked = tail }
             -- A missing sticker is reported by MPD as an error; it is
             -- the normal state of a track nobody attributed.
-            when (Mpd.isError l && not (isSticker req)) (H.modify_ _ { error = Just l })
+            when (Mpd.isError l && not (isQuiet req)) (H.modify_ _ { error = Just l })
             unless (Mpd.isError l) (reply req block)
 
 -- | The idle connection's reply: which subsystems changed.
@@ -475,7 +490,7 @@ changed block = do
     -- the database stamp that this `stats` carries, so reloading them
     -- here as well would fetch the artist list twice for one rescan.
     send Cmd RStats "stats"
-    when (st.view == Library && isNothing st.searched && st.mode == Folders) (browse st.path)
+    when (st.view == Library && st.mode == Folders) (browse st.path)
 
 -- | A command connection's reply, read against what was asked.
 reply :: forall o m. MonadAff m => Req -> Array String -> M o m Unit
@@ -517,10 +532,22 @@ reply req block = case req of
       mode <- H.gets _.mode
       when (mode == Tags) Tags.reload
   RBrowse p -> H.modify_ _ { path = p, entries = Mpd.parseEntries block }
-  RSearch _ -> H.modify_ _ { entries = Mpd.parseEntries block }
   RStickers -> H.modify_ _ { addedBy = Mpd.parseStickers block }
   RVetoes -> H.modify_ _ { vetoes = Mpd.parseStickers block }
   RTagValues axis gen -> Tags.tagValues axis gen block
-  RTrackCount gen i -> Tags.trackCount gen i block
+  RTrackCount gen -> Tags.trackCount gen block
   RTracks w -> Tags.tracks w block
+  -- An OK is the answer; the reply's rows do not matter.
+  RProbe -> Tags.modifyBrowser _ { regex = true }
   RFire -> pure unit
+
+-- | What the search box holds, as a search: trimmed, and Nothing when it
+-- | is empty or, unless Enter was pressed, shorter than searchMinChars.
+typedQuery :: Boolean -> String -> Maybe String
+typedQuery enter raw =
+  let
+    q = trim raw
+  in
+    if q == "" then Nothing
+    else if enter || length (toCharArray q) >= searchMinChars then Just q
+    else Nothing

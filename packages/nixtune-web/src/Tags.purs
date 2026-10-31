@@ -10,19 +10,20 @@ import Browse
   ( Axis
   , Browser
   , Column
+  , TagValue
   , Tracks
   , activeAxis
   , cleared
   , columnOf
+  , columnValues
   , firstUnder
   , heldTo
+  , inListOrder
   , isPlain
-  , listCommands
-  , listLabel
+  , listCommand
   , modifyColumn
   , orElse
   , pickedBy
-  , queryAt
   , rightOf
   , rowHeight
   , rowOfValue
@@ -33,25 +34,23 @@ import Browse
   , toggled
   , topRow
   , topValue
-  , trackCombos
+  , trackFilter
   , trackHeight
   , trackPage
-  , tracksTotal
-  , union
+  , yearOrdered
   )
 import Cache as Cache
 import Data.Array as Array
 import Data.Foldable (for_)
 import Data.Int (toNumber)
 import Data.Int as Int
-import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Tuple (Tuple(..))
+import Data.Maybe (Maybe(..), fromMaybe, isNothing)
 import Effect.Aff.Class (class MonadAff)
 import Effect.Class (liftEffect)
 import Halogen as H
 import Mpd as Mpd
 import Net (busy, reopen, send)
-import Types (Conn(..), M, Req(..), View(..), colRef, tracksRef)
+import Types (BrowseMode(..), Conn(..), M, Req(..), View(..), colRef, tracksRef)
 import Web.DOM.Element as Element
 import Web.Event.Event (Event, target)
 import Web.UIEvent.MouseEvent (MouseEvent)
@@ -86,17 +85,24 @@ modifyTracks f = modifyBrowser \br -> br { tracks = f br.tracks }
 -- | anchor; the platform's own modifier adds or removes one row. All
 -- | three are what the row would do in the iTunes column browser.
 -- |
+-- | More than one value in a column is one regular expression in the
+-- | filter, so on an MPD without pcre the modifiers are ignored and every
+-- | click is a plain one. The page does not fall back to one command per
+-- | combination of values: that was the old design, and it could not be
+-- | sorted as one list.
+-- |
 -- | The column that was clicked is not reloaded and not scrolled, so
 -- | the row that was clicked stays exactly where it is. Everything to
 -- | its right goes back to All and is asked for again.
 choose :: forall o m. MonadAff m => Axis -> String -> MouseEvent -> M o m Unit
 choose axis v ev = do
-  col <- getColumn axis
+  br <- getBrowser
   let
-    shift = MouseEvent.shiftKey ev
-    extend = MouseEvent.ctrlKey ev || MouseEvent.metaKey ev
+    col = columnOf axis br
+    shift = br.regex && MouseEvent.shiftKey ev
+    extend = br.regex && (MouseEvent.ctrlKey ev || MouseEvent.metaKey ev)
     selected
-      | shift = spanBetween (fromMaybe v col.anchor) v col.values
+      | shift = spanBetween (fromMaybe v col.anchor) v (map _.display col.values)
       | extend = toggled v col.selected
       | otherwise = [ v ]
     anchor = if shift then col.anchor `orElse` Just v else Just v
@@ -115,13 +121,13 @@ clearColumn axis = do
 -- | Drop whatever the library connection is still working on.
 -- |
 -- | MPD answers one command at a time per connection, in the order they
--- | arrived, and nothing cancels a command it has started. The three
--- | whole-library listings the browser opens with take seconds on a
--- | library this size, so a click that lands while they are in flight
--- | waits for all of them before the player so much as reads it. Closing
--- | the socket throws that work away; what the click asks for goes out
--- | on a connection with nothing in front of it, and `send` holds those
--- | requests until the new socket has greeted.
+-- | arrived, and nothing cancels a command it has started. The
+-- | whole-library listings take seconds on a library this size, so a
+-- | click that lands while they are in flight would wait for all of them
+-- | before the player so much as read it. Closing the socket throws that
+-- | work away; what the click asks for goes out on a connection with
+-- | nothing in front of it, and `send` holds those requests until the new
+-- | socket has greeted.
 cancelLibrary :: forall o m. MonadAff m => M o m Unit
 cancelLibrary = do
   st <- H.get
@@ -177,8 +183,25 @@ toggleGenreColumn = do
     , artist = br.artist { selected = [], anchor = Nothing }
     , album = br.album { selected = [], anchor = Nothing }
     }
+  cancelLibrary
   reload
   sync
+
+-- | A new search text, or none. It narrows every column and the list, so
+-- | everything is asked for again; selections are kept, and a selection
+-- | the narrowed column no longer holds is dropped when that column's
+-- | reply lands, like any other selection that has gone. Typing in the
+-- | folder view moves to the tag browser, because that is where a search
+-- | shows its result.
+commitQuery :: forall o m. MonadAff m => Maybe String -> M o m Unit
+commitQuery q = do
+  br <- getBrowser
+  unless (q == br.query) do
+    modifyBrowser _ { query = q }
+    H.modify_ _ { mode = Tags }
+    cancelLibrary
+    reload
+    sync
 
 -- ---------------------------------------------------------------------
 -- Loading columns
@@ -191,9 +214,7 @@ toggleGenreColumn = do
 -- | through one connection in the order it was asked. The column the
 -- | next click will land in goes first; the track list, which with no
 -- | selection is the whole library and the most expensive thing here,
--- | goes last. Before this the album column and the whole-library
--- | listing were queued ahead of the artist list and a click sat behind
--- | both of them.
+-- | goes last.
 reload :: forall o m. MonadAff m => M o m Unit
 reload = do
   br <- getBrowser
@@ -204,7 +225,7 @@ reload = do
   for_ rest loadColumn
   loadTracks
 
--- | Bring the columns and the counts up to date without moving anything,
+-- | Bring the columns and the count up to date without moving anything,
 -- | which is what the ten-second tick does while a scan is running. The
 -- | browser's store is bypassed: the database stamp does not move until
 -- | the scan ends, and the point is to show what has been scanned so far.
@@ -212,58 +233,40 @@ recount :: forall o m. MonadAff m => M o m Unit
 recount = do
   br <- getBrowser
   for_ (shownAxes br) (load false)
-  for_ (Array.mapWithIndex Tuple br.tracks.queries) \(Tuple i q) ->
-    unless (q.terms == "") (send Lib (RTrackCount br.tracks.gen i) ("count " <> q.terms))
+  for_ (trackFilter br) \f -> send Lib (RTrackCount br.tracks.gen) ("count " <> Mpd.quote f)
 
 loadColumn :: forall o m. MonadAff m => Axis -> M o m Unit
 loadColumn = load true
 
--- | One column, built from the selection to its left.
+-- | One column, built from the selection to its left and the search.
 -- |
 -- | A column narrowed by nothing is one of the three whole-library
 -- | lists, which is what the browser's store holds, so it is answered
--- | from there when the database has not moved since. A column narrowed
--- | by a selection is one `list` per combination of those values,
--- | because MPD's filters have no OR, and the replies are unioned as
--- | they arrive. It is never cached: there are hundreds of genres and
--- | thousands of artists, and each narrowed list is small anyway.
--- |
--- | The column's current values are left in place while the request is
--- | out. A column being refreshed shows what it had until the new list
--- | is complete; a column that was cleared shows that it is loading.
+-- | from there when the database has not moved since. Otherwise it is
+-- | one `list` command, whatever is selected.
 load :: forall o m. MonadAff m => Boolean -> Axis -> M o m Unit
 load useCache axis = do
   st <- H.get
   let
     br = st.browser
-    plain = isPlain axis br
   hit <-
-    if plain && useCache then liftEffect (Cache.read (tagOf axis) st.dbStamp)
+    if useCache && isPlain axis br then liftEffect (Cache.read (tagOf axis) st.dbStamp)
     else pure Nothing
   case hit of
     Just values | not (Array.null values) -> arrive axis values false
     _ -> do
       let
-        cmds = listCommands axis br
         gen = (columnOf axis br).gen + 1
-      modifyCol axis _ { gen = gen, pending = Array.length cmds, expected = Array.length cmds, arriving = [] }
-      for_ cmds (send Lib (RTagValues axis gen))
+      modifyCol axis _ { gen = gen, pending = true, byYear = yearOrdered axis br }
+      send Lib (RTagValues axis gen) (listCommand axis br)
 
--- | One of the replies that make up a column. The column is finished
--- | when the last of them has arrived; a reply from before the last
--- | click is thrown away rather than merged into a column it does not
--- | belong to.
+-- | A column's reply. A reply from before the last click is thrown away
+-- | rather than shown in a column it does not belong to.
 tagValues :: forall o m. MonadAff m => Axis -> Int -> Array String -> M o m Unit
 tagValues axis gen block = do
   col <- getColumn axis
-  when (gen == col.gen && col.pending > 0) do
-    let
-      arriving = col.arriving <> Mpd.parseList (listLabel axis) block
-      left = col.pending - 1
-    modifyCol axis _ { arriving = arriving, pending = left }
-    -- One command, one reply: MPD's own order, kept exactly. Only a
-    -- union of several replies has to be merged.
-    when (left == 0) (arrive axis (if col.expected <= 1 then arriving else union arriving) true)
+  when (gen == col.gen && col.pending) $
+    arrive axis (columnValues axis col.byYear block) true
 
 -- | A column's new contents are complete, from MPD or from the store.
 -- |
@@ -271,43 +274,42 @@ tagValues axis gen block = do
 -- | same as before, so a refresh never moves anything under the pointer.
 -- | When the list did change and the column holds a selection, the
 -- | first selected row goes to the top, which is where the row worth
--- | looking at should be; everything earlier in the alphabet is one
--- | scroll back. With no selection the value that was at the top stays
--- | at the top.
+-- | looking at should be; everything earlier is one scroll back. With no
+-- | selection the value that was at the top stays at the top.
 -- |
 -- | A selection the new contents no longer hold has gone, and what it
 -- | was narrowing is asked for again. That happens after a rescan that
--- | removed something, and not otherwise.
-arrive :: forall o m. MonadAff m => Axis -> Array String -> Boolean -> M o m Unit
+-- | removed something, and when a search no longer matches it.
+arrive :: forall o m. MonadAff m => Axis -> Array TagValue -> Boolean -> M o m Unit
 arrive axis values store = do
   st <- H.get
   let
     br = st.browser
     col = columnOf axis br
-    kept = Array.filter (\v -> Array.elem v values) col.selected
-    anchor = col.anchor >>= \a -> if Array.elem a values then Just a else Nothing
-    next = col { values = values, selected = kept, anchor = anchor, arriving = [], pending = 0 }
-    changed = values /= col.values
+    held v = Array.any (\x -> x.display == v) values
+    kept = Array.filter held col.selected
+    anchor = col.anchor >>= \a -> if held a then Just a else Nothing
+    next = col { values = values, selected = kept, anchor = anchor, pending = false }
+    changed = map _.display values /= map _.display col.values
   modifyCol axis (const next)
   when changed do
     let
       row = selectionRow next `orElse` (topValue col >>= \v -> rowOfValue v next)
     for_ row \r -> scrollColumn axis (toNumber r * rowHeight)
   when (kept /= col.selected) (narrow axis)
-  -- Only the three whole-library lists are what the browser's store is
-  -- keyed on; a narrowed one is not that list.
-  when (store && isPlain axis br) do
-    stamp <- H.gets _.dbStamp
-    liftEffect (Cache.write (tagOf axis) stamp values)
+  -- Only the whole-library lists are what the browser's store is keyed
+  -- on; a narrowed or searched one is not that list.
+  when (store && isPlain axis br) $
+    liftEffect (Cache.write (tagOf axis) st.dbStamp values)
 
--- | The library connection went away with requests outstanding. Their
--- | replies will never come, so nothing may wait for them; the next
--- | greeting asks for everything again.
+-- | The library connection went away, or was dropped to cancel. Replies
+-- | to what was outstanding will never come, so nothing may wait for
+-- | them; whatever asks next asks again.
 dropPending :: forall o m. M o m Unit
 dropPending = modifyBrowser \br -> br
-  { genre = br.genre { pending = 0, arriving = [] }
-  , artist = br.artist { pending = 0, arriving = [] }
-  , album = br.album { pending = 0, arriving = [] }
+  { genre = br.genre { pending = false }
+  , artist = br.artist { pending = false }
+  , album = br.album { pending = false }
   , tracks = br.tracks { pending = false }
   }
 
@@ -383,30 +385,27 @@ sync = do
 -- ---------------------------------------------------------------------
 -- The track list
 
--- | Start the track list over for whatever the columns now narrow to.
+-- | Start the track list over for whatever the columns and the search
+-- | now narrow to.
 -- |
--- | The selection comes to one query per combination of the values
--- | picked, since MPD cannot be asked for a union, and no selection at
--- | all is one query for the whole library whose count is already known
--- | from `stats`. The counts go out together so the scrollbar is the
--- | real length as soon as they land, and the first page goes out beside
--- | them rather than behind them: row zero is in the first query
--- | whatever the counts turn out to be, so there is nothing to wait for.
+-- | That is one filter, whatever is selected, so it is one `count` for
+-- | the scrollbar and one `find` per page. With no filter at all the list
+-- | is the whole library, whose size `stats` already gave. The first page
+-- | goes out beside the count rather than behind it: row zero exists
+-- | whatever the count turns out to be.
 loadTracks :: forall o m. MonadAff m => M o m Unit
 loadTracks = do
   st <- H.get
   let
-    cs = trackCombos st.browser
+    f = trackFilter st.browser
     gen = st.browser.tracks.gen + 1
-    queries =
-      if Array.null cs then [ { terms: "", count: st.songs } ]
-      else map (\c -> { terms: c, count: 0 }) cs
   modifyTracks \t -> t
     { rows = []
     , from = 0
     , pending = false
     , gen = gen
-    , queries = queries
+    , total = if isNothing f then st.songs else 0
+    , counted = isNothing f
     , vp = t.vp { top = 0.0 }
     -- The selection belonged to the list that has just been replaced.
     , picked = []
@@ -414,13 +413,15 @@ loadTracks = do
     }
   el <- H.getRef tracksRef
   for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
-  for_ (Array.mapWithIndex Tuple cs) \(Tuple i c) -> send Lib (RTrackCount gen i) ("count " <> c)
+  for_ f \e -> send Lib (RTrackCount gen) ("count " <> Mpd.quote e)
   trackPageFrom 0
 
--- | `stats` came in: the whole-library query's count is its song count.
+-- | `stats` came in: with no filter, the list is that many songs.
 setLibraryCount :: forall o m. Int -> M o m Unit
-setLibraryCount n = modifyTracks \t -> t
-  { queries = map (\q -> if q.terms == "" then q { count = n } else q) t.queries }
+setLibraryCount n = do
+  br <- getBrowser
+  when (isNothing (trackFilter br)) $
+    modifyTracks _ { total = n, counted = true }
 
 -- | Ask for whatever rows the viewport needs that are not held. Asking
 -- | when the drawn slice comes within one screen of the end means the
@@ -429,11 +430,10 @@ fetchAround :: forall o m. MonadAff m => M o m Unit
 fetchAround = do
   t <- getTracks
   let
-    total = tracksTotal t
-    want = clamp 0 (max 0 (total - 1)) (topRow t.vp trackHeight)
+    want = clamp 0 (max 0 (t.total - 1)) (topRow t.vp trackHeight)
     reach = Int.ceil ((t.vp.top + t.vp.height * 2.0) / trackHeight)
     held = heldTo t
-  unless (t.pending || total == 0) do
+  unless (t.pending || t.total == 0) do
     if want < t.from || want >= held then do
       -- Landed outside the run that is held, which a dragged scrollbar
       -- does. Start a new run on a page boundary at the row under the
@@ -442,85 +442,64 @@ fetchAround = do
         base = (want / trackPage) * trackPage
       modifyTracks _ { rows = [], from = base }
       trackPageFrom base
-    else when (reach >= held && held < total) (trackPageFrom held)
+    else when (reach >= held && held < t.total) (trackPageFrom held)
 
 -- | One window of tracks. MPD evaluates the filter and hands back the
 -- | slice, so a scroll into the middle of seventy thousand songs costs
 -- | one request of two hundred rather than the lot.
--- |
--- | With several queries the result is their rows laid end to end, and
--- | a row number is turned into a query and an offset in it by the
--- | counts. A window never crosses from one query into the next: it
--- | stops at the end of the one it started in, and the next fetch picks
--- | up where it left off.
 trackPageFrom :: forall o m. MonadAff m => Int -> M o m Unit
 trackPageFrom from = do
-  t <- getTracks
+  br <- getBrowser
   let
-    -- Before any count has come back there is nothing to map a row
-    -- onto, but row zero is in the first query by construction, so the
-    -- first page needs no counts at all.
-    spot =
-      if tracksTotal t > 0 then queryAt from t.queries
-      else if from == 0 then Just { index: 0, offset: 0, left: trackPage }
-      else Nothing
-  unless t.pending $ for_ spot \at -> for_ (Array.index t.queries at.index) \q -> do
-    let
-      want = min trackPage at.left
+    t = br.tracks
+    want = if t.counted then min trackPage (t.total - from) else trackPage
+  unless (t.pending || want <= 0) do
     modifyTracks _ { pending = true }
-    send Lib (RTracks { gen: t.gen, from, query: at.index, offset: at.offset, want })
-      (listing q.terms at.offset (at.offset + want))
+    send Lib (RTracks { gen: t.gen, from, want }) (listing (trackFilter br) from (from + want))
   where
   -- An empty needle matches every song, which is the only way MPD will
-  -- list the whole library through a filter.
-  listing terms a b =
-    (if terms == "" then "search any \"\"" else "find " <> terms)
+  -- list the whole library through a search.
+  listing f a b =
+    ( case f of
+        Nothing -> "search any \"\""
+        Just e -> "find " <> Mpd.quote e
+    )
       <> " window "
       <> show a
       <> ":"
       <> show b
 
--- | How many tracks one query matches.
-trackCount :: forall o m. MonadAff m => Int -> Int -> Array String -> M o m Unit
-trackCount gen i block = do
+-- | How many tracks the filter matches.
+trackCount :: forall o m. MonadAff m => Int -> Array String -> M o m Unit
+trackCount gen block = do
   t <- getTracks
   when (gen == t.gen) do
-    let
-      qs = fromMaybe t.queries (Array.modifyAt i (_ { count = Mpd.parseCount block }) t.queries)
-    modifyTracks _ { queries = qs }
-    -- The first page is sent before the counts are back and asks the
-    -- first query blind. If that came back empty because the first
-    -- query matches nothing, this is where the real first page is asked
-    -- for.
-    when (Array.null t.rows && not t.pending) (trackPageFrom t.from)
+    modifyTracks _ { total = Mpd.parseCount block, counted = true }
+    fetchAround
 
 -- | One page of tracks. Appended when it is the next page of the held
 -- | run; a page for a selection that has since changed, or for a run
 -- | that has since been abandoned, answers a request nobody is asking
 -- | any more.
 -- |
--- | A page shorter than it was asked for says where its query really
--- | ends, and that query's count is corrected to match: `find` is the
--- | truth and `count` was the estimate, and without this a count that
--- | overstates by a row would have the list asking for that row for
--- | ever. WHICH query is corrected comes from the request, never from
--- | the row number: a query that turns out to match nothing changes what
--- | row maps to what query, so recomputing it here corrected a query the
--- | reply was not about and set its count to zero.
-tracks :: forall o m. MonadAff m => { gen :: Int, from :: Int, query :: Int, offset :: Int, want :: Int } -> Array String -> M o m Unit
+-- | A page shorter than it was asked for says where the result really
+-- | ends, and the total is corrected to match. `find` is the truth and
+-- | `count` was the estimate; without this a count that overstates by a
+-- | row would have the list asking for that row for ever.
+tracks :: forall o m. MonadAff m => { gen :: Int, from :: Int, want :: Int } -> Array String -> M o m Unit
 tracks w block = do
   t <- getTracks
-  let
-    page = Mpd.parseSongs block
-    got = Array.length page
-    reached = w.offset + got
-    fix q = q { count = if got < w.want then reached else max q.count reached }
-    corrected = fromMaybe t.queries (Array.modifyAt w.query fix t.queries)
   when (w.gen == t.gen) do
+    let
+      page = Mpd.parseSongs block
+      got = Array.length page
+      reached = w.from + got
+      short = got < w.want
     modifyTracks \u -> u
       { pending = false
       , rows = if w.from == heldTo u then u.rows <> page else u.rows
-      , queries = corrected
+      , total = if short then reached else max u.total reached
+      , counted = u.counted || short
       }
     fetchAround
 
@@ -538,35 +517,27 @@ clearPicked :: forall o m. M o m Unit
 clearPicked = modifyTracks _ { picked = [], anchor = Nothing }
 
 -- | Queue what the buttons above the list act on: the tracks picked in
--- | the list when any are, and otherwise everything the columns narrow
--- | to.
+-- | the list when any are, and otherwise everything the columns and the
+-- | search narrow to.
 -- |
 -- | A selection is one `add` per track, in the order they are listed. A
--- | whole filter is one `findadd` per query, so four artists with thirty
--- | albums between them is four commands and not nine hundred.
+-- | whole filter is one `findadd`, so four artists with thirty albums
+-- | between them is one command and not nine hundred.
 filterCommand :: forall o m. MonadAff m => Boolean -> M o m Unit
 filterCommand play = do
   br <- getBrowser
-  let
-    picked = inListOrder br.tracks
-  case picked, trackCombos br of
-    [], [] -> pure unit
-    [], cs -> do
-      start play
-      for_ cs \c -> send Cmd RFire ("findadd " <> c)
-      finish play
+  case inListOrder br.tracks, trackFilter br of
+    [], Nothing -> pure unit
+    [], Just f -> do
+      start
+      send Cmd RFire ("findadd " <> Mpd.quote f)
+      finish
     uris, _ -> do
-      start play
+      start
       for_ uris \u -> send Cmd RFire ("add " <> Mpd.quote u)
-      finish play
+      finish
   where
-  start p = when p (send Cmd RFire "clear")
-  finish p = when p do
+  start = when play (send Cmd RFire "clear")
+  finish = when play do
     send Cmd RFire "play"
     H.modify_ _ { view = NowPlaying }
-
--- | The picked tracks in the order the list shows them, so a queue built
--- | by selecting an album's second, fourth and fifth tracks arrives in
--- | that order rather than in the order they were clicked.
-inListOrder :: Tracks -> Array String
-inListOrder t = Array.filter (\u -> Array.elem u t.picked) (map _.file t.rows)
