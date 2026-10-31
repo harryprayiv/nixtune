@@ -1,0 +1,1739 @@
+-- allium: 3
+--
+-- nixtune-page: the control flow of the nixtune page and the contracts
+-- it holds with the services on the Pi. The page is a Halogen single
+-- page application that speaks the MPD protocol itself over websockets
+-- bridged by websocat. There is no application server and this spec
+-- adds none: every capability below is reached through MPD 0.24.15, the
+-- volume helper, the art cache, a static capabilities.json and the
+-- browser itself.
+--
+-- RELATION TO nixtune.allium. That spec keeps the NixOS module, the
+-- hardware, the fleet, arbitration and maintenance. Its rules and
+-- surfaces about the page (ClientBrowsesFolders, ClientBrowsesTags,
+-- ClientJumpsToLetter, GuestAppends, GuestCommandNotOffered,
+-- HostCommands, HostReordersQueue, HostSeesAttribution, HostShowsQr,
+-- ClientSetsVolume, StatusPushedToSessions, surfaces GuestPage and
+-- HostPage, value BrowseColumn) are superseded by this file. Where the
+-- two disagree about the page, this file holds. Where this file and the
+-- code disagree, the code was read on 2026-10-31 at 1ad560b and this
+-- file records the intended change.
+--
+-- FACTS THIS SPEC IS WRITTEN AGAINST, checked 2026-10-31:
+--   - nixpkgs 6510408d builds mpd 0.24.15 with features = null, which
+--     enables every known feature, pcre (pcre2), icu and sqlite
+--     included. So regular expression filters, ICU collation in MPD's
+--     own sorts, and the sticker database are all present.
+--   - 0.24 has: addid and searchadd/findadd with a relative position
+--     (+0 is "after the current song", since 0.23), sticker inc and
+--     sticker dec, sticker find with sort and window, listplaylistinfo
+--     with a range, the explicit case operators eq_ci, contains_ci and
+--     starts_with_ci, and `added-since` filters.
+--   - 0.24 does NOT have `list ... window`. That arrived in 0.25, which
+--     is unreleased. nixtune.allium's claim that the unfiltered artist
+--     list "is windowed" is wrong for this MPD and is dropped here.
+--   - `list` collects values into a std::map<std::string> and prints
+--     them in that map's order, which is BYTE order: case sensitive,
+--     every upper case letter before every lower case one, and
+--     anything outside ASCII after both. "dEUS" and "of Montreal" sort
+--     after "Zappa". The page never shows MPD's `list` order as is.
+--   - `list` and filters apply MPD's tag fallbacks
+--     (src/tag/Fallback.hxx): AlbumArtist falls back to Artist;
+--     AlbumArtistSort to AlbumArtist, then ArtistSort, then Artist;
+--     ArtistSort to Artist; AlbumSort to Album; TitleSort to Title. A
+--     song with no value at all is listed under the empty string.
+--   - `find`/`search` sort accepts tag names, "Last-Modified" and
+--     "Added". It does not accept duration or audio format. Without
+--     `sort` the order is database order, which is directory then file
+--     name, each ICU collated.
+--   - max_output_buffer_size is 32768 KB (mpd.maxOutputBuffer).
+--   - database.nix disables every playlist plugin, and `load` goes
+--     through the same registry, so a stored playlist can be saved and
+--     not loaded until m3u and extm3u are re-enabled (nixtune.allium
+--     KnownIssue stored_playlists_unloadable). P12 depends on that.
+--   - Halogen renders the whole page on every state update. A reply
+--     collected through component state renders once per line. Since
+--     1ad560b the partial tail and the reply being collected live in
+--     Refs, and only a greeting or a reply's end touches state.
+--   - The library: about 75.8k songs, roughly a quarter lossless. A
+--     queue of 100 to 250 entries is ordinary.
+--
+-- Decisions taken 2026-10-31 (Harry's answers to the drill-down):
+--
+--   P1. SCOPE. This file covers the page, every list it draws, every
+--       command it sends, and the contracts with MPD, websocat, the
+--       volume helper and the art cache. It is nixtune specific: it
+--       assumes this MPD, this capabilities.json, this helper and this
+--       cache, and does not try to describe a generic MPD client.
+--
+--   P2. MPD IS THE TRUTH. The page shows what MPD last reported and
+--       nothing else. A command changes nothing on screen until the idle
+--       connection reports the change and the page reads it back. The
+--       only page-side state that runs ahead of MPD is a DRAFT: a value
+--       the person is in the middle of entering (the volume thumb, the
+--       seek thumb, a typed field, a queue row being dragged). A draft
+--       is visibly a draft, is dropped when MPD reports a value near
+--       it, and is never sent anywhere except as the command it becomes.
+--
+--   P3. ONE LIST ENGINE. Every list on the page (the tag columns, the
+--       track table, the queue, the folder listing, a saved playlist's
+--       contents, the radio stations) is drawn by one mechanism with
+--       fixed row pitch: only the rows in the viewport plus an overscan
+--       are in the DOM, and spacers above and below make the scrollbar
+--       the true length. What differs between lists is only how rows
+--       are obtained, and that is one of three SOURCES (enum RowSource):
+--         held      the whole list is in memory (a tag column, the
+--                   radio list, a folder listing)
+--         windowed  rows arrive in pages from a `count`-sized total
+--                   (the track table, a saved playlist)
+--         versioned rows arrive in windows and are kept current by
+--                   MPD's playlist version (the queue)
+--
+--   P4. EVERY REPLY IS BOUNDED, AND THE BOUND IS WRITTEN DOWN. Each
+--       command the page sends appears in table ReplyBounds with the
+--       reason its reply cannot overrun the output buffer. A command
+--       with no entry there is not sent. `listall`, `listallinfo` and
+--       an unwindowed `find`/`search` are never sent.
+--
+--   P5. COLLATION IS THE PAGE'S JOB. Every tag column is ordered by the
+--       page, by sort key, with the browser's locale-aware comparison
+--       (Data.String.localeCompare) at base sensitivity, so case and
+--       accents do not split a group. The sort key is the *Sort tag
+--       where the file has one, which MPD's fallbacks supply in the same
+--       reply (rule ColumnValuesArrive). Display shows the plain tag.
+--       The letter rail files a row under the first letter of its SORT
+--       KEY, so "The Beatles" with AlbumArtistSort "Beatles, The" sits
+--       under B, and "The The" with no sort tag sits under T. Leading
+--       articles are never stripped by the page itself; a library that
+--       wants "Beatles" under B says so in its tags.
+--
+--   P6. THE CHAIN IS [GENRE] -> ALBUM ARTIST -> ALBUM. The artist column
+--       is AlbumArtist, which MPD falls back to Artist for any file that
+--       lacks it, so a compilation tagged "Various Artists" is one row
+--       and an untagged album still appears under its track artist. The
+--       genre column is off by default and is a toggle, as in the code
+--       today. The selection model is the code's: plain click replaces,
+--       shift extends from the anchor, ctrl/meta toggles one row; every
+--       column has an All row; a change resets every column to its right
+--       to All. The three selections always describe one path.
+--
+--   P7. OR IS A REGULAR EXPRESSION, NOT A PRODUCT OF QUERIES. MPD
+--       filters have AND and NOT and no OR, so today a selection of
+--       several values expands into the cartesian product of commands,
+--       capped at 32 with an approximate fallback beyond. This MPD has
+--       pcre, so a column selection of values v1..vn becomes ONE term:
+--         (AlbumArtist =~ '^(?:v1|v2|...|vn)$')
+--       with each vi escaped as a regex literal. Every column and the
+--       track table are then exactly one command each, whatever is
+--       selected, which also makes a global `sort` on the track table
+--       possible: a sort over one query is one ordering, a sort over 32
+--       queries laid end to end is 32 orderings. A selection of one
+--       value uses `==` rather than a regex, because it is cheaper to
+--       evaluate and reads plainly in a log. Escaping is three layers
+--       and is specified in contract FilterExpression.
+--
+--   P8. ALBUMS IN DISCOGRAPHY ORDER. With an artist selected the album
+--       column is ordered by year, then by album sort key. The year is
+--       the first four digits of Date (OriginalDate is not used: it is
+--       sparse in this library and MPD does not fall back from it). An
+--       album with no date sorts after every dated album. With no artist
+--       selected the column is the whole library's albums, ordered by
+--       sort key alone, because year order across thousands of artists
+--       is not a way of finding anything.
+--
+--   P9. SEARCH FILTERS THE COLUMNS. There is no separate result list.
+--       A query adds one more term to every column's command and to the
+--       track table's:
+--         (any contains_ci 'q')
+--       so each column shows only values that have a matching song, and
+--       browsing carries on inside the result. Typing commits after a
+--       pause (config search_debounce) and at two characters or more;
+--       Enter commits at once; clearing the box removes the term. A
+--       column narrowed by a query is never read from or written to the
+--       cache. Every reply is tagged with the generation it was asked at
+--       and a stale one is discarded, so fast typing never paints an
+--       older result over a newer one.
+--
+--   P10. THE TRACK LIST IS A SORTABLE TABLE. Columns: #, Title, Artist,
+--       Album, Year, Time, Format. A header click sorts by that field
+--       through MPD (`find ... sort <key> window`), a second click
+--       reverses (`sort -<key>`), a third returns to database order.
+--       Sortable keys and what they send: # -> Track, Title ->
+--       TitleSort, Artist -> ArtistSort, Album -> AlbumSort, Year ->
+--       Date. Time and Format are not sortable, because MPD cannot sort
+--       on them and sorting a window of 200 rows in the page would
+--       disagree with the rows outside it. Their headers are not
+--       buttons. The default, with no header chosen, is database order,
+--       which for ripped albums is disc and track order.
+--
+--   P11. THE QUEUE IS WINDOWED AND VERSIONED. The queue view holds only
+--       the rows near its viewport. It reads windows with
+--       `playlistinfo START:END` and, when MPD's playlist version moves,
+--       asks only for what changed inside the held window with
+--       `plchanges <version> START:END`. The length comes from `status`
+--       (playlistlength), which is how a deletion at the end is seen.
+--       A whole-queue `playlistinfo` is never sent again.
+--
+--   P12. SAVED PLAYLISTS ARE THEIR OWN VIEW. Host only. Blocked on
+--       KnownIssue stored_playlists_unloadable: until m3u and extm3u
+--       are back on, Load and Append fail with an ACK and the view
+--       offers Save and the listings only. Lists the saved
+--       playlists (`listplaylists`), shows one's contents windowed
+--       (`listplaylistinfo NAME START:END`), loads one into the queue
+--       (`load`), appends one (`load` without clear), saves the queue as
+--       one (`save`), renames and removes. "Add to saved playlist" on a
+--       row writes with `playlistadd`.
+--
+--   P13. ROW ACTIONS. On the host page a track row, an album row or the
+--       whole current selection offers: Add to end, Play next, Replace
+--       and play, Add to saved playlist. The "whole current selection"
+--       is the tracks PICKED in the table when any are (P21), and
+--       otherwise everything the columns and the query narrow to. Play next is `addid <uri> +0`
+--       for one track and `findadd <filter> position +0` for a
+--       selection, so the songs land after the current one in their
+--       table order. The guest page offers Add to end only.
+--
+--   P14. KEYBOARD IS TRANSPORT ONLY. Space play/pause, ArrowLeft and
+--       ArrowRight previous and next, ArrowUp and ArrowDown a volume
+--       step, M mute. None of them fires while focus is in a text field
+--       or on a range input, which owns its own arrows. Lists are
+--       pointer and touch. The queue grip's arrow keys stay, because
+--       that is the non-pointer path to reordering and not navigation.
+--
+--   P15. THE GUEST PAGE IS SIMPLER. Search, then a stacked drill-down:
+--       album artist, then album, then tracks, one choice at a time,
+--       single select, with the choices made shown as chips that go
+--       back. Same list engine, same commands, same cache. Guests add to
+--       the end only.
+--
+--   P16. VETOES COUNT WITH sticker inc, NOT WITH A NAME LIST. Harry
+--       picked one sticker per voter. MPD cannot count that in one
+--       command: `sticker find` takes one exact sticker name, so
+--       counting nixtune.veto.<nickname> stickers means one command per
+--       nickname that has ever voted, and the page does not know those
+--       nicknames. What removes the race without losing the one-command
+--       read is `sticker inc song <uri> nixtune.vetoes 1`, which MPD
+--       applies atomically. The tally is then one integer per track,
+--       read for the whole queue with one `sticker find`. Which tracks
+--       this browser has voted against is kept in this browser's
+--       localStorage. That is the same strength as today: today's
+--       one-vote-per-nickname is also enforced only by a value the
+--       browser made up for itself. The voter names are no longer
+--       visible to other guests; the count is.
+--
+--   P17. ATTRIBUTION STAYS ONE COMMAND, AND ITS GROWTH IS NAMED. `sticker
+--       find song "" nixtune.added_by` returns every attribution ever
+--       written. It grows with every guest add and nothing removes old
+--       ones. The page reads it only while a view that shows attribution
+--       is open, and open question "attribution growth" asks for a
+--       measurement before a pruning rule is chosen.
+--
+--   P18. THE CACHE HOLDS ONLY WHOLE-LIBRARY LISTS. The three unnarrowed
+--       column lists (genres, album artists, albums), with their sort
+--       keys, are stored in localStorage under MPD's db_update stamp. A
+--       visit whose stamp matches draws them with no request. Nothing
+--       narrowed, searched or windowed is cached. A rescan moves the
+--       stamp and every stored list under an older one is deleted.
+--
+--   P19. FFI BUDGET. Hand-written foreign modules are allowed where no
+--       registry package binds what is needed, each one named in
+--       contract ForeignBudget with the reason. The budget today is
+--       empty: everything this spec needs is in purescript-web-html,
+--       web-dom, web-uievents, web-storage and web-socket.
+--
+--   P20. ONE TRANSPORT BAR, PRESENT ON EVERY HOST VIEW, as decision 18
+--       of nixtune.allium and as the code already does. The queue stays
+--       a separate view at every width.
+--
+-- Recorded from the code at 1ad560b:
+--
+--   P21. TRACKS CAN BE PICKED. A click on a track row's body picks it:
+--       plain picks that row alone, ctrl/meta adds or removes it, shift
+--       takes the run from the anchor. Picks are held by URI, so they
+--       survive scrolling away and the rows being refetched, and a shift
+--       run covers only rows the page holds (a row it has never fetched
+--       has no URI). Any change to the columns, the query or the sort
+--       clears the picks, because they belonged to the list that was
+--       replaced. The row's own add control still queues that one track.
+--       With picks, the bulk actions name their count ("Add 3") and act
+--       on the picks in TABLE order, not click order, one `add` per URI.
+--       With none, they act on the whole filter. With neither picks nor
+--       a filter they are not offered, because they would mean the whole
+--       library.
+--
+--   P22. A SOCKET IS THE CANCEL. MPD cannot cancel a command it has
+--       started and answers one at a time per connection. When a column
+--       selection changes while the lib connection has anything asked
+--       or queued, the page closes that socket and opens another; what
+--       the click asks for is queued on the new socket and sent at its
+--       greeting. Every socket carries a serial and every event carries
+--       the serial of the socket it came from; an event from a socket
+--       that is no longer its connection's is ignored, so a socket
+--       closed on purpose is never taken for the player going away. MPD
+--       still finishes the abandoned command; its reply goes nowhere.
+--
+--   P23. REQUESTS GO OUT IN THE ORDER THEY ARE WANTED. One connection
+--       answers in order, so order is priority. A full reload asks for
+--       the active column first, then the other columns, then the track
+--       table, which with nothing selected is the most expensive query.
+--       A narrowing asks for the track table first (it is what the click
+--       was about) and then the columns to the right.
+--
+--   P24. A WINDOW REMEMBERS WHAT IT ASKED. A track page request records
+--       which query, at which offset, for how many rows. A short reply
+--       corrects THAT query's count. Working the query out again from the
+--       row number when the reply lands is wrong once an earlier query's
+--       count has turned out to be zero, and corrected the wrong query to
+--       zero before 1ad560b. With P7's single query this reduces to one
+--       query, and the rule still holds for the no-pcre fallback.
+
+------------------------------------------------------------
+-- Given
+------------------------------------------------------------
+
+given {
+    page: Page
+    mpd: MpdServer
+    caps: Capabilities
+}
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- MPD as the page meets it: one server, many connections, one reply
+-- per command per connection, in order.
+external entity MpdServer {
+    version: String
+    has_regex: Boolean
+    db_update: Integer
+    song_count: Integer
+    playlist_version: Integer
+    playlist_length: Integer
+}
+
+-- A browser on the LAN, holding localStorage for this origin.
+external entity Browser {
+    storage_available: Boolean
+    nickname: String?
+    my_vetoes: Set<String>
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- capabilities.json as nix/module/ui.nix writes it. Static per
+-- generation.
+value Capabilities {
+    hostname: String
+    profile: String
+    output_kind: alsa | null_output
+    card: String?
+    mixer: String?
+    modules: Set<String>
+    library: Boolean
+    stations: List<Station>
+    websocket_path: String
+    volume_path: String?
+    art_path: String?
+    max_volume: Integer
+    public_url: String
+    host_path: String
+    party: Boolean
+    vetoes: Integer
+}
+
+value Station {
+    name: String
+    url: String
+}
+
+-- One distinct value in a tag column: what is drawn, and what it is
+-- ordered and filed under.
+value TagValue {
+    display: String
+    sort_key: String
+    year: Integer?
+}
+
+value Song {
+    uri: String
+    title: String?
+    artist: String?
+    album_artist: String?
+    album: String?
+    date: String?
+    track: String?
+    disc: String?
+    duration: Duration?
+    position: Integer?
+    id: Integer?
+    name: String?
+}
+
+-- What a file is, from its extension. Unchanged from the code.
+value Format {
+    label: String
+    quality: lossless | lossy
+}
+
+-- The part of a scrolling list on screen.
+value Viewport {
+    top: Number
+    height: Number
+}
+
+-- The rows a list puts in the DOM.
+value Slice {
+    first: Integer
+    count: Integer
+}
+
+-- A contiguous run of rows held for a windowed or versioned list.
+value HeldRun {
+    from: Integer
+    rows: List<Song>
+}
+
+-- One term of a filter expression, already escaped for the filter
+-- layer (contract FilterExpression), not yet quoted for the protocol.
+value FilterTerm {
+    text: String
+}
+
+value TrackSort {
+    key: track | title_sort | artist_sort | album_sort | date
+    descending: Boolean
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract MpdBridge {
+    connect: (path: String) -> Socket
+    send: (socket: Socket, line: String) -> Unit
+    receive: (socket: Socket) -> Chunk
+
+    @invariant LineFramingIsThePagesJob
+        -- websocat -t frames by TCP read. A message may hold several
+        -- replies or stop mid-line. Each connection keeps the unfinished
+        -- tail of the last message and splits on newline; a trailing
+        -- carriage return is dropped.
+
+    @invariant LoopbackOnly
+        -- websocat and MPD listen on loopback; nginx proxies /ws. 6600
+        -- on the LAN is mpd.exposeOnLan's business and not the page's.
+
+    @invariant NoRoleEnforcement
+        -- The bridge cannot tell the host page from the guest page.
+        -- Everything this spec says a guest cannot do is what the guest
+        -- page does not offer, not what MPD refuses.
+
+    @guidance
+        -- websocat -t -E ws-l:127.0.0.1:8600 tcp:127.0.0.1:6600 as
+        -- nixtune-websocket.service.
+}
+
+contract VolumeWriter {
+    set: (level: Integer) -> Unit
+
+    @invariant NeverSetvolOnAHelperHost
+        -- When caps.volume_path is non-null the page never sends setvol.
+        -- With the helper unreachable it says so and writes nothing.
+
+    @invariant SameScaleAsMpd
+        -- amixer -M, ALSA's normalized mapping, which is what MPD's
+        -- `status` reports as volume.
+
+    @invariant Glides
+        -- A target is approached in steps of volume_glide_step every
+        -- volume_glide_interval; the last value is always sent.
+
+    @guidance
+        -- One line per request, "set N", over the /volume websocket.
+}
+
+contract ArtCache {
+    cover: (album_directory: String) -> Image?
+
+    @invariant OneNamePerAlbum
+        -- <art_path>/<directory of the song's URI>/cover.jpg, with %, #
+        -- and ? escaped. One 404 at worst, and then the page stops.
+
+    @invariant OnlyForFiles
+        -- A stream URI (contains "://") has no cover request.
+}
+
+-- The three layers between a tag value and the wire. Getting any layer
+-- wrong either matches nothing or matches the wrong thing, silently.
+contract FilterExpression {
+    literal: (value: String) -> String
+    regex_literal: (value: String) -> String
+    term_eq: (tag: String, value: String) -> FilterTerm
+    term_any_of: (tag: String, values: List<String>) -> FilterTerm
+    term_search: (query: String) -> FilterTerm
+    conjoin: (terms: List<FilterTerm>) -> String
+    protocol_quote: (expression: String) -> String
+
+    @invariant RegexLayer
+        -- regex_literal escapes every PCRE metacharacter
+        -- \ ^ $ . | ? * + ( ) [ ] { } with a backslash. Applied only to
+        -- values that go inside =~.
+
+    @invariant FilterStringLayer
+        -- literal and the outer step of term_* wrap a value in single
+        -- quotes, escaping backslash and single quote with a backslash.
+        -- This is the escaping MPD's filter parser undoes.
+
+    @invariant ProtocolLayer
+        -- protocol_quote wraps the whole expression in double quotes,
+        -- escaping backslash and double quote with a backslash. This is
+        -- Mpd.quote today and is what MPD's command tokenizer undoes.
+
+    @invariant Shapes
+        -- term_eq(t, v)         = (t == 'v')
+        -- term_any_of(t, [v])   = term_eq(t, v)
+        -- term_any_of(t, vs)    = (t =~ '^(?:r1|r2|...)$'),
+        --                         ri = regex_literal(vi)
+        -- term_search(q)        = (any contains_ci 'q')
+        -- conjoin([])           = no filter
+        -- conjoin([a])          = a
+        -- conjoin([a, b, ...])  = (a AND b AND ...)
+        -- A command then reads, for example:
+        --   list albumartist "((genre == 'Jazz') AND (any contains_ci 'blue'))" group albumartistsort
+
+    @invariant EmptyValueIsAValue
+        -- MPD lists songs lacking a tag under "". A column never shows
+        -- that row (it is not selectable), so it never reaches a filter.
+        -- term_eq(t, "") would mean "has no t at all", which no control
+        -- on the page asks for.
+}
+
+-- Every command the page sends and why its reply is bounded. A command
+-- not listed is not sent (invariant EveryCommandIsBounded).
+contract ReplyBounds {
+    @invariant Table
+        -- status, currentsong, stats, idle    fixed size
+        -- playlistinfo START:END              <= queue_window rows
+        -- plchanges V START:END               <= queue_window rows
+        -- find F [sort K] window A:B          <= track_page rows
+        -- count F                             one line
+        -- list T F group G                    bounded by F, see below
+        -- list genre group <none>             whole library, about a
+        --                                     few hundred values
+        -- list albumartist group albumartistsort
+        --                                     whole library, about ten
+        --                                     thousand pairs; cached
+        -- list album group albumsort          whole library; cached
+        -- lsinfo P                            one directory; the
+        --                                     largest directory in
+        --                                     this library is the
+        --                                     bound; see open question
+        -- listplaylists                       number of saved playlists
+        -- playlistlength N                    two lines
+        -- listplaylistinfo N A:B              <= track_page rows
+        -- sticker find song "" nixtune.vetoes sorted, windowed to
+        --                                     sticker_window
+        -- sticker find song "" nixtune.added_by
+        --                                     unbounded in principle;
+        --                                     P17 and open question
+        -- add, addid, findadd, delete, deleteid, move, clear, play,
+        -- pause, previous, next, seekcur, random, repeat, single,
+        -- consume, crossfade, load, save, rm, rename, playlistadd,
+        -- sticker set, sticker inc, sticker delete, update, setvol
+        -- (only with no helper)                acknowledgement only
+        --
+        -- A whole-library `list` has no window in MPD 0.24. The three
+        -- that are sent are bounded by the library's distinct values,
+        -- fit in 32768 KB with a wide margin at this library's size, and
+        -- are sent at most once per db_update because of the cache.
+}
+
+-- Native code the page carries. Empty today.
+contract ForeignBudget {
+    @invariant Named
+        -- Each foreign module is listed here with the binding it
+        -- supplies and why no registry package does.
+
+    @guidance
+        -- Candidates if measurement ever calls for them, none adopted:
+        -- a passive scroll listener (registry bindings register
+        -- non-passive ones), and IndexedDB if the album list outgrows
+        -- localStorage's quota.
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Role { host | guest }
+
+enum View { now_playing | queue | library | playlists | radio | qr }
+
+enum LibraryMode { tags | folders }
+
+enum Conn {
+    cmd     -- transport, queue, status, stickers, playlists
+    | idle  -- parked in idle; reports what changed
+    | lib   -- columns, track table, folders; never behind a queue read
+}
+
+enum Axis { genre | album_artist | album }
+
+enum RowSource { held | windowed | versioned }
+
+enum PlayState { playing | paused | stopped }
+
+enum RowAction { add_end | play_next | replace_play | add_to_playlist }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity Page {
+    role: Role
+    view: View
+    mode: LibraryMode
+    caps: Capabilities
+    browser: Browser
+    links: Link with page = this
+    status: PlayerStatus
+    current: Song?
+    query: String?
+    query_gen: Integer
+    error: String?
+
+    library: TagBrowser with page = this
+    queue: QueueList with page = this
+    folders: FolderList with page = this
+    playlists: PlaylistView with page = this
+    drafts: Draft with page = this
+
+    invariant OneLinkPerConn {
+        for c in Conn: links.count(l => l.conn = c) <= 1
+    }
+}
+
+value PlayerStatus {
+    state: PlayState
+    volume: Integer?
+    elapsed: Number
+    duration: Number
+    song: Integer?
+    playlist_version: Integer
+    playlist_length: Integer
+    random: Boolean
+    repeat: Boolean
+    single: Boolean
+    consume: Boolean
+    crossfade: Integer
+    updating: Boolean
+    audio: String?
+    error: String?
+}
+
+-- One connection to MPD.
+entity Link {
+    page: Page
+    conn: Conn
+    serial: Integer
+    ready: Boolean
+    partial: Ref<String>
+    block: Ref<String>
+    asked: List<Request>
+    queued: List<Request>
+
+    invariant BuffersAreNotState {
+        -- P2 and the lesson in FACTS: partial and block are written
+        -- through Effect, never through the component's state, so a
+        -- reply of any length causes exactly one render.
+        true
+    }
+
+    invariant RepliesInOrder {
+        -- The first reply to arrive answers asked.first. Nothing else
+        -- is assumed about a reply's identity.
+        true
+    }
+
+    invariant NothingSentBeforeGreeting {
+        not ready implies asked.count = 0
+    }
+}
+
+-- What a reply is for, with the generation it was asked at where a
+-- later request can make it stale.
+entity Request {
+    link: Link
+    kind: status | current | stats | column | track_count | track_page
+          | queue_window | queue_changes | folder | stickers_added
+          | stickers_vetoes | playlist_list | playlist_window
+          | playlist_length
+          | regex_probe | fire
+    axis: Axis?
+    gen: Integer?
+    from: Integer?
+}
+
+-- An input in progress (P2).
+entity Draft {
+    page: Page
+    kind: volume | seek | volume_text | row_drag
+    value: String
+}
+
+-- One tag column (P5, P6, P8).
+entity Column {
+    browser: TagBrowser
+    axis: Axis
+    shown: Boolean
+    values: List<TagValue>
+    selected: Set<String>
+    anchor: String?
+    gen: Integer
+    pending: Boolean
+    vp: Viewport
+    source: RowSource = held
+
+    rail: values.count > config.letter_rail_threshold
+
+    invariant SelectionIsHeld {
+        selected.all(s => values.any(v => v.display = s))
+    }
+
+    invariant Ordered {
+        -- By (year, sort_key) for the album column with an album
+        -- artist selected; by sort_key otherwise. Comparison is
+        -- localeCompare at base sensitivity. Ties by display.
+        IsOrdered(values)
+    }
+}
+
+entity TagBrowser {
+    page: Page
+    genre_column: Boolean
+    columns: Column with browser = this
+    tracks: TrackTable with browser = this
+
+    shown_axes: columns where shown = true
+
+    invariant ArtistAndAlbumAlwaysShown {
+        columns.all(c => c.axis = genre or c.shown)
+    }
+
+    invariant GenreShownIffToggled {
+        columns.all(c => c.axis != genre or c.shown = genre_column)
+    }
+}
+
+-- The list under the columns (P10).
+entity TrackTable {
+    browser: TagBrowser
+    total: Integer
+    held: HeldRun
+    pending: Boolean
+    gen: Integer
+    sort: TrackSort?
+    vp: Viewport
+    picked: Set<String>
+    anchor: Integer?
+    source: RowSource = windowed
+}
+
+-- The queue view (P11).
+entity QueueList {
+    page: Page
+    version: Integer
+    length: Integer
+    held: HeldRun
+    pending: Boolean
+    vp: Viewport
+    attribution: Map<String, String>
+    veto_counts: Map<String, Integer>
+    source: RowSource = versioned
+}
+
+entity FolderList {
+    page: Page
+    path: String
+    entries: List<FolderEntry>
+    gen: Integer
+    vp: Viewport
+    source: RowSource = held
+}
+
+value FolderEntry {
+    kind: directory | file | playlist
+    uri: String
+    song: Song?
+}
+
+entity PlaylistView {
+    page: Page
+    names: List<String>
+    open: String?
+    total: Integer
+    held: HeldRun
+    gen: Integer
+    vp: Viewport
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    row_height: Number = 40.0           -- tag columns, folder rows
+    track_row_height: Number = 40.0     -- the table is one line a row
+    queue_row_height: Number = 58.0     -- two lines: title, then line
+    overscan: Integer = 8
+    track_page: Integer = 200
+    queue_window: Integer = 100
+    sticker_window: Integer = 2000
+    letter_rail_threshold: Integer = 40
+    search_min_chars: Integer = 2
+    search_debounce: Duration = 250.milliseconds
+    fetch_ahead_screens: Number = 1.0
+    reconnect_after: Duration = 2.seconds
+    scan_poll_every: Duration = 10.seconds
+    volume_floor: Integer = 1
+    volume_step: Integer = 5
+    unmute_floor: Integer = 20
+    volume_glide_step: Integer = 4
+    volume_glide_interval: Duration = 40.milliseconds
+    phone_breakpoint: String = "40rem"
+    bar_extras_breakpoint: String = "30rem"
+    cache_version: String = "v2"
+    idle_subsystems: String = "player mixer playlist options database update sticker stored_playlist"
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Start and connections --------------------------------------------------
+
+rule PageStarts {
+    when: PageLoaded(path)
+    ensures:
+        page.caps = FetchCapabilities()
+        page.role = if path = caps.host_path then host else guest
+        if page.browser.nickname = null:
+            page.browser.nickname = GeneratedNickname()
+        LinkOpened(conn: cmd)
+        LinkOpened(conn: idle)
+        LinkOpened(conn: lib)
+        if caps.volume_path != null:
+            VolumeLinkOpened()
+
+    @guidance
+        -- capabilities.json failing to load is the one error with no
+        -- recovery short of a reload, and is shown as such.
+}
+
+rule LinkGreeted {
+    when: LineReceived(link, line)
+    requires: IsGreeting(line)
+    ensures:
+        link.ready = true
+        mpd.version = VersionOf(line)
+        for r in link.queued:
+            Sent(link, r)
+        link.queued = []
+        if link.conn = cmd:
+            Sent(link, Request{kind: status})
+            Sent(link, Request{kind: current})
+            Sent(link, Request{kind: stats})
+            Sent(link, Request{kind: regex_probe})
+        if link.conn = idle:
+            Sent(link, "idle " + config.idle_subsystems)
+        if link.conn = lib and page.view = library:
+            LibraryReloaded()
+
+    @guidance
+        -- A request made before its link has greeted is queued on that
+        -- link, not dropped. The three sockets greet in any order.
+}
+
+rule RegexProbed {
+    when: ReplyArrived(request, ok)
+    requires: request.kind = regex_probe
+    ensures: mpd.has_regex = ok
+
+    @guidance
+        -- `find "(title =~ '^$')" window 0:1`. An ACK means MPD was
+        -- built without pcre. On this host it never ACKs (FACTS). If it
+        -- did, the page shows an error naming the missing feature and
+        -- the tag browser offers single selection only, rather than
+        -- silently falling back to the cartesian product.
+}
+
+rule LinkLost {
+    when: SocketClosed(link, serial)
+    requires: serial = link.serial
+    ensures:
+        for r in link.asked:
+            RequestAbandoned(r)
+        link.ready = false
+        page.error = "The player went away. Reconnecting."
+        after config.reconnect_after: LinkOpened(conn: link.conn)
+
+    @guidance
+        -- An abandoned request clears the pending flag of whatever was
+        -- waiting for it, so nothing waits forever for a reply that went
+        -- down with the socket. The greeting on the new socket asks
+        -- again for what the open view needs.
+}
+
+rule LibraryCancelled {
+    when: ColumnsNarrowed(from)
+    let k = page.links.find(l => l.conn = lib)
+    requires: k.asked.count > 0 or k.queued.count > 0
+    ensures:
+        for c in library.columns: c.pending = false
+        library.tracks.pending = false
+        SocketClosedOnPurpose(k)
+        LinkOpened(conn: lib, serial: k.serial + 1)
+
+    @guidance
+        -- P22. Runs before the narrowing sends anything, so every request
+        -- the narrowing makes is queued on the new socket.
+}
+
+rule ReplyRead {
+    when: LineReceived(link, line)
+    requires: IsEnd(line)
+    let r = link.asked.first
+    ensures:
+        link.asked = link.asked.rest
+        if IsError(line) and r.kind not in {stickers_added, stickers_vetoes, regex_probe}:
+            page.error = line
+        if not IsError(line):
+            ReplyArrived(request: r, ok: true, lines: link.lines)
+        link.lines = []
+}
+
+-- What changed -----------------------------------------------------------
+
+rule IdleReports {
+    when: IdleChanged(subsystems)
+    ensures:
+        Sent(cmd, Request{kind: status})
+        if "player" in subsystems:
+            Sent(cmd, Request{kind: current})
+        if "playlist" in subsystems and page.view = queue:
+            QueueChangesRequested()
+        if "sticker" in subsystems and page.view = queue:
+            StickersRequested()
+        if "database" in subsystems or "update" in subsystems:
+            Sent(cmd, Request{kind: stats})
+        if "stored_playlist" in subsystems and page.view = playlists:
+            Sent(cmd, Request{kind: playlist_list})
+        Sent(idle, "idle " + config.idle_subsystems)
+
+    @guidance
+        -- currentsong only on "player": today it goes out on every idle
+        -- event, which on a busy queue is one wasted round trip per
+        -- change. The volume comes back in `status` on "mixer".
+}
+
+rule StatsArrive {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = stats
+    let stamp = DbUpdateOf(lines)
+    ensures:
+        mpd.song_count = SongsOf(lines)
+        if stamp != mpd.db_update:
+            mpd.db_update = stamp
+            CachePruned(keep: stamp)
+            if page.view = library:
+                LibraryReloaded()
+}
+
+rule ScanIsWatched {
+    when: Tick()
+    requires: page.status.updating
+    ensures:
+        every config.scan_poll_every:
+            Sent(cmd, Request{kind: stats})
+            if page.view = library:
+                ColumnsRecounted()
+
+    @guidance
+        -- A scan that runs for days moves db_update only at its end, so
+        -- the counts are refreshed on a timer while `updating_db` is in
+        -- `status`, bypassing the cache, without moving any selection
+        -- or scroll position.
+}
+
+-- The tag browser ----------------------------------------------------------
+
+rule ColumnRequested {
+    when: ColumnLoad(column)
+    let filter = ColumnFilter(column)
+    ensures:
+        if filter = none and page.query = null and CacheHas(column.axis, mpd.db_update):
+            ColumnValuesArrive(column: column, values: CacheRead(column.axis, mpd.db_update), from_cache: true)
+        else:
+            column.gen = column.gen + 1
+            column.pending = true
+            Sent(lib, Request{kind: column, axis: column.axis, gen: column.gen}, ListCommand(column, filter))
+
+    @guidance
+        -- ColumnFilter(c) conjoins term_any_of over every shown column to
+        -- the left of c that has a selection, plus term_search(query)
+        -- when a query is committed. ListCommand by axis:
+        --   genre         list genre <F>
+        --   album_artist  list albumartist <F> group albumartistsort
+        --   album, with an album artist selected
+        --                 list album <F> group date group albumsort
+        --   album, otherwise
+        --                 list album <F> group albumsort
+        -- One command per column, whatever is selected (P7). The column
+        -- keeps showing its previous values until the reply is complete.
+}
+
+rule ColumnValuesArrive {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = column
+    let column = request.axis.column
+    requires: request.gen = column.gen
+    let values = Collate(column, ParseGrouped(lines))
+    ensures:
+        column.pending = false
+        column.values = values
+        column.selected = column.selected where values.any(v => v.display = s)
+        if column.anchor not in values.display:
+            column.anchor = null
+        if values != previous(column.values):
+            ScrollKept(column)
+        if column.selected != previous(column.selected):
+            ColumnsNarrowed(from: column)
+        if ColumnFilter(column) = none and page.query = null:
+            CacheWritten(column.axis, mpd.db_update, values)
+
+    @guidance
+        -- ParseGrouped reads `list ... group` output, which MPD prints
+        -- outer group first: a "AlbumArtistSort: k" line sets the
+        -- current key and the "AlbumArtist: v" lines after it carry that
+        -- key; likewise "Date:" then "AlbumSort:" then "Album:". Values
+        -- equal to "" are dropped. A display value that appears under
+        -- several keys (files tagged inconsistently) is kept once, under
+        -- its lowest key. The year is the first four characters of Date
+        -- when they are digits, else none.
+        -- ScrollKept: when the list changed, the first selected row goes
+        -- to the top; with no selection the value that was at the top
+        -- stays at the top; when the list did not change nothing moves.
+        -- A reply whose gen is not the column's current gen is
+        -- discarded.
+}
+
+rule ValueChosen {
+    when: Choose(column, value, modifier)
+    requires: column.shown
+    ensures:
+        column.selected =
+            if modifier = shift: SpanBetween(column.anchor or value, value, column.values)
+            else if modifier = toggle: Toggled(value, column.selected)
+            else: {value}
+        column.anchor = if modifier = shift: column.anchor or value else: value
+        if column.selected != previous(column.selected):
+            ColumnsNarrowed(from: column)
+
+    @guidance
+        -- The clicked column is not reloaded and not scrolled. On the
+        -- guest page modifier is always plain (P15).
+}
+
+rule ColumnCleared {
+    when: ClearColumn(column)
+    requires: column.selected.count > 0
+    ensures:
+        column.selected = {}
+        column.anchor = null
+        ColumnsNarrowed(from: column)
+}
+
+rule ColumnsNarrowed {
+    when: ColumnsNarrowed(from)
+    ensures:
+        for c in RightOf(from):
+            c.selected = {}
+            c.anchor = null
+            c.values = []
+            c.vp.top = 0
+        TrackTableReset()
+        for c in RightOf(from):
+            ColumnLoad(column: c)
+
+    @guidance
+        -- Every column to the right is cleared before any of them is
+        -- asked for, because each one's filter depends on every column
+        -- to its left. The track table goes first (P23).
+}
+
+rule GenreToggled {
+    when: ToggleGenreColumn()
+    ensures:
+        library.genre_column = not library.genre_column
+        for c in library.columns:
+            c.selected = {}
+            c.anchor = null
+        LibraryReloaded()
+}
+
+rule LetterJumped {
+    when: JumpTo(column, letter)
+    requires: column.rail
+    ensures: ColumnScrolledTo(column, FirstRowUnder(letter, column.values))
+
+    @guidance
+        -- Filing is by the first character of sort_key, upper-cased,
+        -- with A to Z its own letter and everything else under #.
+        -- Letters with no rows are drawn disabled. Because the column is
+        -- ordered by the same key the rail files by, each letter's rows
+        -- are contiguous, which byte-ordered MPD output did not
+        -- guarantee.
+}
+
+rule SearchTyped {
+    when: QueryEdited(text)
+    ensures:
+        page.query_draft = text
+        after config.search_debounce without another QueryEdited:
+            QueryCommitted(text)
+}
+
+rule SearchCommitted {
+    when: QueryCommitted(text)
+    let q = if Length(Trim(text)) >= config.search_min_chars: Trim(text) else: null
+    requires: q != page.query
+    ensures:
+        page.query = q
+        page.query_gen = page.query_gen + 1
+        LibraryReloaded()
+
+    @guidance
+        -- Enter commits at once, below the minimum as well, so a
+        -- one-letter query is possible on purpose. Selections are kept
+        -- across a query change; a selection the narrowed column no
+        -- longer holds is dropped by ColumnValuesArrive like any other.
+        -- The guest page applies the same term to its drill-down.
+}
+
+rule LibraryReloaded {
+    when: LibraryReloaded()
+    let first = ActiveColumn(library)
+    ensures:
+        ColumnLoad(column: first)
+        for c in library.shown_axes where c != first:
+            ColumnLoad(column: c)
+        TrackTableReset()
+
+    @guidance
+        -- P23. ActiveColumn is the first shown column with nothing
+        -- selected, else the last.
+}
+
+-- The track table ----------------------------------------------------------
+
+rule TrackTableReset {
+    when: TrackTableReset()
+    let t = library.tracks
+    let f = TrackFilter()
+    ensures:
+        t.gen = t.gen + 1
+        t.picked = {}
+        t.anchor = null
+        t.held = { from: 0, rows: [] }
+        t.vp.top = 0
+        t.total = if f = none: mpd.song_count else: 0
+        if f != none:
+            Sent(lib, Request{kind: track_count, gen: t.gen}, "count " + f)
+        TrackPageRequested(from: 0)
+
+    @guidance
+        -- TrackFilter conjoins term_any_of over every shown column with a
+        -- selection, plus the search term. The first page goes out
+        -- beside the count, not behind it: row zero exists whatever the
+        -- count turns out to be.
+}
+
+rule TrackPageRequested {
+    when: TrackPageRequested(from)
+    let t = library.tracks
+    requires: not t.pending
+    ensures:
+        t.pending = true
+        Sent(lib, Request{kind: track_page, gen: t.gen, from: from},
+             TrackCommand(TrackFilter(), t.sort, from, from + config.track_page))
+
+    @guidance
+        -- TrackCommand:
+        --   no filter, no sort   search any "" window A:B
+        --   otherwise            find <F> [sort [-]<key>] window A:B
+        -- `search any ""` is the one filter MPD accepts for "every
+        -- song", and with no sort it is database order.
+}
+
+rule TrackPageArrives {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = track_page
+    let t = library.tracks
+    requires: request.gen = t.gen
+    let rows = ParseSongs(lines)
+    ensures:
+        t.pending = false
+        if request.from = t.held.from + t.held.rows.count:
+            t.held.rows = t.held.rows + rows
+        if rows.count < config.track_page:
+            t.total = request.from + rows.count
+        else if t.total < request.from + rows.count:
+            t.total = request.from + rows.count
+        TrackFetchChecked()
+
+    @guidance
+        -- A short page says where the result really ends; `find` is the
+        -- truth and `count` was the estimate.
+}
+
+rule TrackCountArrives {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = track_count
+    requires: request.gen = library.tracks.gen
+    ensures:
+        library.tracks.total = CountOf(lines)
+        TrackFetchChecked()
+}
+
+rule TrackFetchChecked {
+    when: TrackFetchChecked() or TrackScrolled()
+    let t = library.tracks
+    let want = TopRow(t.vp, config.track_row_height)
+    let held_to = t.held.from + t.held.rows.count
+    let reach = Ceil((t.vp.top + t.vp.height * (1 + config.fetch_ahead_screens)) / config.track_row_height)
+    requires: not t.pending and t.total > 0
+    ensures:
+        if want < t.held.from or want >= held_to:
+            t.held = { from: Floor(want / config.track_page) * config.track_page, rows: [] }
+            TrackPageRequested(from: t.held.from)
+        else if reach >= held_to and held_to < t.total:
+            TrackPageRequested(from: held_to)
+
+    @guidance
+        -- A dragged scrollbar lands outside the held run; the run starts
+        -- over on a page boundary under the viewport rather than walking
+        -- there one page at a time.
+}
+
+rule TrackSorted {
+    when: HeaderClicked(key)
+    requires: key in {track, title_sort, artist_sort, album_sort, date}
+    let s = library.tracks.sort
+    ensures:
+        library.tracks.sort =
+            if s = null or s.key != key: { key: key, descending: false }
+            else if not s.descending: { key: key, descending: true }
+            else: null
+        TrackTableReset()
+}
+
+rule TrackPicked {
+    when: PickTrack(row, modifier)
+    let t = library.tracks
+    let s = t.held.rows[row - t.held.from]
+    requires: s != null
+    ensures:
+        t.picked =
+            if modifier = shift: UrisOfHeldRows(t.anchor or row, row)
+            else if modifier = toggle: Toggled(s.uri, t.picked)
+            else: {s.uri}
+        t.anchor = if modifier = shift: t.anchor or row else: row
+
+    @guidance
+        -- P21. On the guest page there is no picking (P15).
+}
+
+rule PicksCleared {
+    when: ClearPicks()
+    ensures:
+        library.tracks.picked = {}
+        library.tracks.anchor = null
+}
+
+-- The queue ------------------------------------------------------------------
+
+rule QueueOpened {
+    when: Open(queue)
+    ensures:
+        page.view = queue
+        page.queue.held = { from: WindowStart(page.queue.vp), rows: [] }
+        page.queue.version = page.status.playlist_version
+        Sent(cmd, Request{kind: queue_window, from: page.queue.held.from},
+             "playlistinfo " + page.queue.held.from + ":" + (page.queue.held.from + config.queue_window))
+        StickersRequested()
+
+    @guidance
+        -- WindowStart centres the window on the current song the first
+        -- time the view opens in a session, and on the remembered scroll
+        -- position after that.
+}
+
+rule QueueChangesRequested {
+    when: QueueChangesRequested()
+    let q = page.queue
+    let a = q.held.from
+    let b = q.held.from + q.held.rows.count
+    ensures:
+        Sent(cmd, Request{kind: queue_changes, from: a},
+             "plchanges " + q.version + " " + a + ":" + Max(b, a + config.queue_window))
+}
+
+rule QueueChangesArrive {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = queue_changes
+    let q = page.queue
+    ensures:
+        for s in ParseSongs(lines):
+            q.held.rows[s.position - q.held.from] = s
+        q.length = page.status.playlist_length
+        q.held.rows = q.held.rows where position < q.length
+        q.version = page.status.playlist_version
+
+    @guidance
+        -- plchanges reports every song whose position or id changed
+        -- inside the range, with its new position. A move near the top
+        -- of a long queue shifts every row below it, and the range keeps
+        -- that reply to the held window. Rows past playlistlength have
+        -- been deleted from the end. If the version jumped by more than
+        -- the held window can explain (a `clear`, a `load`), the reply
+        -- simply covers the whole window, which is the same as a fresh
+        -- read.
+}
+
+rule QueueScrolled {
+    when: QueueScrolled(vp)
+    let q = page.queue
+    let want = TopRow(vp, config.queue_row_height)
+    ensures:
+        q.vp = vp
+        if want < q.held.from or want + VisibleRows(vp) > q.held.from + q.held.rows.count:
+            q.held = { from: Max(0, want - config.queue_window / 4), rows: [] }
+            Sent(cmd, Request{kind: queue_window, from: q.held.from},
+                 "playlistinfo " + q.held.from + ":" + (q.held.from + config.queue_window))
+}
+
+rule StickersRequested {
+    when: StickersRequested()
+    ensures:
+        if page.role = host or caps.party:
+            Sent(cmd, Request{kind: stickers_added}, "sticker find song \"\" nixtune.added_by")
+        if caps.party:
+            Sent(cmd, Request{kind: stickers_vetoes},
+                 "sticker find song \"\" nixtune.vetoes sort value_int window 0:" + config.sticker_window)
+}
+
+rule HostReorders {
+    when: RowDropped(from, to)
+    requires: page.role = host
+    requires: from != to
+    ensures: Sent(cmd, "move " + from + " " + to)
+
+    @guidance
+        -- The drag is a Draft (P2): rows measured once on grab, drawn
+        -- offset, one `move` on release, the real order back through
+        -- idle and plchanges. With the queue windowed, a drag is
+        -- confined to the held window; dragging past its edge scrolls
+        -- the list, which extends the window, and the drop target is
+        -- still a position.
+}
+
+-- Row actions --------------------------------------------------------------
+
+rule RowActed {
+    when: RowAction(action, target)
+    requires: page.role = host or action = add_end
+    ensures:
+        if action = add_end:
+            Sent(cmd, AddCommand(target, position: none))
+        if action = play_next:
+            Sent(cmd, AddCommand(target, position: "+0"))
+        if action = replace_play:
+            Sent(cmd, "clear")
+            Sent(cmd, AddCommand(target, position: none))
+            Sent(cmd, "play")
+        if action = add_to_playlist:
+            PlaylistPickerOpened(target)
+        if page.role = guest:
+            AttributionWritten(target)
+            if page.status.state = stopped:
+                Sent(cmd, "play")
+
+    @guidance
+        -- AddCommand by target:
+        --   one track            add <uri> | addid <uri> +0
+        --   a folder             add <uri> (position not supported for
+        --                        a directory; Play next on a folder
+        --                        uses findadd "(base '<uri>')" position +0)
+        --   picked tracks        add <uri> per pick in table order, or
+        --                        addid <uri> +i for Play next, i counting
+        --                        from 0, so they land after the current
+        --                        song in table order
+        --   a column value or the whole filter
+        --                        findadd <F> [sort [-]<key>] [position +0]
+        --   a station            add <url>
+        -- findadd keeps the table's current sort, so what is queued is in
+        -- the order the person was looking at.
+        -- AttributionWritten: one `sticker set song <uri>
+        -- nixtune.added_by <nick>` per TRACK URI. A guest adding an album
+        -- writes one per track, which is why the guest page adds a
+        -- selection only as one findadd and attributes its tracks from
+        -- the rows it already holds; tracks beyond the held rows stay
+        -- unattributed. A folder is unattributed, as today.
+}
+
+rule AddedToPlaylist {
+    when: PlaylistPicked(target, name)
+    requires: page.role = host
+    ensures:
+        if target is track:
+            Sent(cmd, "playlistadd " + Quote(name) + " " + Quote(target.uri))
+        else:
+            Sent(cmd, "searchaddpl " + Quote(name) + " " + Quote(TargetFilter(target)))
+}
+
+-- Saved playlists ------------------------------------------------------------
+
+rule PlaylistsOpened {
+    when: Open(playlists)
+    requires: page.role = host
+    ensures:
+        page.view = playlists
+        Sent(cmd, Request{kind: playlist_list}, "listplaylists")
+}
+
+rule PlaylistOpened {
+    when: OpenPlaylist(name)
+    ensures:
+        page.playlists.open = name
+        page.playlists.gen = page.playlists.gen + 1
+        page.playlists.held = { from: 0, rows: [] }
+        Sent(cmd, Request{kind: playlist_window, gen: page.playlists.gen, from: 0},
+             "listplaylistinfo " + Quote(name) + " 0:" + config.track_page)
+        Sent(cmd, Request{kind: playlist_length, gen: page.playlists.gen}, "playlistlength " + Quote(name))
+
+    @guidance
+        -- The total comes from `playlistlength NAME`, sent beside the
+        -- first window, so the scrollbar is the real length at once.
+        -- Load, Append, Save queue as, Rename and Delete send `load`
+        -- (after `clear` for Load), `load`, `save`, `rename`, `rm`.
+}
+
+-- Folders --------------------------------------------------------------------
+
+rule FolderBrowsed {
+    when: Browse(path)
+    ensures:
+        page.folders.gen = page.folders.gen + 1
+        Sent(lib, Request{kind: folder, gen: page.folders.gen}, "lsinfo " + Quote(path))
+
+    @guidance
+        -- Held, drawn by the list engine, so a directory of thousands is
+        -- thousands of entries in memory and a few dozen in the DOM.
+        -- `lsinfo` has no window in any MPD version; open question
+        -- "largest directory" asks for the bound.
+}
+
+-- Party mode -----------------------------------------------------------------
+
+rule GuestVetoes {
+    when: Veto(song)
+    requires: caps.party
+    requires: song.uri not in page.browser.my_vetoes
+    ensures:
+        page.browser.my_vetoes = page.browser.my_vetoes + {song.uri}
+        Sent(cmd, "sticker inc song " + Quote(song.uri) + " nixtune.vetoes 1")
+        Sent(cmd, Request{kind: stickers_vetoes})
+}
+
+rule VetoLimitReached {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = stickers_vetoes
+    ensures:
+        page.queue.veto_counts = ParseStickers(lines)
+        for (uri, n) in page.queue.veto_counts where n >= caps.vetoes and uri in page.browser.my_vetoes:
+            for s in page.queue.held.rows where s.uri = uri:
+                Sent(cmd, "deleteid " + s.id)
+            Sent(cmd, "sticker delete song " + Quote(uri) + " nixtune.vetoes")
+
+    @guidance
+        -- Only a browser that voted on a track acts on its limit, so a
+        -- page that merely watches never deletes. Two voters that both
+        -- see the limit both send deleteid; the second gets an ACK for a
+        -- missing id, which is harmless and not shown. Copies of the
+        -- track outside the held window are not removed by this page;
+        -- they carry the same tally and go when they come into someone's
+        -- held window. my_vetoes keeps entries for tracks no longer
+        -- queued; it is pruned to the URIs in veto_counts on each read.
+}
+
+-- Transport and volume ------------------------------------------------------
+
+rule KeyPressed {
+    when: KeyDown(key, focus)
+    requires: page.role = host
+    requires: focus not in {text_input, range_input, grip}
+    ensures:
+        if key = " ": Sent(cmd, if page.status.state = playing: "pause 1" else: "play")
+        if key = "ArrowLeft": Sent(cmd, "previous")
+        if key = "ArrowRight": Sent(cmd, "next")
+        if key = "ArrowUp": VolumeNudged(+config.volume_step)
+        if key = "ArrowDown": VolumeNudged(-config.volume_step)
+        if key = "m": MuteToggled()
+}
+
+rule VolumeSet {
+    when: VolumeTarget(level)
+    requires: page.role = host
+    requires: level >= 0 and level <= caps.max_volume
+    ensures:
+        Draft{kind: volume, value: level}
+        if caps.volume_path != null:
+            VolumeWriter.set(level)
+        else:
+            Sent(cmd, "setvol " + level)
+
+    @guidance
+        -- The draft is dropped when `status` reports a level within one
+        -- of it. The slider's floor is volume_floor; zero belongs to
+        -- mute, which remembers the level to return to (unmute_floor
+        -- when none).
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant EveryCommandIsBounded {
+    for c in CommandsThePageSends:
+        c.verb in ReplyBounds.Table
+}
+
+invariant NoWholeQueueRead {
+    not PageSends("playlistinfo") without range
+}
+
+invariant NoUnwindowedSongListing {
+    for c in CommandsThePageSends where c.verb in {"find", "search", "listplaylistinfo"}:
+        HasWindow(c)
+}
+
+invariant OneCommandPerColumn {
+    -- P7. Selecting forty album artists sends one `list album`, not
+    -- forty.
+    for col in Columns:
+        RequestsInFlight(col) <= 1
+}
+
+invariant StaleRepliesDiscarded {
+    for r in Replies where r.request.gen != null:
+        r.request.gen != CurrentGen(r.request) implies Discarded(r)
+}
+
+invariant ColumnsInPageOrder {
+    -- P5. MPD's byte order never reaches the screen.
+    for col in Columns: Ordered(col.values, by: SortKeyThenDisplay)
+}
+
+invariant DomIsBounded {
+    -- P3. Every list puts at most its visible rows plus 2 * overscan in
+    -- the DOM.
+    for l in Lists:
+        RowsInDom(l) <= VisibleRows(l.vp) + 2 * config.overscan
+}
+
+invariant DraftsAreTheOnlyAheadState {
+    -- P2.
+    for v in ShownValues:
+        v.source in {mpd_reply, draft, capabilities, local_storage}
+}
+
+invariant GuestOffersAppendOnly {
+    for s in Pages where role = guest:
+        not Offered(s, any of {"delete", "deleteid", "clear", "move",
+                               "previous", "next", "pause", "setvol",
+                               "addid +0", "load", "save", "rm"})
+}
+
+invariant TransportAlwaysReachable {
+    for s in Pages where role = host:
+        Offered(s, "transport") and Offered(s, "volume")
+}
+
+invariant NeverSetvolOnHelperHost {
+    caps.volume_path != null implies not PageSends("setvol")
+}
+
+invariant PicksBelongToTheList {
+    -- P21.
+    for p in library.tracks.picked:
+        WasHeldInGeneration(p, library.tracks.gen)
+}
+
+invariant StaleSocketEventsIgnored {
+    -- P22.
+    for e in SocketEvents:
+        e.serial != LinkOf(e.conn).serial implies Ignored(e)
+}
+
+invariant CacheOnlyWholeLibrary {
+    for w in CacheWrites:
+        w.filter = none and w.query = null
+}
+
+------------------------------------------------------------
+-- Actors
+------------------------------------------------------------
+
+actor Host {
+    identified_by: Page where role = host
+}
+
+actor Guest {
+    identified_by: Page where role = guest
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface HostPage {
+    facing host: Host
+
+    exposes:
+        page.status
+        page.current
+        page.queue
+        page.library
+        page.folders
+        page.playlists
+        caps.stations
+        caps.public_url
+        caps.modules
+
+    provides:
+        Open(view)
+        Choose(column, value, modifier)
+        ClearColumn(column)
+        PickTrack(row, modifier)
+        ClearPicks()
+        ToggleGenreColumn()
+        JumpTo(column, letter)
+        QueryEdited(text)
+        QueryCommitted(text)
+        HeaderClicked(key)
+        RowAction(action, target)
+        PlaylistPicked(target, name)
+        OpenPlaylist(name)
+        Browse(path)
+        RowDropped(from, to)
+        VolumeTarget(level)
+        KeyDown(key, focus)
+
+    contracts:
+        demands MpdBridge
+        demands VolumeWriter
+        demands ArtCache
+        demands FilterExpression
+        demands ReplyBounds
+
+    @guarantee NoSettingsSurface
+        -- Hardware, modules and stations are shown, never edited.
+        -- Random, repeat, single, consume and crossfade are MPD state
+        -- and the page changes them.
+
+    @guidance
+        -- Views: Now playing, Queue, Library, Playlists, Radio, QR.
+        -- Library, at desktop width (above phone_breakpoint):
+        --   one row: search box, Tags/Folders switch, Genre toggle,
+        --            Rescan
+        --   one row: the shown columns side by side, each with a header
+        --            (name, selection count, clear), an All row, a
+        --            letter rail when over the threshold
+        --   one row: the scope in words ("Miles Davis, 3 albums"), Add,
+        --            Play next, Play, Add to playlist for the whole
+        --            selection
+        --   the rest: the track table, header row fixed, body scrolling
+        -- Library, at phone width: the active column only (the first
+        -- with nothing selected, else the last), choices above it as
+        -- chips; the track table becomes two-line rows with Title on top
+        -- and Artist, Album, Time under it, and the sort control is a
+        -- select above the list rather than headers.
+        -- Every row carries its actions behind one control at phone
+        -- width and as visible buttons at desktop width.
+        -- Below every view, the transport bar (P20).
+}
+
+surface GuestPage {
+    facing guest: Guest
+
+    exposes:
+        page.status.state
+        page.current
+        page.library
+        page.browser.nickname
+        page.queue when caps.party
+
+    provides:
+        Open(view) where view in {now_playing, library, queue}
+        Choose(column, value, plain)
+        ClearColumn(column)
+        QueryEdited(text)
+        QueryCommitted(text)
+        RowAction(add_end, target)
+        Veto(song) when caps.party
+
+    contracts:
+        demands MpdBridge
+        demands ArtCache
+        demands FilterExpression
+        demands ReplyBounds
+
+    @guarantee AppendOnlyByConstruction
+        -- No control sends a queue command other than add/findadd, and
+        -- `play` from the stopped state only.
+
+    @guidance
+        -- Library is P15: search box, then album artist, then album,
+        -- then tracks, one at a time, chips to go back. No genre, no
+        -- multi-select, no sort headers, no folder tree. Queue appears
+        -- only in party mode, read only, with the veto control and its
+        -- count.
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred MpdProtocol.filters        -- see: doc/protocol.rst, "Filters", MPD 0.24
+deferred MpdProtocol.list           -- see: doc/protocol.rst, `list`, `group`
+deferred MpdProtocol.queue          -- see: `playlistinfo`, `plchanges`, `addid`, `findadd ... position`
+deferred MpdProtocol.stickers       -- see: `sticker inc`, `sticker find ... sort window`
+deferred MpdProtocol.storedPlaylists -- see: `listplaylists`, `listplaylistinfo`, `playlistadd`, `searchaddpl`
+deferred Mpd.tagFallback            -- see: src/tag/Fallback.hxx
+deferred Mpd.uniqueTagOrder         -- see: src/db/UniqueTags.cxx, src/util/RecursiveMap.hxx
+deferred Browser.localeCompare      -- see: Data.String.localeCompare, ECMA-402
+deferred Nixtune.system             -- see: nixtune.allium
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "attribution growth: how many nixtune.added_by stickers exist after a month of parties, and how large is the `sticker find` reply. If it grows past sticker_window, the choices are a value carrying the add time with the page deleting entries older than a day when it reads them, or attribution kept only for the held queue window with one `sticker get` per visible row."
+open question "largest directory: the biggest single directory under Music/, in entries, which is the real bound on an `lsinfo` reply. If it is over a few thousand, the folder view should list subdirectories with `lsinfo` and files with `find \"(base '<dir>')\" window`, which is windowable."
+open question "Whether `=~` against AlbumArtist applies MPD's fallback to Artist the way `==` does. The documentation says the fallback applies to the tag in a filter without naming the operator; one query on the real database settles it, and if it does not apply, term_any_of for album_artist becomes ((AlbumArtist =~ R) OR-equivalent) which MPD cannot express, and the regex has to be over Artist for untagged files."
+open question "Whether ten thousand album artists and the whole album list, with their sort keys, fit in localStorage beside everything else the origin stores. If a write throws, the page already carries on without the cache; whether that is acceptable or calls for IndexedDB (the one candidate in ForeignBudget) depends on how often it happens."
+open question "Year order uses Date. If this library's Date tags are mostly full release dates of reissues, OriginalDate would order a discography better and needs its own fallback in the page, since MPD has none from OriginalDate to Date."
+open question "Whether the guest's `play` from the stopped state is welcome at 2 a.m. (carried from nixtune.allium)."
