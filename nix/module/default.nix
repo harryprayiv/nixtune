@@ -19,6 +19,7 @@
 #                  card
 #   art.nix        pulling cover art out of the files into a served cache
 #   ui.nix         nginx, websocat, capabilities.json, the page
+#   youtube.nix    fetching a YouTube track into the library and queueing it
 #   airplay.nix    shairport-sync and the arbitration hooks
 #   upnp.nix       upmpdcli
 #
@@ -76,6 +77,7 @@ in
     ./volume.nix
     ./art.nix
     ./ui.nix
+    ./youtube.nix
     ./airplay.nix
     ./upnp.nix
   ];
@@ -273,6 +275,53 @@ in
           How many distinct guests have to vote against a track before it
           leaves the queue.
         '';
+      };
+    };
+
+    youtube = {
+      enable = lib.mkEnableOption ''
+        queueing a track from a YouTube link.
+
+        The host page gains a field for a YouTube link. The player fetches
+        the audio with yt-dlp into youtube.directory, a folder inside the
+        library export on the NAS, has MPD index it, and adds it to the end
+        of the queue. youtube.nix describes what the helper will and will
+        not run.
+
+        The folder has to exist on the NAS before the first fetch, and the
+        export has to let this host write to it: either the export maps all
+        users to admin, or the nixtune-youtube user's uid can write to the
+        folder
+      '';
+      directory = mkOption {
+        type = types.strMatching "[A-Za-z0-9_][A-Za-z0-9_.-]*";
+        default = "_youtube";
+        description = ''
+          The folder the downloads go to, at the top of the library export:
+          library.export with this appended is mounted read-write, and the
+          tracks appear in MPD under this name. One path component, no
+          spaces.
+        '';
+      };
+      package = mkOption {
+        type = types.package;
+        default = pkgs.yt-dlp;
+        defaultText = lib.literalExpression "pkgs.yt-dlp";
+        description = ''
+          The yt-dlp to run. YouTube changes what yt-dlp has to do every few
+          weeks, so when fetches start failing with extractor errors, point
+          this at a newer build or update the flake.
+        '';
+      };
+      maxMinutes = mkOption {
+        type = types.ints.between 1 600;
+        default = 20;
+        description = "The longest video, in minutes, the helper will fetch. Live streams are refused whatever this is.";
+      };
+      maxSize = mkOption {
+        type = types.strMatching "[0-9]+[KMG]";
+        default = "300M";
+        description = "The largest audio stream the helper will download, in yt-dlp's notation.";
       };
     };
 

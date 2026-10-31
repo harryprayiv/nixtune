@@ -197,6 +197,13 @@ type State =
   -- the page walks the list as each one fails to load and shows nothing
   -- once the list runs out.
   , artTry :: Int
+  -- The YouTube helper's socket, when the host has one; what is in the
+  -- link field; whether a fetch is under way; and the last thing the
+  -- helper said, shown under the field.
+  , ytLink :: Maybe { socket :: WebSocket, ready :: Boolean }
+  , ytText :: String
+  , ytBusy :: Boolean
+  , ytNote :: Maybe String
   -- The Clear button has been pressed once and is waiting for the
   -- second press that confirms it. The number names the press, so the
   -- timer that disarms it can tell whether a later press re-armed it.
@@ -241,6 +248,10 @@ initial =
   , seekDraft: Nothing
   , volLink: Nothing
   , artTry: 0
+  , ytLink: Nothing
+  , ytText: ""
+  , ytBusy: false
+  , ytNote: Nothing
   , clearArmed: Nothing
   , clearTick: 0
   , drag: Nothing
@@ -309,6 +320,13 @@ data Action
   -- press it belongs to.
   | ClearQueue
   | ClearDisarm Int
+  -- The YouTube helper: its socket opening and closing, a message off it,
+  -- the link field, and the button that sends the link.
+  | YtOpened
+  | YtClosed
+  | YtChunk String
+  | YtText String
+  | YtSubmit Event
   | UpdateLibrary
 
 -- | The monad every handler and helper runs in.

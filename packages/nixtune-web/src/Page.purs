@@ -10,7 +10,7 @@ import Caps (Station)
 import Data.Array (elem, length, null)
 import Data.Array as Array
 import Data.Foldable (lookup)
-import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, isJust, isNothing, maybe)
 import Data.String (joinWith)
 import Halogen as H
 import Halogen.HTML as HH
@@ -196,6 +196,8 @@ clearButton st =
 
 queueView :: forall m. State -> Array (H.ComponentHTML Action () m)
 queueView st =
+  youtubeForm st
+    <>
   [ if st.role == Host then
       HH.div [ cls "row-actions" ]
         [ clearButton st ]
@@ -267,6 +269,33 @@ queueView st =
               )
           ]
       ]
+
+-- | A YouTube link to fetch into the library and queue, on the host page
+-- | of a host built with services.nixtune.youtube. The field stays as
+-- | typed while the fetch runs and empties when the track is queued; the
+-- | line under it is the last thing the helper said.
+youtubeForm :: forall m. State -> Array (H.ComponentHTML Action () m)
+youtubeForm st =
+  if st.role /= Host || isNothing (st.caps >>= _.youtubePath) then []
+  else
+    [ HH.div [ cls "libtop" ]
+        [ HH.form [ cls "search", HE.onSubmit YtSubmit ]
+            [ HH.input
+                [ HP.type_ HP.InputUrl
+                , HP.placeholder "YouTube link to add to the queue"
+                , HP.value st.ytText
+                , HP.disabled st.ytBusy
+                , HE.onValueInput YtText
+                ]
+            , HH.button
+                [ HP.type_ HP.ButtonSubmit
+                , HP.disabled (st.ytBusy || st.ytText == "" || not (maybe false _.ready st.ytLink))
+                ]
+                [ HH.text (if st.ytBusy then "Fetching…" else "Fetch") ]
+            ]
+        ]
+    ]
+      <> maybe [] (\note -> [ HH.p [ cls "note" ] [ HH.text note ] ]) st.ytNote
 
 -- | The veto button and its tally. One vote per browser: a browser that
 -- | has already voted sees the count and a disabled button, because the

@@ -117,6 +117,23 @@ connectVolume path = do
   void $ H.subscribe $ HQE.eventListener WSE.onClose target (const (Just VolClosed))
   H.modify_ _ { volLink = Just { socket, ready: false } }
 
+-- | The YouTube helper's socket. Unlike the volume socket its replies
+-- | are read: the helper says when a fetch starts, when the track is in
+-- | the queue, and why when it is not.
+connectYoutube :: forall o m. MonadAff m => String -> M o m Unit
+connectYoutube path = do
+  url <- liftEffect (socketUrl path)
+  socket <- liftEffect (WS.create url [])
+  let
+    target = WS.toEventTarget socket
+  void $ H.subscribe $ HQE.eventListener WSE.onOpen target (const (Just YtOpened))
+  void $ H.subscribe $ HQE.eventListener WSE.onClose target (const (Just YtClosed))
+  void $ H.subscribe $ HQE.eventListener WSE.onMessage target \ev -> do
+    me <- ME.fromEvent ev
+    s <- hush (runExcept (readString (ME.data_ me)))
+    pure (YtChunk s)
+  H.modify_ _ { ytLink = Just { socket, ready: false } }
+
 linkOf :: Conn -> State -> Maybe Link
 linkOf = case _ of
   Cmd -> _.cmd

@@ -38,6 +38,9 @@ type Caps =
   -- Where cover images are served from, or null when the host serves
   -- none. See nix/module/ui.nix.
   , artPath :: Maybe String
+  -- Where YouTube links are sent, or null when the host has no YouTube
+  -- helper. See nix/module/youtube.nix.
+  , youtubePath :: Maybe String
   , maxVolume :: Int
   , publicUrl :: String
   , hostPath :: String

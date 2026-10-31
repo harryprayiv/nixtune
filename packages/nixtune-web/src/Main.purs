@@ -29,15 +29,15 @@
 -- |   Browse.purs   the tag browser as data, and its arithmetic
 -- |   Tags.purs     the tag browser's behaviour
 -- |   Net.purs      the sockets and the requests
--- |   Volume.purs   the level and the glide
--- |   Player.purs   the bar: position, transport, level
+-- |   Volume.purs   the level, the glide, the bar
 -- |   Reorder.purs  dragging a queue row
 -- |   Art.purs      cover images from the library
 -- |   Nick.purs     the role and the guest nickname
 -- |   Cache.purs    the library index, kept between visits
--- |   Page.purs     everything drawn but the Library view and the bar
+-- |   Page.purs     everything drawn but the Library view
 -- |   Library.purs  the Library view: search, tag browser, folders
 -- |   Filter.purs   MPD filter expressions and their escaping
+-- |   Youtube.purs  queueing a track from a YouTube link
 -- |   Ui.purs       class attributes, glyphs, the format badge
 -- |   Mpd.purs      the protocol's text, parsed
 -- |   Caps.purs     capabilities.json
@@ -69,7 +69,7 @@ import Halogen.Subscription as HS
 import Halogen.VDom.Driver (runUI)
 import Mpd (PlayState(..))
 import Mpd as Mpd
-import Net (browse, connect, connectVolume, linkOf, liveLink, modifyLink, pushLine, refreshAll, send, setLink, takeBlock, takeLines)
+import Net (browse, connect, connectVolume, connectYoutube, linkOf, liveLink, modifyLink, pushLine, refreshAll, send, setLink, takeBlock, takeLines)
 import Nick (nicknameFor, roleFromPath)
 import Page (render)
 import Reorder (dragTarget, rowMiddles)
@@ -101,6 +101,7 @@ import Types
   , votersAgainst
   )
 import Volume (setVolume)
+import Youtube as Youtube
 import Web.Event.Event (EventType(..), preventDefault)
 import Web.HTML (window)
 import Web.HTML.HTMLDocument as HTMLDocument
@@ -140,6 +141,7 @@ handle = case _ of
         connect Idle
         connect Lib
         for_ caps.volumePath connectVolume
+        for_ caps.youtubePath connectYoutube
         { emitter, listener } <- liftEffect HS.create
         _ <- liftEffect (setInterval 1000 (HS.notify listener Tick))
         void (H.subscribe emitter)
@@ -437,6 +439,11 @@ handle = case _ of
     armed <- H.gets _.clearArmed
     when (armed == Just press) (H.modify_ _ { clearArmed = Nothing })
   UpdateLibrary -> send Cmd RFire "update"
+  YtOpened -> Youtube.opened
+  YtClosed -> Youtube.closed
+  YtChunk raw -> Youtube.received raw
+  YtText t -> H.modify_ _ { ytText = t }
+  YtSubmit ev -> Youtube.submit ev
 
 -- | The tag browser has just come on screen. Its columns were fetched at
 -- | startup, so this usually asks for nothing; a page whose fetch never

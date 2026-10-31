@@ -47,6 +47,9 @@ let
       # library or album art is off. art.nix fills that cache and owns the
       # nginx location that serves it.
       artPath = cfg.art.path;
+      # Where YouTube links go, or null when youtube.nix is off. Like the
+      # volume helper, a socket nginx serves beside the page.
+      youtubePath = cfg.youtube.path;
       maxVolume = cfg.mpd.maxVolume;
       # Party mode and how many votes it takes to drop a track. Both are
       # build-time facts, like everything else here.
