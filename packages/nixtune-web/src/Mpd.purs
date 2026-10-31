@@ -67,6 +67,10 @@ type Status =
   , elapsed :: Number
   , duration :: Number
   , song :: Maybe Int
+  -- How many entries the queue holds, straight from `status`. The page
+  -- reads this rather than counting its own copy, so the queue's length
+  -- is known without fetching the queue.
+  , queueLength :: Int
   , random :: Boolean
   , repeat :: Boolean
   , single :: Boolean
@@ -87,6 +91,7 @@ emptyStatus =
   , elapsed: 0.0
   , duration: 0.0
   , song: Nothing
+  , queueLength: 0
   , random: false
   , repeat: false
   , single: false
@@ -151,6 +156,7 @@ parseStatus ls =
   , elapsed: number "elapsed"
   , duration: number "duration"
   , song: lookup "song" ps >>= fromString
+  , queueLength: fromMaybe 0 (lookup "playlistlength" ps >>= fromString)
   , random: lookup "random" ps == Just "1"
   , repeat: lookup "repeat" ps == Just "1"
   , single: lookup "single" ps == Just "1"
