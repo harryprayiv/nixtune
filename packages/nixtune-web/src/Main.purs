@@ -38,15 +38,16 @@ module Main (main) where
 
 import Prelude
 
+import Cache as Cache
 import Caps as Caps
-import Data.Array (elem, head, length, snoc, uncons, (:))
+import Data.Array (any, elem, filter, head, length, snoc, uncons, (:))
 import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int (fromString, toNumber)
 import Data.Maybe (Maybe(..), fromMaybe, isNothing, maybe)
 import Data.Number as Number
-import Data.String (Pattern(..), split, stripSuffix, trim)
+import Data.String (Pattern(..), joinWith, split, stripSuffix, trim)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), delay)
@@ -67,6 +68,7 @@ import Reorder (dragTarget, rowMiddles)
 import Types
   ( Action(..)
   , Axis(..)
+  , State
   , Viewport
   , colRef
   , firstUnder
@@ -88,6 +90,10 @@ import Types
   , searchLimit
   , shownVolume
   , stickerFind
+  , vetoFind
+  , vetoLimit
+  , vetoName
+  , votersAgainst
   , stickerName
   , unmuteFloor
   , volumeFloor
@@ -191,6 +197,7 @@ handle = case _ of
     when (v == Queue) do
       send Cmd RQueue "playlistinfo"
       send Cmd RStickers stickerFind
+      send Cmd RVetoes vetoFind
     when (v == Library) do
       st <- H.get
       when (isNothing st.searched) $ case st.mode of
@@ -376,6 +383,29 @@ handle = case _ of
     let
       vp = viewportOf axis st
     when (vp.top /= top || vp.height /= height) (setViewport axis { top, height })
+  -- One browser, one vote, per track. The tally is an MPD sticker on the
+  -- track's URI, so every page sees the same number without anything on
+  -- the player keeping score. Whoever casts the deciding vote is the one
+  -- that removes the track, by id rather than by position so a racing
+  -- removal cannot take the wrong one, and clears the tally so the track
+  -- does not arrive pre-vetoed if somebody queues it again.
+  Veto uri songId -> do
+    st <- H.get
+    let
+      voters = votersAgainst st uri
+      me = st.nickname
+      updated = if elem me voters then voters else snoc voters me
+    when (not (elem me voters)) do
+      send Cmd RFire ("sticker set song " <> Mpd.quote uri <> " " <> vetoName <> " " <> Mpd.quote (joinWith "," updated))
+      H.modify_ \s -> s { vetoes = (Tuple uri (joinWith "," updated)) : filter (\(Tuple u _) -> u /= uri) s.vetoes }
+    when (length updated >= vetoLimit st) do
+      -- Every copy of this track goes, because the tally is per URI and
+      -- leaving a second copy queued would make the vote meaningless.
+      for_ (filter (\q -> q.file == uri) st.queue) \q ->
+        for_ q.id \i -> send Cmd RFire ("deleteid " <> show i)
+      for_ songId \i -> when (not (any (\q -> q.file == uri) st.queue)) (send Cmd RFire ("deleteid " <> show i))
+      send Cmd RFire ("sticker delete song " <> Mpd.quote uri <> " " <> vetoName)
+      H.modify_ \s -> s { vetoes = filter (\(Tuple u _) -> u /= uri) s.vetoes }
   AddAlbum -> albumCommand false
   PlayAlbum -> albumCommand true
   SetQuery q -> H.modify_ _ { query = q }
@@ -425,6 +455,13 @@ toTop axis = do
   el <- H.getRef (colRef axis)
   for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
 
+-- | Put a column's values in the browser's store for next time, under
+-- | the database stamp they were read at.
+keep :: forall o m. MonadAff m => Axis -> Array String -> M o m Unit
+keep axis values = do
+  stamp <- H.gets _.dbStamp
+  liftEffect (Cache.write (tagOf axis) stamp values)
+
 setViewport :: forall o m. Axis -> Viewport -> M o m Unit
 setViewport axis vp = H.modify_ case axis of
   AxGenre -> _ { vpGenre = vp }
@@ -438,15 +475,45 @@ setViewport axis vp = H.modify_ case axis of
 refreshTags :: forall o m. MonadAff m => M o m Unit
 refreshTags = do
   st <- H.get
-  when st.genreColumn (send Lib (RTagValues AxGenre) ("list " <> tagOf AxGenre))
+  when st.genreColumn (cachedOrAsk AxGenre ("list " <> tagOf AxGenre))
   loadArtists
+
+-- | Fill the columns that do not depend on a choice, at startup rather
+-- | than on the first Library open.
+primeTags :: forall o m. MonadAff m => M o m Unit
+primeTags = do
+  st <- H.get
+  when (st.mode == Tags) refreshTags
+
+-- | A column whose contents depend on nothing but the database: the
+-- | genre list, and the artist list when no genre narrows it. Those are
+-- | the two worth keeping between visits, and the only two that can be
+-- | answered without asking MPD anything.
+cachedOrAsk :: forall o m. MonadAff m => Axis -> String -> M o m Unit
+cachedOrAsk axis command = do
+  st <- H.get
+  hit <- liftEffect (Cache.read (tagOf axis) st.dbStamp)
+  case hit of
+    Just values | not (Array.null values) -> do
+      H.modify_ (setValues axis values)
+      toTop axis
+    _ -> send Lib (RTagValues axis) command
+
+setValues :: Axis -> Array String -> State -> State
+setValues axis values = case axis of
+  AxGenre -> _ { genres = values }
+  AxArtist -> _ { artists = values }
+  AxAlbum -> _ { albums = values }
 
 loadArtists :: forall o m. MonadAff m => M o m Unit
 loadArtists = do
   st <- H.get
-  send Lib (RTagValues AxArtist) $ case st.selGenre of
-    Just g | st.genreColumn -> "list artist genre " <> Mpd.quote g
-    _ -> "list artist"
+  case st.selGenre of
+    -- Narrowed by a genre, so it is neither the cached list nor worth
+    -- caching: it is small and there are hundreds of genres.
+    Just g | st.genreColumn ->
+      send Lib (RTagValues AxArtist) ("list artist genre " <> Mpd.quote g)
+    _ -> cachedOrAsk AxArtist "list artist"
 
 loadAlbums :: forall o m. MonadAff m => M o m Unit
 loadAlbums = do
@@ -482,6 +549,9 @@ received conn l
   | Mpd.isGreeting l = do
       modifyLink conn _ { ready = true }
       H.modify_ _ { error = Nothing }
+      held <- H.gets (maybe [] _.queued <<< linkOf conn)
+      modifyLink conn _ { queued = [] }
+      for_ held \h -> send conn h.req h.line
       case conn of
         Cmd -> refreshAll
         Idle -> send Idle RFire idleCommand
@@ -518,7 +588,13 @@ changed block = do
   send Cmd RCurrent "currentsong"
   st <- H.get
   when (elem "changed: playlist" block && st.view == Queue) (send Cmd RQueue "playlistinfo")
-  when (elem "changed: sticker" block && st.view == Queue) (send Cmd RStickers stickerFind)
+  when (elem "changed: sticker" block && st.view == Queue) do
+    send Cmd RStickers stickerFind
+    send Cmd RVetoes vetoFind
+  -- A vote removes a track, so a guest watching the queue needs the
+  -- playlist back even though the page's own tab is what gates the
+  -- fetch above.
+  when (elem "changed: playlist" block && st.view == Queue) (send Cmd RVetoes vetoFind)
   when (elem "changed: database" block || elem "changed: update" block) do
     send Cmd RStats "stats"
     when (st.view == Library && isNothing st.searched) $ case st.mode of
@@ -552,16 +628,33 @@ reply req block = case req of
         , artTry = if map _.file cur == map _.file st.current then st.artTry else 0
         }
   RQueue -> H.modify_ _ { queue = Mpd.parseSongs block }
-  RStats -> H.modify_ _ { songs = Mpd.parseStats block }
+  RStats -> do
+    before <- H.gets _.dbStamp
+    let
+      stats = Mpd.parseStats block
+    H.modify_ _ { songs = stats.songs, dbStamp = stats.stamp }
+    -- The index is fetched as soon as the stamp is known, not when the
+    -- Library tab is first opened, so the column is already there when
+    -- it is. On a warm cache this costs nothing at all.
+    when (stats.stamp /= before) primeTags
   RBrowse p -> H.modify_ _ { path = p, entries = Mpd.parseEntries block }
   RSearch _ -> H.modify_ _ { entries = Mpd.parseEntries block }
   RStickers -> H.modify_ _ { addedBy = Mpd.parseStickers block }
+  RVetoes -> H.modify_ _ { vetoes = Mpd.parseStickers block }
   RTagValues AxGenre -> do
-    H.modify_ _ { genres = Mpd.parseList "Genre" block }
+    let
+      values = Mpd.parseList "Genre" block
+    H.modify_ _ { genres = values }
     toTop AxGenre
+    keep AxGenre values
   RTagValues AxArtist -> do
-    H.modify_ _ { artists = Mpd.parseList "Artist" block }
+    let
+      values = Mpd.parseList "Artist" block
+    H.modify_ _ { artists = values }
     toTop AxArtist
+    -- Only the unnarrowed list is the one the cache is keyed on.
+    st <- H.get
+    when (not st.genreColumn || st.selGenre == Nothing) (keep AxArtist values)
   RTagValues AxAlbum -> do
     H.modify_ _ { albums = Mpd.parseList "Album" block }
     toTop AxAlbum

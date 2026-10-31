@@ -10,6 +10,7 @@ package:
     - bifunctors
     - effect
     - either
+    - exceptions
     - foldable-traversable
     - foreign
     - halogen
@@ -35,4 +36,4 @@ package:
     type: app
 workspace:
   packageSet:
-    registry: 81.6.0
+    registry: 60.0.0

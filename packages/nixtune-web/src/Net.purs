@@ -47,7 +47,7 @@ connect conn = do
     me <- ME.fromEvent ev
     s <- hush (runExcept (readString (ME.data_ me)))
     pure (Chunk conn s)
-  setLink conn (Just { socket, ready: false, lines: [], partial: "", asked: [] })
+  setLink conn (Just { socket, ready: false, lines: [], partial: "", asked: [], queued: [] })
 
 -- | The volume socket. It carries one line per change and its replies are
 -- | not read: the level the page shows always comes from MPD, which
@@ -88,7 +88,10 @@ send :: forall o m. MonadAff m => Conn -> Req -> String -> M o m Unit
 send conn req line = do
   st <- H.get
   case linkOf conn st of
-    Just k | k.ready -> do
+    -- Not greeted yet: hold it rather than drop it, and the greeting
+    -- flushes what has piled up.
+    Just k | not k.ready -> modifyLink conn \l -> l { queued = snoc l.queued { req, line } }
+    Just k -> do
       liftEffect (WS.sendString k.socket line)
       when (conn /= Idle) (modifyLink conn \l -> l { asked = snoc l.asked req })
     _ -> pure unit

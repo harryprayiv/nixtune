@@ -32,6 +32,9 @@ import Types
   , axisLabel
   , colRef
   , isStream
+  , partyOn
+  , vetoLimit
+  , votersAgainst
   , letterRailThreshold
   , lettersPresent
   , initialOf
@@ -84,6 +87,9 @@ render st = HH.main_
   tabs = case st.role of
     Guest ->
       [ tab NowPlaying "Now playing" ]
+        -- In party mode a guest sees the queue, so there is something to
+        -- vote against.
+        <> (if partyOn st then [ tab Queue ("Queue" <> count) ] else [])
         <> (if hasLibrary then [ tab Library "Library" ] else [])
     Host ->
       [ tab NowPlaying "Now playing", tab Queue ("Queue" <> count) ]
@@ -231,8 +237,13 @@ progress st =
 
 queueView :: forall m. State -> Array (H.ComponentHTML Action () m)
 queueView st =
-  [ HH.div [ cls "row-actions" ]
-      [ HH.button [ HP.disabled (null st.queue), HE.onClick \_ -> Command "clear" ] [ HH.text "Clear queue" ] ]
+  [ if st.role == Host then
+      HH.div [ cls "row-actions" ]
+        [ HH.button [ HP.disabled (null st.queue), HE.onClick \_ -> Command "clear" ] [ HH.text "Clear queue" ] ]
+    else if partyOn st then
+      HH.p [ cls "note" ]
+        [ HH.text ("Vote a track off and it goes when " <> show (vetoLimit st) <> " people agree. One vote each.") ]
+    else HH.text ""
   , if null st.queue then HH.p [ cls "empty" ] [ HH.text "The queue is empty. Add something from the library or pick a station." ]
     else HH.ul [ classes ([ "list" ] <> (if isJust st.drag then [ "dragging" ] else [])) ] (Array.mapWithIndex item st.queue)
   ]
@@ -261,31 +272,64 @@ queueView st =
                  dy -> [ HP.style ("transform: translateY(" <> show dy <> "px)") ]
              )
       )
-      [ HH.button
-          [ cls "grip"
-          , HP.title "Drag to reorder, or focus and use the arrow keys"
-          , HE.handler (EventType "pointerdown") (GrabRow i)
-          , HE.onKeyDown (GripKey pos)
-          ]
-          [ iconSized "sm" "grip" ]
-      , HH.button [ cls "grow", HE.onClick \_ -> PlayPos pos ]
-          [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
-          , HH.div [ cls "line" ]
-              [ HH.text
-                  ( joinWith " · "
-                      (Array.filter (_ /= "") [ Mpd.songLine s, maybe "" (\w -> "added by " <> w) (whoAdded st s.file) ])
-                  )
-              ]
-          ]
-      , formatBadge s.file
-      , HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ]
-      , HH.button [ cls "ghost icon-btn", HP.title "Remove", HE.onClick \_ -> DeletePos pos ] [ iconSized "sm" "x" ]
-      ]
+      ( ( if st.role == Host then
+            [ HH.button
+                [ cls "grip"
+                , HP.title "Drag to reorder, or focus and use the arrow keys"
+                , HE.handler (EventType "pointerdown") (GrabRow i)
+                , HE.onKeyDown (GripKey pos)
+                ]
+                [ iconSized "sm" "grip" ]
+            ]
+          else []
+        )
+          <> [ rowBody, formatBadge s.file, HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ] ]
+          <> (if partyOn st then [ vetoButton st s ] else [])
+          <>
+            ( if st.role == Host then
+                [ HH.button [ cls "ghost icon-btn", HP.title "Remove", HE.onClick \_ -> DeletePos pos ] [ iconSized "sm" "x" ] ]
+              else []
+            )
+      )
     where
     -- The queue arrives in order, so the index is the position. Pos from
-    -- MPD is used when it is there and the index covers a reply that left
-    -- it out.
+    -- MPD is used when it is there and the index covers a reply that
+    -- left it out.
     pos = fromMaybe i s.pos
+    rowBody =
+      if st.role == Host then HH.button [ cls "grow", HE.onClick \_ -> PlayPos pos ] rowInner
+      else HH.div [ cls "grow" ] rowInner
+    rowInner =
+      [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
+      , HH.div [ cls "line" ]
+          [ HH.text
+              ( joinWith " · "
+                  (Array.filter (_ /= "") [ Mpd.songLine s, maybe "" (\w -> "added by " <> w) (whoAdded st s.file) ])
+              )
+          ]
+      ]
+
+-- | The veto button and its tally. One vote per browser: a browser that
+-- | has already voted sees the count and a disabled button, because the
+-- | honest thing to show is that its vote is in, not a button that does
+-- | nothing.
+vetoButton :: forall m. State -> Mpd.Song -> H.ComponentHTML Action () m
+vetoButton st s =
+  HH.button
+    [ classes ([ "veto" ] <> (if mine then [ "mine" ] else []) <> (if cast > 0 then [ "some" ] else []))
+    , HP.disabled mine
+    , HP.title title
+    , HE.onClick \_ -> Veto s.file s.id
+    ]
+    [ iconSized "sm" "down", HH.span_ [ HH.text (show cast <> "/" <> show limit) ] ]
+  where
+  voters = votersAgainst st s.file
+  cast = length voters
+  limit = vetoLimit st
+  mine = elem st.nickname voters
+  title =
+    if mine then "You voted against this: " <> show cast <> " of " <> show limit
+    else "Vote against this track"
 
 libraryView :: forall m. State -> Array (H.ComponentHTML Action () m)
 libraryView st =

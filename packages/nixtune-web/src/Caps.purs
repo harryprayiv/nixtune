@@ -41,6 +41,11 @@ type Caps =
   , maxVolume :: Int
   , publicUrl :: String
   , hostPath :: String
+  -- Party mode: guests see the queue and can vote a track off it. The
+  -- vote is a sticker on the track's URI, so it is shared by every
+  -- browser without anything on the player keeping score.
+  , party :: Boolean
+  , vetoes :: Int
   }
 
 fetch :: Aff (Either String Caps)

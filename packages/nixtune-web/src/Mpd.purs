@@ -19,6 +19,7 @@ module Mpd
   , parseStatus
   , parseSongs
   , parseEntries
+  , Stats
   , parseStats
   , parseList
   , parseSticker
@@ -223,9 +224,20 @@ parseEntries ls = flush (foldl step { current: Nothing, done: [] } (pairs ls))
     Just s -> snoc acc.done (File s)
     Nothing -> acc.done
 
--- | The song count from a `stats` reply; zero when absent.
-parseStats :: Array String -> Int
-parseStats ls = fromMaybe 0 (lookup "songs" (pairs ls) >>= fromString)
+-- | What a `stats` reply carries that the page uses: the song count,
+-- | and db_update, the unix time of the last database update. The stamp
+-- | is what the browser's copy of the library index is keyed on, so a
+-- | rescan invalidates it and nothing else does.
+type Stats = { songs :: Int, stamp :: Int }
+
+parseStats :: Array String -> Stats
+parseStats ls =
+  { songs: num "songs"
+  , stamp: num "db_update"
+  }
+  where
+  ps = pairs ls
+  num k = fromMaybe 0 (lookup k ps >>= fromString)
 
 -- | The value of a `sticker get song <uri> <name>` reply, whose one line is
 -- | "sticker: <name>=<value>". Nothing when the song has no such sticker,

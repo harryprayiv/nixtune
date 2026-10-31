@@ -347,6 +347,14 @@ button:disabled { opacity: .45; cursor: default; }
   .val .grow { padding: 0 .75rem; }
 }
 
+/* The veto button: the tally is the point, so it is on the button and
+   not hidden behind it. A browser that has voted gets a filled, dead
+   button rather than a live one that would do nothing. */
+.veto { flex: none; display: flex; align-items: center; gap: .3rem; padding: .35rem .5rem; border-radius: 8px; font: .78rem var(--mono); color: var(--muted); }
+.veto.some { color: var(--fg); border-color: var(--line); }
+.veto.mine { background: color-mix(in srgb, var(--error) 16%, transparent); border-color: color-mix(in srgb, var(--error) 45%, transparent); color: var(--error); opacity: 1; }
+.list li .grow { text-align: left; min-width: 0; }
+
 /* Attribution, the guest footer, search, the QR tab, the scan badge. */
 .added { color: var(--accent); font-size: .85rem; }
 .me { color: var(--muted); font: .8rem var(--mono); text-align: center; padding: .6rem 1rem 1rem; }

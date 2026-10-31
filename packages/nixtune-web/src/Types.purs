@@ -10,7 +10,8 @@ import Caps (Caps, Station)
 import Data.Array as Array
 import Data.Enum (enumFromTo)
 import Data.Maybe (Maybe(..), isJust, maybe)
-import Data.String (Pattern(..), indexOf, toUpper, trim)
+import Data.Foldable (lookup)
+import Data.String (Pattern(..), indexOf, split, toUpper, trim)
 import Data.String.CodeUnits as CodeUnits
 import Data.Tuple (Tuple)
 import Halogen as H
@@ -71,6 +72,7 @@ data Req
   | RBrowse String
   | RSearch String
   | RStickers
+  | RVetoes
   | RTagValues Axis
   | RTagTracks
   | RFire
@@ -81,12 +83,18 @@ data Req
 -- | message may hold a whole reply or end in the middle of a line.
 -- | `asked` is this connection's own queue of outstanding requests, in
 -- | the order they were sent, so a reply is read against the right one.
+-- | `queued` is what was asked for before MPD had greeted on this
+-- | connection. The three sockets open together and greet whenever they
+-- | greet, so a request made in the reply to one of them can arrive
+-- | before another is ready; without this it was dropped silently, and
+-- | the column it was for simply never loaded.
 type Link =
   { socket :: WebSocket
   , ready :: Boolean
   , lines :: Array String
   , partial :: String
   , asked :: Array Req
+  , queued :: Array { req :: Req, line :: String }
   }
 
 -- | A queue row being dragged.
@@ -123,11 +131,18 @@ type State =
   , current :: Maybe Song
   , queue :: Array Song
   , songs :: Int
+  -- MPD's db_update: the unix time of the last database update, and
+  -- the key the browser's copy of the library index is stored under.
+  , dbStamp :: Int
   , path :: String
   , query :: String
   , searched :: Maybe String
   , entries :: Array Entry
   , addedBy :: Array (Tuple String String)
+  -- Who has voted against what, read from the nixtune.vetoes sticker.
+  -- The value is the voters' nicknames, comma separated, so the count
+  -- is distinct browsers rather than taps.
+  , vetoes :: Array (Tuple String String)
   , error :: Maybe String
   , ticks :: Int
   -- Where the bar is being held. Shown immediately and kept until MPD
@@ -196,11 +211,13 @@ initial =
   , current: Nothing
   , queue: []
   , songs: 0
+  , dbStamp: 0
   , path: ""
   , query: ""
   , searched: Nothing
   , entries: []
   , addedBy: []
+  , vetoes: []
   , error: Nothing
   , ticks: 0
   , volDraft: Nothing
@@ -256,6 +273,7 @@ data Action
   | Pick Axis (Maybe String)
   | JumpTo Axis String
   | Scrolled Axis Event
+  | Veto String (Maybe Int)
   | AddAlbum
   | PlayAlbum
   | SetQuery String
@@ -275,6 +293,9 @@ idleCommand = "idle player mixer playlist options database update sticker"
 
 stickerName :: String
 stickerName = "nixtune.added_by"
+
+vetoName :: String
+vetoName = "nixtune.vetoes"
 
 nicknameKey :: String
 nicknameKey = "nixtune.nickname"
@@ -330,11 +351,31 @@ arrived want got = case want, got of
 isSticker :: Req -> Boolean
 isSticker = case _ of
   RStickers -> true
+  RVetoes -> true
   _ -> false
 
 -- | Every attribution in the database, in one command.
 stickerFind :: String
 stickerFind = "sticker find song \"\" " <> stickerName
+
+-- | Every vote in the database, likewise.
+vetoFind :: String
+vetoFind = "sticker find song \"\" " <> vetoName
+
+-- | Who has voted against a track. The sticker holds nicknames
+-- | separated by commas; a nickname is two words from the page's own
+-- | lists and can never contain one.
+votersAgainst :: State -> String -> Array String
+votersAgainst st uri = case lookup uri st.vetoes of
+  Nothing -> []
+  Just raw -> Array.filter (_ /= "") (map trim (split (Pattern ",") raw))
+
+-- | How many votes it takes, and whether this browser has cast one.
+vetoLimit :: State -> Int
+vetoLimit st = maybe 3 _.vetoes st.caps
+
+partyOn :: State -> Boolean
+partyOn st = maybe false _.party st.caps
 
 isStream :: String -> Boolean
 isStream uri = isJust (indexOf (Pattern "://") uri)

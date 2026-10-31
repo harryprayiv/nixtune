@@ -48,6 +48,10 @@ let
       # nginx location that serves it.
       artPath = cfg.art.path;
       maxVolume = cfg.mpd.maxVolume;
+      # Party mode and how many votes it takes to drop a track. Both are
+      # build-time facts, like everything else here.
+      party = cfg.party.enable;
+      vetoes = cfg.party.vetoes;
       publicUrl = cfg.ui.publicUrl;
       hostPath = cfg.ui.hostPath;
     }

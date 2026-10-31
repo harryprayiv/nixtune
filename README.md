@@ -30,15 +30,18 @@ It is built with `mkSpagoDerivation` from `web/spago.lock`, from the PureScript 
 
 The wifi passphrase is a secret, and a secret needs a host key that does not exist until the image has booted once. So the first boot is on ethernet; the host key is read; the secret is written; the second deploy brings the wifi profile. The example host reads its passphrase from `/etc/nixtune/wifi.env`; a fleet using sops does the same through its own module.
 
-## Not finished
+## Not listed
 
-`nix/packages/upmpdcli.nix` carries the newest versions the author knew of and fake hashes, because the machine this was written on could not reach the download site. The first `nix build .#upmpdcli` reports each real hash. Until then `renderers.upnp.enable` stays off.
+I made massive changes to this to iterate on the complex task of an every day-use audio interafwce. There are a lot of non-obviouys properties of such a module that I had to arrive at through experimentation.  I have lots of ambition here and will continue to iterate.
 
-Spotify Connect, Squeezelite and Bluetooth have options and nothing behind them; enabling one is an evaluation error.
+Here are some screenshots:
 
-An ephemeral root is the intended end state and is not in this release: the Pi boot path has not been rehearsed with a wipe-on-boot cycle. `services.nixtune.statePaths` lists what would have to survive one.
+![screen1](imgs/2026-10-30_21-41.png)
+![screen2](imgs/2026-10-30_21-44.png)
+![screen3](imgs/2026-10-30_21-47.png)
 
-## Maintenance
+
+## Maintenancee
 
 `nix flake update` on the `update` branch, the workflow in `.github/workflows/check.yml`, merge to `main`. Nothing else.
 
