@@ -24,6 +24,7 @@ import Browse
   , modifyColumn
   , orElse
   , pickedBy
+  , railLetters
   , rightOf
   , rowHeight
   , rowOfValue
@@ -169,7 +170,7 @@ narrow axis = do
 jumpTo :: forall o m. MonadAff m => Axis -> String -> M o m Unit
 jumpTo axis l = do
   col <- getColumn axis
-  for_ (firstUnder l col) \r -> scrollColumn axis (toNumber r * rowHeight)
+  for_ (firstUnder (railLetters col) l col) \r -> scrollColumn axis (toNumber r * rowHeight)
 
 -- | The genre column in or out of the chain. Either way every selection
 -- | goes, so no column is left narrowed by a column nobody can see, and
@@ -319,11 +320,20 @@ dropPending = modifyBrowser \br -> br
 -- | Put a column at a scroll position, in the state and in the page.
 -- | The element is not there when the Library view is not open; the
 -- | state keeps the position and `sync` applies it when it is.
+-- |
+-- | When the element is there, the state takes the position the browser
+-- | actually scrolled to, read back after the write. Near the end of a
+-- | list the browser clamps the request, and a position the page only
+-- | asked for would put the rail's mark on a letter the list never
+-- | reached.
 scrollColumn :: forall o m. MonadAff m => Axis -> Number -> M o m Unit
 scrollColumn axis top = do
   modifyCol axis \c -> c { vp = c.vp { top = top } }
   el <- H.getRef (colRef axis)
-  for_ el \e -> liftEffect (Element.setScrollTop top e)
+  for_ el \e -> do
+    liftEffect (Element.setScrollTop top e)
+    actual <- liftEffect (Element.scrollTop e)
+    modifyCol axis \c -> c { vp = c.vp { top = actual } }
 
 -- | A column was scrolled. Written only when the row under the top edge
 -- | or the height moved: a scroll is the one thing that happens sixty

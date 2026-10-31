@@ -311,12 +311,15 @@ button:disabled { opacity: .45; cursor: default; }
 .grow-space { flex: 1; }
 
 /* The browser is one box: the columns, then the list the columns filter.
-   Stacked it is as tall as its contents and the page scrolls; side by
-   side it takes whatever height the page has left and divides it, which
-   is what makes the columns reach the bottom of the card. */
-.browser { display: flex; flex-direction: column; gap: .6rem; min-height: 0; flex: none; }
-.columns { display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
-.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+   At every width it takes the height the page has left under the search
+   row and divides it, sixty to the columns and forty to the list, so
+   every height below is derived from the window rather than guessed in
+   vh. The columns take the larger share: they are where the choosing
+   happens and they hold one line per row, where the list holds two. The
+   floor keeps both usable on a short screen; below it the page scrolls. */
+.browser { display: flex; flex-direction: column; gap: .6rem; flex: 1 1 auto; min-height: 24rem; }
+.columns { display: flex; flex-direction: column; gap: .6rem; flex: 60 1 0; min-height: 11rem; }
+.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; }
 .colhead { display: flex; align-items: center; gap: .5rem; padding: .4rem .5rem .4rem .75rem; border-bottom: 1px solid var(--line); background: var(--raised); }
 .colname { font: 600 .78rem var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 .colhead .count { margin-left: auto; font: .72rem var(--mono); color: var(--muted); }
@@ -324,7 +327,13 @@ button:disabled { opacity: .45; cursor: default; }
    instead of it: the count is the length of the list everywhere else on
    the page and stays that here. */
 .chosen { font: .7rem var(--mono); color: var(--accent-fg); background: var(--accent); border-radius: 999px; padding: .05rem .5rem; white-space: nowrap; }
-.colbody { display: flex; flex: 1; min-height: 0; }
+/* The column's body is the one box that has a height; the list and the
+   rail both fill it. Before this the list had a height of its own and
+   the rail had the height of its 27 letters, the taller of the two set
+   the column, and on a phone that left an empty strip under the rows.
+   container-type lets the rail's letters size themselves from this
+   box's height. */
+.colbody { display: flex; flex: 1; min-height: 0; container-type: size; }
 /* Stacked, which on a phone means ONE column at a time: the one a
    choice is being made in. Three lists down a portrait screen would put
    the albums below a scroll of artists and the tracks below that, which
@@ -336,17 +345,19 @@ button:disabled { opacity: .45; cursor: default; }
 /* Only the rows in view are in the page; the rest of the column's
    height is padding of exactly their size, above and below, so the
    scrollbar is the true length of the list and every entry is reachable
-   by scrolling. That arithmetic needs a row to be exactly 40px, which
-   is why a long name is cut here instead of wrapping. */
+   by scrolling. That arithmetic needs every row to be exactly --row
+   tall, which is why a long name is cut here instead of wrapping.
+   --row is set on the list by the page from the same constant the
+   arithmetic uses (Browse.rowHeight), so the two cannot disagree. */
 /* overflow-anchor: none is load-bearing. The browser compensates for
    content above the viewport changing height by shifting scrollTop,
    which is precisely what the spacer above the slice does on every
    update, so with anchoring on the column drifts and a jump from the
    rail lands in the wrong place. */
-.vals { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; overflow-y: auto; overflow-anchor: none; max-height: max(11rem, 34vh); overscroll-behavior: contain; }
-.val { display: flex; height: 40px; }
+.vals { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; height: 100%; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; }
+.val { display: flex; height: var(--row); }
 .vals .spacer { display: block; flex: none; }
-.val .grow { flex: 1; height: 40px; line-height: 40px; text-align: left; background: transparent; border-color: transparent; border-radius: 0; padding: 0 .65rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.val .grow { flex: 1; height: var(--row); line-height: var(--row); text-align: left; background: transparent; border-color: transparent; border-radius: 0; padding: 0 .65rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .val:hover { background: var(--raised); }
 /* Selected. Several rows in a column can be, and all of them look the
    same: there is no anchor row any more, because the columns to the
@@ -364,12 +375,13 @@ button:disabled { opacity: .45; cursor: default; }
 /* The track list is drawn a slice at a time like the columns, so a row
    is a fixed height and a long title is cut rather than wrapped. The
    rows sit flush with a hairline between them and NO gap: the slice
-   arithmetic takes a row to be exactly 58px from the top of one to the
-   top of the next, and the gap the other lists have would add to that
-   and put every row a little further down than the page thinks it is. */
+   arithmetic takes a row to be exactly --row from the top of one to the
+   top of the next (Browse.trackHeight, set on the list by the page),
+   and the gap the other lists have would add to that and put every row
+   a little further down than the page thinks it is. */
 .trackhead { flex: none; }
-.tracks { gap: 0; max-height: max(10rem, 34vh); overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-.tracks li.song { height: 58px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; transition: none; }
+.tracks { gap: 0; flex: 40 1 0; min-height: 8rem; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.tracks li.song { height: var(--row); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; transition: none; }
 .tracks li.song:last-child { border-bottom: 0; }
 .tracks li.song .grow { min-width: 0; padding-top: .25rem; padding-bottom: .25rem; }
 .tracks .title, .tracks .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -386,12 +398,14 @@ button:disabled { opacity: .45; cursor: default; }
 .val.on .grow { color: var(--fg); font-weight: 600; }
 .val.empty { color: var(--muted); padding: .6rem .5rem; font-size: .9rem; display: flex; align-items: center; gap: .4rem; }
 
-/* The rail. Narrow enough to sit beside the list on a phone and tall
-   enough that each letter is still a target: 27 letters share the
-   column's height, so they are small, and the whole rail is also
-   reachable by dragging a thumb down it. */
-.rail { flex: none; display: flex; flex-direction: column; justify-content: space-between; padding: .25rem .2rem; border-left: 1px solid var(--line); background: var(--raised); }
-.rail button { padding: 0; width: 1.35rem; min-height: 0; line-height: 1.05; border: 0; background: transparent; color: var(--muted); font: 600 .62rem var(--mono); border-radius: 3px; }
+/* The rail. Narrow enough to sit beside the list on a phone. The page
+   draws as many letters as the column's height has room for and sets
+   --letters to how many; they share the column body's height in equal
+   parts, and the type is sized from that height (cqh) and that count,
+   capped at its normal size, so the rail always fits the column and
+   never stretches it. */
+.rail { flex: none; display: flex; flex-direction: column; padding: .25rem .2rem; border-left: 1px solid var(--line); background: var(--raised); }
+.rail button { flex: 1 1 0; min-height: 0; padding: 0; width: 1.35rem; line-height: 1; border: 0; background: transparent; color: var(--muted); font: 600 min(.62rem, calc(100cqh / (var(--letters) + 4))) var(--mono); border-radius: 3px; }
 .rail button:hover:not(:disabled) { color: var(--fg); background: var(--panel); }
 .rail button.on { color: var(--accent-fg); background: var(--accent); }
 .rail button:disabled { opacity: .25; }
@@ -402,19 +416,6 @@ button:disabled { opacity: .45; cursor: default; }
   .columns { flex-direction: row; align-items: stretch; gap: .75rem; }
   .col:not(.cur) { display: flex; }
   .tagcrumbs { display: none; }
-  .col { flex: 1; }
-  /* Side by side the browser takes the height the page has left under
-     the search row and the mode switch, and the columns and the list
-     divide it sixty forty, with no ceiling on either. A tall display
-     gets more rows rather than more empty card. The columns take the
-     larger share: they are where the choosing happens and they hold one
-     line per row, where the list below holds two lines per row and is
-     read a screenful at a time. The floor keeps it usable on a short
-     laptop screen; below that the page scrolls. */
-  .browser { flex: 1 1 auto; min-height: 22rem; }
-  .columns { flex: 60 1 0; }
-  .tracks { flex: 40 1 0; max-height: none; min-height: 10rem; }
-  .vals { max-height: none; }
   .val .grow { padding: 0 .75rem; }
 }
 

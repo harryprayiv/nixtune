@@ -385,8 +385,9 @@ data ColRow = AllRow | ValueRow TagValue
 -- | list and the DOM holds a few dozen nodes instead of ten thousand.
 -- |
 -- | That is what makes this work: the page has to know how tall a row is
--- | rather than measure every one. index.html sets the same numbers on
--- | .val and .tracks li, and the two have to agree.
+-- | rather than measure every one. These two numbers are the only place
+-- | a row height is written down: Library hands them to the stylesheet
+-- | as --row on each list, and index.html sizes rows by that.
 rowHeight :: Number
 rowHeight = 40.0
 
@@ -474,34 +475,62 @@ sectionStart l values
             Just v | localeCompare v.key bound == LT -> go (mid + 1) hi
             _ -> go lo mid
 
--- | Where each letter's section starts and ends, in rail order.
+-- | A run of rows the rail treats as one letter's: where it starts and
+-- | where the next drawn letter starts.
 type Section = { letter :: String, start :: Int, end :: Int }
 
-sections :: Column -> Array Section
-sections col = Array.zipWith (\l s -> { letter: l, start: s.start, end: s.end }) alphabet bounds
+-- | The sections of the letters the rail draws. A drawn letter owns every
+-- | row from its own start to the next drawn letter's start, so with the
+-- | full alphabet each letter owns its own rows, and with a thinned rail
+-- | "M" also owns what files under N.
+sectionsOf :: Array String -> Column -> Array Section
+sectionsOf letters col = Array.zipWith (\l b -> { letter: l, start: b.start, end: b.end }) letters bounds
   where
   n = Array.length col.values
-  starts = map (\l -> sectionStart l col.values) alphabet
+  starts = map (\l -> sectionStart l col.values) letters
   ends = Array.snoc (Array.drop 1 starts) n
   bounds = Array.zipWith (\s e -> { start: s, end: max s e }) starts ends
 
 -- | The row a letter's button scrolls to, counting the All row, when the
 -- | letter has anything under it.
-firstUnder :: String -> Column -> Maybe Int
-firstUnder l col = do
-  s <- Array.find (\x -> x.letter == l) (sections col)
+firstUnder :: Array String -> String -> Column -> Maybe Int
+firstUnder letters l col = do
+  s <- Array.find (\x -> x.letter == l) (sectionsOf letters col)
   if s.end > s.start then Just (s.start + 1) else Nothing
 
--- | Which letters have anything under them, so the rail can grey out the
--- | rest instead of scrolling nowhere.
-lettersPresent :: Column -> Array String
-lettersPresent col = map _.letter (Array.filter (\s -> s.end > s.start) (sections col))
+-- | Which drawn letters have anything under them, so the rail can grey
+-- | out the rest instead of scrolling nowhere.
+lettersPresent :: Array String -> Column -> Array String
+lettersPresent letters col = map _.letter (Array.filter (\s -> s.end > s.start) (sectionsOf letters col))
 
--- | The letter whose section holds the row at the top of the viewport.
-letterAt :: Column -> Maybe String
-letterAt col = _.letter <$> Array.find (\s -> s.start <= i && i < s.end) (sections col)
+-- | How tall one rail letter has to be to be read and hit with a thumb.
+railPitch :: Number
+railPitch = 15.0
+
+-- | The letters the rail draws in a column of this height. All 27 when
+-- | they fit at railPitch; otherwise #, then every second, third or so
+-- | letter counting from A, and always Z, which is what the iOS index does
+-- | on a short list. A letter that is not drawn is still reachable: its
+-- | rows belong to the drawn letter before it.
+railLetters :: Column -> Array String
+railLetters col = Array.filter keep alphabet
   where
-  i = topRow col.vp rowHeight - 1
+  n = Array.length alphabet
+  room = max 3 (Int.floor (col.vp.height / railPitch))
+  -- # and Z are always drawn, so the letters A to Y share what is left.
+  step = max 1 (Int.ceil (Int.toNumber (n - 2) / Int.toNumber (room - 2)))
+  keep l = case Array.elemIndex l alphabet of
+    Just i -> i == 0 || i == n - 1 || (i - 1) `mod` step == 0
+    Nothing -> false
+
+-- | The drawn letter whose section holds the row at the top of the
+-- | viewport: the row whose larger part is on screen, so a list scrolled
+-- | to its end, where the top row is cut, still marks the letter that was
+-- | asked for.
+letterAt :: Array String -> Column -> Maybe String
+letterAt letters col = _.letter <$> Array.find (\s -> s.start <= i && i < s.end) (sectionsOf letters col)
+  where
+  i = Int.floor ((col.vp.top + rowHeight / 2.0) / rowHeight) - 1
 
 -- ---------------------------------------------------------------------
 -- The track list

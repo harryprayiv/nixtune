@@ -12,7 +12,6 @@ import Browse
   , ColRow(..)
   , Tracks
   , activeAxis
-  , alphabet
   , axisLabel
   , columnOf
   , hasRail
@@ -22,6 +21,7 @@ import Browse
   , lettersPresent
   , pickedCount
   , pluralOf
+  , railLetters
   , rowAt
   , rowCount
   , rowHeight
@@ -242,6 +242,10 @@ tagColumn st axis =
         [ HH.ul
             [ cls "vals"
             , HP.ref (colRef axis)
+            -- The row height the slice arithmetic uses, handed to the
+            -- stylesheet, so a row is drawn exactly as tall as it is
+            -- counted.
+            , HP.style (rowVar rowHeight)
             -- Every scroll says where the column is now; Tags turns
             -- that into the slice below and nothing else happens
             -- unless the slice actually moved.
@@ -306,9 +310,15 @@ tagColumn st axis =
       ]
   -- The letter the column is sitting on, which is the one the rail
   -- marks. It follows the scroll rather than being a thing you set.
-  atLetter = letterAt col
-  present = lettersPresent col
-  rail = HH.div [ cls "rail" ] (map letterButton alphabet)
+  atLetter = letterAt shownLetters col
+  present = lettersPresent shownLetters col
+  -- As many letters as the column's measured height has room for, and
+  -- their count handed to the stylesheet so the type is sized to share
+  -- the height between exactly those.
+  shownLetters = railLetters col
+  rail =
+    HH.div [ cls "rail", HP.style ("--letters:" <> show (length shownLetters)) ]
+      (map letterButton shownLetters)
   letterButton l =
     HH.button
       [ classes (if atLetter == Just l then [ "on" ] else [])
@@ -372,6 +382,7 @@ trackList st =
   , HH.ul
       [ cls "list tracks"
       , HP.ref tracksRef
+      , HP.style (rowVar trackHeight)
       , HE.handler (EventType "scroll") ScrolledTracks
       ]
       body
@@ -433,6 +444,12 @@ trackList st =
   emptyText =
     if st.status.updating then "Nothing yet. The library is still being scanned."
     else "Nothing matches."
+
+-- | A list's row height as the CSS custom property its rows are sized
+-- | by. The constants live in Browse, where the slice arithmetic reads
+-- | them; index.html only ever says var(--row).
+rowVar :: Number -> String
+rowVar h = "--row:" <> show h <> "px"
 
 -- | What the library is doing, said plainly above the listing.
 scanBanner :: forall w i. State -> HH.HTML w i
