@@ -32,6 +32,7 @@ import Types
   , axisLabel
   , colRef
   , isStream
+  , markedIn
   , partyOn
   , vetoLimit
   , votersAgainst
@@ -473,6 +474,32 @@ songRow st s =
 -- | A choice clears everything to its right, which is what makes this a
 -- | path through the library rather than a set of filters that can
 -- | disagree with each other.
+-- | What to do with a multiple selection. It appears only when there is
+-- | one, so the ordinary single-pick path is unchanged.
+markBar :: forall m. State -> Array (H.ComponentHTML Action () m)
+markBar st = case Array.find (\a -> length (markedIn a st) > 1) [ AxAlbum, AxArtist, AxGenre ] of
+  Nothing -> []
+  Just axis ->
+    [ HH.div [ cls "row-actions markbar" ]
+        ( [ HH.span [ cls "crumb-static" ]
+              [ HH.text (show (length (markedIn axis st)) <> " " <> noun axis <> " selected") ]
+          , HH.div [ cls "grow-space" ] []
+          , HH.button [ HE.onClick \_ -> AddMarked axis false ] [ HH.text "Add all" ]
+          ]
+            <>
+              ( if st.role == Host then
+                  [ HH.button [ cls "primary", HE.onClick \_ -> AddMarked axis true ] [ HH.text "Play all" ] ]
+                else []
+              )
+            <> [ HH.button [ cls "ghost", HE.onClick \_ -> Pick axis (selectionOf axis st) ] [ HH.text "Clear" ] ]
+        )
+    ]
+  where
+  noun = case _ of
+    AxGenre -> "genres"
+    AxArtist -> "artists"
+    AxAlbum -> "albums"
+
 tagBrowser :: forall m. State -> Array (H.ComponentHTML Action () m)
 tagBrowser st =
   [ tagCrumbs st
@@ -481,6 +508,7 @@ tagBrowser st =
           <> [ tagColumn st AxArtist, tagColumn st AxAlbum ]
       )
   ]
+    <> markBar st
     <> albumTracks st
 
 -- | The choices already made, as chips that go back to them. Drawn only
@@ -565,15 +593,24 @@ tagColumn st axis =
     AxAlbum -> "Pick an artist"
     AxArtist -> if st.genreColumn && sel == Nothing && st.selGenre == Nothing then "Pick a genre" else "Nothing here"
     AxGenre -> "Nothing here"
+  marked = markedIn axis st
   row v =
-    HH.li [ classes ([ "val" ] <> (if sel == Just v then [ "on" ] else [])) ]
+    HH.li
+      [ classes
+          ( [ "val" ]
+              <> (if sel == Just v then [ "on" ] else [])
+              <> (if elem v marked && marked /= [ v ] then [ "marked" ] else [])
+          )
+      ]
       [ HH.button
           [ cls "grow"
           -- A row is one line of a fixed height, which is what the slice
           -- arithmetic above depends on, so a long name is cut and kept
           -- here in full.
           , HP.title v
-          , HE.onClick \_ -> Pick axis (Just v)
+          -- Shift extends from the anchor, the platform's modifier
+          -- toggles one row, a plain click does what it always did.
+          , HE.onClick (Choose axis v)
           ]
           [ HH.text v ]
       ]

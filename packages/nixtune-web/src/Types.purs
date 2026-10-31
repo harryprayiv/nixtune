@@ -18,6 +18,7 @@ import Halogen as H
 import Mpd (Entry, Song, Status)
 import Mpd as Mpd
 import Web.Event.Event (Event)
+import Web.UIEvent.MouseEvent (MouseEvent)
 import Web.Socket.WebSocket (WebSocket)
 import Web.UIEvent.KeyboardEvent (KeyboardEvent)
 
@@ -184,9 +185,18 @@ type State =
   , artists :: Array String
   , albums :: Array String
   , tagTracks :: Array Song
+  -- The anchor of each column: the one value that drives the column to
+  -- its right. Multi-select never changes it, so the chain stays a
+  -- single path no matter how many rows are marked.
   , selGenre :: Maybe String
   , selArtist :: Maybe String
   , selAlbum :: Maybe String
+  -- Everything marked in each column, for the bulk actions. A plain
+  -- click marks one and moves the anchor; shift extends from the anchor;
+  -- the platform's own modifier toggles one in or out.
+  , markGenre :: Array String
+  , markArtist :: Array String
+  , markAlbum :: Array String
   -- One first-letter filter per column. Filtering rather than scrolling:
   -- it needs no element measurement and no FFI, it works the same on a
   -- phone and a desktop, and over tens of thousands of artists it is the
@@ -238,6 +248,9 @@ initial =
   , selGenre: Nothing
   , selArtist: Nothing
   , selAlbum: Nothing
+  , markGenre: []
+  , markArtist: []
+  , markAlbum: []
   , vpGenre: emptyViewport
   , vpArtist: emptyViewport
   , vpAlbum: emptyViewport
@@ -271,6 +284,8 @@ data Action
   | SetMode BrowseMode
   | ToggleGenreColumn
   | Pick Axis (Maybe String)
+  | Choose Axis String MouseEvent
+  | AddMarked Axis Boolean
   | JumpTo Axis String
   | Scrolled Axis Event
   | Veto String (Maybe Int)
@@ -488,6 +503,26 @@ activeAxis st =
   if st.genreColumn && st.selGenre == Nothing then AxGenre
   else if st.selArtist == Nothing then AxArtist
   else AxAlbum
+
+-- | Everything marked in one column.
+markedIn :: Axis -> State -> Array String
+markedIn axis st = case axis of
+  AxGenre -> st.markGenre
+  AxArtist -> st.markArtist
+  AxAlbum -> st.markAlbum
+
+setMarked :: Axis -> Array String -> State -> State
+setMarked axis vs = case axis of
+  AxGenre -> _ { markGenre = vs }
+  AxArtist -> _ { markArtist = vs }
+  AxAlbum -> _ { markAlbum = vs }
+
+-- | The values between two entries of a column, in the column's own
+-- | order, which is what a shift click means.
+spanBetween :: String -> String -> Array String -> Array String
+spanBetween a b values = case Array.elemIndex a values, Array.elemIndex b values of
+  Just i, Just j -> Array.slice (min i j) (max i j + 1) values
+  _, _ -> [ b ]
 
 -- | The MPD tag name for a column.
 tagOf :: Axis -> String

@@ -318,6 +318,14 @@ button:disabled { opacity: .45; cursor: default; }
 .val .grow { flex: 1; height: 40px; line-height: 40px; text-align: left; background: transparent; border-color: transparent; border-radius: 0; padding: 0 .65rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .val:hover { background: var(--raised); }
 .val.on { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+/* Marked by shift or the platform's modifier. Lighter than the anchor,
+   because the anchor is the one driving the column to the right and the
+   marks are the ones a bulk action will take. */
+.val.marked { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.markbar { align-items: center; background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 10px; padding: .5rem .6rem; }
+/* The bar appears below the columns, so the columns give up its height
+   rather than pushing it under the player bar. */
+.page:has(.markbar) .vals { max-height: clamp(9rem, calc(100vh - 28rem), 34rem); }
 .val.on .grow { color: var(--fg); font-weight: 600; }
 .val.empty { color: var(--muted); padding: .6rem .5rem; font-size: .9rem; display: flex; align-items: center; gap: .4rem; }
 
@@ -344,6 +352,7 @@ button:disabled { opacity: .45; cursor: default; }
      usable on a short laptop screen and the ceiling stops a tall display
      from making one column taller than anybody scans. */
   .vals { max-height: clamp(16rem, calc(100vh - 24rem), 42rem); }
+  .page:has(.markbar) .vals { max-height: clamp(12rem, calc(100vh - 30rem), 36rem); }
   .val .grow { padding: 0 .75rem; }
 }
 

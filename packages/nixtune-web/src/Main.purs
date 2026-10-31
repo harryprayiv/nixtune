@@ -40,7 +40,7 @@ import Prelude
 
 import Cache as Cache
 import Caps as Caps
-import Data.Array (any, elem, filter, head, length, snoc, uncons, (:))
+import Data.Array (any, elem, filter, head, length, null, snoc, uncons, (:))
 import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (for_)
@@ -86,8 +86,12 @@ import Types
   , idleCommand
   , initial
   , isSticker
+  , markedIn
   , maxVolumeOf
   , searchLimit
+  , selectionOf
+  , setMarked
+  , spanBetween
   , shownVolume
   , stickerFind
   , vetoFind
@@ -339,12 +343,50 @@ handle = case _ of
       , tagTracks = []
       }
     refreshTags
+  -- A click on a row. Plain moves the anchor and the chain; shift
+  -- extends the mark from the anchor to here; the platform's own
+  -- modifier toggles one row in or out. Only a plain click cascades,
+  -- so the columns to the right always show one path through the
+  -- library however many rows are marked.
+  Choose axis v ev -> do
+    st <- H.get
+    let
+      values = valuesOf axis st
+      marked = markedIn axis st
+      anchor = fromMaybe v (selectionOf axis st)
+    if MouseEvent.shiftKey ev then
+      H.modify_ (setMarked axis (spanBetween anchor v values))
+    else if MouseEvent.ctrlKey ev || MouseEvent.metaKey ev then
+      H.modify_
+        ( setMarked axis
+            (if elem v marked then filter (_ /= v) marked else snoc marked v)
+        )
+    else do
+      H.modify_ (setMarked axis [ v ])
+      handle (Pick axis (Just v))
+  -- Everything marked, queued in one go. findadd does the work on MPD's
+  -- side, so an artist with thirty albums is one command per album and
+  -- not one per track.
+  AddMarked axis play -> do
+    st <- H.get
+    let
+      chosen = case markedIn axis st of
+        [] -> maybe [] (\v -> [ v ]) (selectionOf axis st)
+        vs -> vs
+    unless (null chosen) do
+      when play (send Cmd RFire "clear")
+      for_ chosen \v -> send Cmd RFire (findaddFor axis v st)
+      when play do
+        send Cmd RFire "play"
+        H.modify_ _ { view = NowPlaying }
   Pick axis v -> case axis of
     AxGenre -> do
       H.modify_ _
         { selGenre = v
         , selArtist = Nothing
         , selAlbum = Nothing
+        , markArtist = []
+        , markAlbum = []
         , artists = []
         , albums = []
         , tagTracks = []
@@ -354,6 +396,7 @@ handle = case _ of
       H.modify_ _
         { selArtist = v
         , selAlbum = Nothing
+        , markAlbum = []
         , albums = []
         , tagTracks = []
         }
@@ -528,6 +571,18 @@ loadTracks = do
     Just a, Just alb ->
       send Lib RTagTracks ("find album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
     _, _ -> pure unit
+
+-- | What to send to queue everything under one value of a column. An
+-- | album is qualified by the anchored artist, because album titles
+-- | repeat across a library and "Greatest Hits" on its own would queue
+-- | a dozen records.
+findaddFor :: Axis -> String -> State -> String
+findaddFor axis v st = case axis of
+  AxGenre -> "findadd genre " <> Mpd.quote v
+  AxArtist -> "findadd artist " <> Mpd.quote v
+  AxAlbum -> case st.selArtist of
+    Just a -> "findadd album " <> Mpd.quote v <> " artist " <> Mpd.quote a
+    Nothing -> "findadd album " <> Mpd.quote v
 
 -- | Queue the selected album. `findadd` does it in one command, so a
 -- | twenty track album is one round trip and not twenty.
