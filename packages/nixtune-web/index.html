@@ -242,7 +242,12 @@ button:disabled { opacity: .45; cursor: default; }
 .list .title { overflow-wrap: anywhere; }
 .rowicon { display: inline-flex; align-items: center; vertical-align: -.22rem; margin-right: .45rem; color: var(--muted); }
 .list .time { font: .8rem var(--mono); color: var(--muted); }
-.row-actions { display: flex; gap: .5rem; justify-content: flex-end; }
+.row-actions { display: flex; gap: .5rem; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+/* The heading says what the filter is, which with several columns
+   picked is longer than a phone is wide. It takes its own line there
+   rather than squeezing the buttons into two words each. */
+.row-actions .crumb-static { flex: 1 1 100%; min-width: 0; }
+@media (min-width: 34rem) { .row-actions .crumb-static { flex: 0 1 auto; } }
 
 /* Queue rows. The two arrows sit together on the left as one compact
    column, so reordering is a thumb's width and never near the remove
@@ -288,12 +293,22 @@ button:disabled { opacity: .45; cursor: default; }
 .segbtn.on { background: var(--panel); color: var(--fg); border-color: var(--line); }
 .grow-space { flex: 1; }
 
-.columns { display: flex; flex-direction: column; gap: .6rem; }
-.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+/* The browser is one box: the columns, then the list the columns filter.
+   Stacked it is as tall as its contents and the page scrolls; side by
+   side it is given a height and divides it, which is what makes the
+   columns reach the bottom of the card instead of stopping at a figure
+   picked in advance. */
+.browser { display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
+.columns { display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
+.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .colhead { display: flex; align-items: center; gap: .5rem; padding: .4rem .5rem .4rem .75rem; border-bottom: 1px solid var(--line); background: var(--raised); }
 .colname { font: 600 .78rem var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 .colhead .count { margin-left: auto; font: .72rem var(--mono); color: var(--muted); }
-.colbody { display: flex; min-height: 0; }
+/* How many rows of this column are picked. Beside the count rather than
+   instead of it: the count is the length of the list everywhere else on
+   the page and stays that here. */
+.chosen { font: .7rem var(--mono); color: var(--accent-fg); background: var(--accent); border-radius: 999px; padding: .05rem .5rem; white-space: nowrap; }
+.colbody { display: flex; flex: 1; min-height: 0; }
 /* Stacked, which on a phone means ONE column at a time: the one a
    choice is being made in. Three lists down a portrait screen would put
    the albums below a scroll of artists and the tracks below that, which
@@ -312,32 +327,26 @@ button:disabled { opacity: .45; cursor: default; }
    which is precisely what the spacer above the slice does on every
    update, so with anchoring on the column drifts and a jump from the
    rail lands in the wrong place. */
-.vals { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; overflow-y: auto; overflow-anchor: none; max-height: clamp(10rem, 32vh, 22rem); overscroll-behavior: contain; }
+.vals { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; overflow-y: auto; overflow-anchor: none; max-height: max(11rem, 34vh); overscroll-behavior: contain; }
 .val { display: flex; height: 40px; }
 .vals .spacer { display: block; flex: none; }
 .val .grow { flex: 1; height: 40px; line-height: 40px; text-align: left; background: transparent; border-color: transparent; border-radius: 0; padding: 0 .65rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .val:hover { background: var(--raised); }
-.val.on { background: color-mix(in srgb, var(--accent) 18%, transparent); }
-/* Marked by shift or the platform's modifier. Lighter than the anchor,
-   because the anchor is the one driving the column to the right and the
-   marks are the ones a bulk action will take. */
-.val.marked { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+/* Selected. Several rows in a column can be, and all of them look the
+   same: there is no anchor row any more, because the columns to the
+   right are narrowed by everything selected here rather than by one
+   privileged choice. */
+.val.on { background: color-mix(in srgb, var(--accent) 18%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
 /* The track list is drawn a slice at a time like the columns, so a row
    is a fixed height and a long title is cut rather than wrapped. */
-/* The columns and the list share what is left between the header and
-   the player bar: roughly 27rem of chrome, then 55 per cent to the
-   columns and 45 to the list. Both scroll on their own. */
-.tracks { max-height: clamp(10rem, 34vh, 22rem); overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; }
+.trackhead { flex: none; }
+.tracks { max-height: max(10rem, 34vh); overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; }
 .tracks li.song { height: 58px; }
 .tracks li.song .grow { min-width: 0; }
 .tracks .title, .tracks .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tracks .spacer { display: block; flex: none; background: none; border: 0; padding: 0; }
 .row-actions .count { font: .72rem var(--mono); color: var(--muted); }
 
-.markbar { align-items: center; background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 10px; padding: .5rem .6rem; }
-/* The bar appears below the columns, so the columns give up its height
-   rather than pushing it under the player bar. */
-.page:has(.markbar) .vals { max-height: clamp(8rem, 26vh, 18rem); }
 .val.on .grow { color: var(--fg); font-weight: 600; }
 .val.empty { color: var(--muted); padding: .6rem .5rem; font-size: .9rem; display: flex; align-items: center; gap: .4rem; }
 
@@ -358,15 +367,20 @@ button:disabled { opacity: .45; cursor: default; }
   .col:not(.cur) { display: flex; }
   .tagcrumbs { display: none; }
   .col { flex: 1; }
-  /* Side by side the columns grow with the window instead of stopping at
-     a fixed height: what is subtracted is the header, the tabs, the
-     search row, the mode switch and the player bar. The floor keeps them
-     usable on a short laptop screen and the ceiling stops a tall display
-     from making one column taller than anybody scans. */
-  .vals { max-height: clamp(11rem, calc((100vh - 27rem) * 0.55), 30rem); }
-  .tracks { max-height: clamp(10rem, calc((100vh - 27rem) * 0.45), 26rem); }
-  .page:has(.markbar) .vals { max-height: clamp(9rem, calc((100vh - 32rem) * 0.55), 26rem); }
-  .page:has(.markbar) .tracks { max-height: clamp(8rem, calc((100vh - 32rem) * 0.45), 22rem); }
+  /* Side by side the browser is given the height that is left between
+     the chrome above it and the player bar below, and the columns and
+     the list divide that between them: 55 per cent to the columns and
+     45 to the list, with no ceiling on either. A tall display gets more
+     rows rather than more empty card, which is the whole point of this
+     being a column of a list and not a box of a fixed size.
+     What is subtracted is the top bar, the tabs, the page padding, the
+     mode switch, the search row, the gaps between them, the track
+     list's own header and the player bar. The floor keeps it usable on
+     a short laptop screen; below that the page scrolls. */
+  .browser { height: calc(100vh - 20.6rem); height: calc(100dvh - 20.6rem); min-height: 22rem; }
+  .columns { flex: 55 1 0; }
+  .tracks { flex: 45 1 0; max-height: none; min-height: 7rem; }
+  .vals { max-height: none; }
   .val .grow { padding: 0 .75rem; }
 }
 

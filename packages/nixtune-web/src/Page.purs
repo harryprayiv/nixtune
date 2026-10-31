@@ -455,83 +455,69 @@ entryRow st = case _ of
   File s -> songRow st s
 
 -- | One track, in a search result, a folder listing or an album.
+-- |
+-- | Both roles get the same thing: a plus, which appends. There is no
+-- | play button on a track row for either of them. This list is the
+-- | quickest way to build up a queue, and a control that throws away
+-- | what has been built so far does not belong in it.
 songRow :: forall m. State -> Song -> H.ComponentHTML Action () m
-songRow st s =
+songRow _ s =
   HH.li [ cls "song" ]
-    ( [ HH.button [ cls "grow", HE.onClick \_ -> AddPath s.file ]
-          [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
-          , HH.div [ cls "line" ] [ HH.text (Mpd.songLine s) ]
-          ]
-      , formatBadge s.file
-      , HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ]
-      ]
-        <>
-          ( if st.role == Host then
-              [ HH.button [ cls "ghost icon-btn", HP.title "Play this now", HE.onClick \_ -> PlayPath s.file ] [ iconSized "sm" "play" ] ]
-            else [ HH.span [ cls "plus" ] [ iconSized "sm" "plus" ] ]
-          )
-    )
+    [ HH.button [ cls "grow", HE.onClick \_ -> AddPath s.file ]
+        [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
+        , HH.div [ cls "line" ] [ HH.text (Mpd.songLine s) ]
+        ]
+    , formatBadge s.file
+    , HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ]
+    , HH.button
+        [ cls "ghost icon-btn"
+        , HP.title "Add to the queue"
+        , HE.onClick \_ -> AddPath s.file
+        ]
+        [ iconSized "sm" "plus" ]
+    ]
 
 -- | The tag browser: a chain of columns, each one bounded by the
 -- | selection to its left, with the chosen album's tracks underneath.
 -- | A choice clears everything to its right, which is what makes this a
 -- | path through the library rather than a set of filters that can
 -- | disagree with each other.
--- | What to do with a multiple selection. It appears only when there is
--- | one, so the ordinary single-pick path is unchanged.
-markBar :: forall m. State -> Array (H.ComponentHTML Action () m)
-markBar st = case Array.find (\a -> length (markedIn a st) > 1) [ AxAlbum, AxArtist, AxGenre ] of
-  Nothing -> []
-  Just axis ->
-    [ HH.div [ cls "row-actions markbar" ]
-        ( [ HH.span [ cls "crumb-static" ]
-              [ HH.text (show (length (markedIn axis st)) <> " " <> noun axis <> " selected") ]
-          , HH.div [ cls "grow-space" ] []
-          , HH.button [ HE.onClick \_ -> AddMarked axis false ] [ HH.text "Add all" ]
-          ]
-            <>
-              ( if st.role == Host then
-                  [ HH.button [ cls "primary", HE.onClick \_ -> AddMarked axis true ] [ HH.text "Play all" ] ]
-                else []
-              )
-            <> [ HH.button [ cls "ghost", HE.onClick \_ -> Pick axis (selectionOf axis st) ] [ HH.text "Clear" ] ]
-        )
-    ]
-  where
-  noun = case _ of
-    AxGenre -> "genres"
-    AxArtist -> "artists"
-    AxAlbum -> "albums"
-
+-- | The tag browser. One flex column so the columns and the list below
+-- | them divide the height that is actually there, rather than each
+-- | stopping at a figure picked in advance.
 tagBrowser :: forall m. State -> Array (H.ComponentHTML Action () m)
 tagBrowser st =
-  [ tagCrumbs st
-  , HH.div [ cls "columns" ]
-      ( (if st.genreColumn then [ tagColumn st AxGenre ] else [])
-          <> [ tagColumn st AxArtist, tagColumn st AxAlbum ]
+  [ HH.div [ cls "browser" ]
+      ( [ tagCrumbs st
+        , HH.div [ cls "columns" ]
+            ( (if st.genreColumn then [ tagColumn st AxGenre ] else [])
+                <> [ tagColumn st AxArtist, tagColumn st AxAlbum ]
+            )
+        ]
+          <> albumTracks st
       )
   ]
-    <> markBar st
-    <> albumTracks st
 
--- | The choices already made, as chips that go back to them. Drawn only
--- | when the columns are stacked, because side by side the columns show
--- | their own selections and this would say it twice.
+-- | The choices already made, as chips that clear them. Drawn only when
+-- | the columns are stacked, because side by side each column says what
+-- | it has selected in its own head and this would say it twice.
 tagCrumbs :: forall m. State -> H.ComponentHTML Action () m
 tagCrumbs st =
   if null chips then HH.text ""
   else HH.div [ cls "tagcrumbs" ] chips
   where
-  chips =
-    (if st.genreColumn then maybe [] (\g -> [ chip AxGenre g ]) st.selGenre else [])
-      <> maybe [] (\a -> [ chip AxArtist a ]) st.selArtist
-  chip axis v =
+  chips = Array.mapMaybe chip (if st.genreColumn then [ AxGenre, AxArtist ] else [ AxArtist ])
+  chip axis = case selectedIn axis st of
+    [] -> Nothing
+    [ v ] -> Just (button axis v)
+    vs -> Just (button axis (show (length vs) <> " " <> axisLabel axis))
+  button axis label =
     HH.button
       [ cls "crumb"
-      , HP.title ("Back to the " <> axisLabel axis <> " list")
+      , HP.title ("Clear the " <> axisLabel axis <> " choice")
       , HE.onClick \_ -> Pick axis Nothing
       ]
-      [ HH.text ("‹ " <> v) ]
+      [ HH.text ("‹ " <> label) ]
 
 tagColumn :: forall m. State -> Axis -> H.ComponentHTML Action () m
 tagColumn st axis =
@@ -539,15 +525,14 @@ tagColumn st axis =
     [ HH.div [ cls "colhead" ]
         [ HH.span [ cls "colname" ] [ HH.text (axisLabel axis) ]
         , HH.span [ cls "count" ] [ HH.text countText ]
-        , case sel of
-            Just _ ->
-              HH.button
-                [ cls "ghost icon-btn"
-                , HP.title ("Clear the " <> axisLabel axis <> " choice")
-                , HE.onClick \_ -> Pick axis Nothing
-                ]
-                [ iconSized "sm" "x" ]
-            Nothing -> HH.text ""
+        , if null sel then HH.text ""
+          else
+            HH.button
+              [ cls "ghost icon-btn"
+              , HP.title ("Clear the " <> axisLabel axis <> " choice")
+              , HE.onClick \_ -> Pick axis Nothing
+              ]
+              [ iconSized "sm" "x" ]
         ]
     , HH.div [ cls "colbody" ]
         [ HH.ul
@@ -567,7 +552,7 @@ tagColumn st axis =
   values = valuesOf axis st
   busy = waitingFor axis st && null values
   total = length values
-  sel = selectionOf axis st
+  sel = selectedIn axis st
   present = lettersPresent values
 
   -- The slice that is on screen. The whole column is still there as far
@@ -587,32 +572,25 @@ tagColumn st axis =
     if n <= 0 then []
     else [ HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber n * rowHeight) <> "px") ] [] ]
 
-  countText = show total
+  -- The count says how many of how many once some are picked, because
+  -- the number that matters then is the size of the selection.
+  countText = case length sel of
+    0 -> show total
+    n -> show n <> " of " <> show total
   body
     | busy = [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
-    | null values = [ HH.li [ cls "val empty" ] [ HH.text waiting ] ]
+    | null values = [ HH.li [ cls "val empty" ] [ HH.text "Nothing here" ] ]
     | otherwise = spacer first <> map row shown <> spacer (total - first - length shown)
-  waiting = case axis of
-    AxAlbum -> "Nothing here"
-    AxArtist -> if st.genreColumn && sel == Nothing && st.selGenre == Nothing then "Pick a genre" else "Nothing here"
-    AxGenre -> "Nothing here"
-  marked = markedIn axis st
   row v =
-    HH.li
-      [ classes
-          ( [ "val" ]
-              <> (if sel == Just v then [ "on" ] else [])
-              <> (if elem v marked && marked /= [ v ] then [ "marked" ] else [])
-          )
-      ]
+    HH.li [ classes ([ "val" ] <> (if elem v sel then [ "on" ] else [])) ]
       [ HH.button
           [ cls "grow"
           -- A row is one line of a fixed height, which is what the slice
           -- arithmetic above depends on, so a long name is cut and kept
           -- here in full.
           , HP.title v
-          -- Shift extends from the anchor, the platform's modifier
-          -- toggles one row, a plain click does what it always did.
+          -- Shift extends from the anchor, the platform's modifier adds
+          -- or removes one row, a plain click replaces the selection.
           , HE.onClick (Choose axis v)
           ]
           [ HH.text v ]
@@ -642,7 +620,7 @@ tagColumn st axis =
 -- | of two hundred and a screenful of elements.
 albumTracks :: forall m. State -> Array (H.ComponentHTML Action () m)
 albumTracks st =
-  [ HH.div [ cls "row-actions" ]
+  [ HH.div [ cls "row-actions trackhead" ]
       ( [ HH.span [ cls "crumb-static" ] [ HH.text (trackScope st) ]
         , HH.span [ cls "count" ] [ HH.text (show st.tracksTotal <> " songs") ]
         , HH.div [ cls "grow-space" ] []
@@ -658,15 +636,17 @@ albumTracks st =
   ]
   where
   -- Add and Play act on the whole filter rather than on the rows that
-  -- happen to be loaded, so queueing an artist does not stop at two
-  -- hundred tracks.
+  -- happen to be loaded, so queueing four artists does not stop at two
+  -- hundred tracks. With nothing selected there is no filter and the
+  -- buttons would mean "the entire library", which nobody wants by
+  -- accident, so they are not offered.
   bulk =
-    if st.tracksTotal == 0 then []
+    if st.tracksTotal == 0 || Array.null (trackCombos st) then []
     else
-      [ HH.button [ HE.onClick \_ -> AddAlbum ] [ HH.text "Add these" ] ]
+      [ HH.button [ HE.onClick \_ -> AddFilter ] [ HH.text "Add these" ] ]
         <>
           ( if st.role == Host then
-              [ HH.button [ cls "primary", HE.onClick \_ -> PlayAlbum ] [ HH.text "Play these" ] ]
+              [ HH.button [ cls "primary", HE.onClick \_ -> PlayFilter ] [ HH.text "Play these" ] ]
             else []
           )
 

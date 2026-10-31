@@ -74,6 +74,7 @@ import Types
   , colRef
   , firstUnder
   , rowHeight
+  , scrollRowFor
   , valuesOf
   , viewportOf
   , BrowseMode(..)
@@ -82,20 +83,31 @@ import Types
   , Req(..)
   , Role(..)
   , View(..)
+  , anchorIn
   , arrived
+  , genOf
+  , listCommands
+  , listLabel
+  , narrowedFrom
+  , pendOf
+  , queryAt
+  , rightOf
+  , setAnchor
+  , setGen
+  , setPend
+  , setSelected
   , tagOf
-  , trackTerms
+  , totalOf
+  , trackCombos
   , trackHeight
   , trackPage
   , tracksRef
   , idleCommand
   , initial
   , isSticker
-  , markedIn
   , maxVolumeOf
   , searchLimit
-  , selectionOf
-  , setMarked
+  , selectedIn
   , spanBetween
   , shownVolume
   , stickerFind
@@ -343,77 +355,48 @@ handle = case _ of
     -- so the artist list is not left filtered by a column nobody can see.
     H.modify_ _
       { genreColumn = not on
-      , selGenre = Nothing
-      , selArtist = Nothing
-      , selAlbum = Nothing
+      , selGenre = []
+      , selArtist = []
+      , selAlbum = []
+      , anchorGenre = Nothing
+      , anchorArtist = Nothing
+      , anchorAlbum = Nothing
       , albums = []
       , tagTracks = []
       }
     refreshTags
-  -- A click on a row. Plain moves the anchor and the chain; shift
-  -- extends the mark from the anchor to here; the platform's own
-  -- modifier toggles one row in or out. Only a plain click cascades,
-  -- so the columns to the right always show one path through the
-  -- library however many rows are marked.
+  -- A click on a row. Plain replaces the column's selection with this
+  -- one row and moves the anchor to it; shift extends from the anchor;
+  -- the platform's own modifier adds or removes one row.
+  --
+  -- Every one of the three cascades, because the selection in a column
+  -- is a set and the columns to its right are narrowed by all of it.
+  -- Nothing to the left is touched: the column that was clicked keeps
+  -- its contents, and so keeps the row that was clicked where it is.
   Choose axis v ev -> do
     st <- H.get
     let
       values = valuesOf axis st
-      marked = markedIn axis st
-      anchor = fromMaybe v (selectionOf axis st)
-    if MouseEvent.shiftKey ev then
-      H.modify_ (setMarked axis (spanBetween anchor v values))
-    else if MouseEvent.ctrlKey ev || MouseEvent.metaKey ev then
+      chosen = selectedIn axis st
+      anchor = fromMaybe v (anchorIn axis st)
+    if MouseEvent.shiftKey ev then do
+      H.modify_ (setSelected axis (spanBetween anchor v values))
+      narrow axis
+    else if MouseEvent.ctrlKey ev || MouseEvent.metaKey ev then do
       H.modify_
-        ( setMarked axis
-            (if elem v marked then filter (_ /= v) marked else snoc marked v)
+        ( setAnchor axis (Just v)
+            <<< setSelected axis
+              (if elem v chosen then filter (_ /= v) chosen else snoc chosen v)
         )
+      narrow axis
     else do
-      H.modify_ (setMarked axis [ v ])
+      H.modify_ (setAnchor axis (Just v))
       handle (Pick axis (Just v))
-  -- Everything marked, queued in one go. findadd does the work on MPD's
-  -- side, so an artist with thirty albums is one command per album and
-  -- not one per track.
-  AddMarked axis play -> do
-    st <- H.get
-    let
-      chosen = case markedIn axis st of
-        [] -> maybe [] (\v -> [ v ]) (selectionOf axis st)
-        vs -> vs
-    unless (null chosen) do
-      when play (send Cmd RFire "clear")
-      for_ chosen \v -> send Cmd RFire (findaddFor axis v st)
-      when play do
-        send Cmd RFire "play"
-        H.modify_ _ { view = NowPlaying }
-  Pick axis v -> case axis of
-    AxGenre -> do
-      H.modify_ _
-        { selGenre = v
-        , selArtist = Nothing
-        , selAlbum = Nothing
-        , markArtist = []
-        , markAlbum = []
-        , artists = []
-        , albums = []
-        , tagTracks = []
-        }
-      loadArtists
-      loadAlbums
-      loadTracks
-    AxArtist -> do
-      H.modify_ _
-        { selArtist = v
-        , selAlbum = Nothing
-        , markAlbum = []
-        , albums = []
-        , tagTracks = []
-        }
-      loadAlbums
-      loadTracks
-    AxAlbum -> do
-      H.modify_ _ { selAlbum = v }
-      loadTracks
+  -- Set one column to exactly one value, or clear it. The crumbs and
+  -- the clear button in each column head come through here.
+  Pick axis v -> do
+    H.modify_ (setSelected axis (maybe [] (\x -> [ x ]) v))
+    narrow axis
   -- The rail scrolls the column to where that letter starts. Nothing is
   -- filtered and nothing is hidden: the scroll position moves, the
   -- scroll event that follows recomputes the slice, and everything
@@ -483,8 +466,8 @@ handle = case _ of
       for_ songId \i -> when (not (any (\q -> q.file == uri) st.queue)) (send Cmd RFire ("deleteid " <> show i))
       send Cmd RFire ("sticker delete song " <> Mpd.quote uri <> " " <> vetoName)
       H.modify_ \s -> s { vetoes = filter (\(Tuple u _) -> u /= uri) s.vetoes }
-  AddAlbum -> albumCommand false
-  PlayAlbum -> albumCommand true
+  AddFilter -> filterCommand false
+  PlayFilter -> filterCommand true
   SetQuery q -> H.modify_ _ { query = q }
   Search ev -> do
     liftEffect (preventDefault ev)
@@ -520,17 +503,23 @@ handle = case _ of
   DeletePos n -> send Cmd RFire ("delete " <> show n)
   UpdateLibrary -> send Cmd RFire "update"
 
--- | Put a column back at the top, in the page and in the state, after
--- | its contents have been replaced. The browser keeps an element's
--- | scroll position across a patch, so without this a column scrolled
--- | halfway down twelve thousand artists would open its replacement
+-- | Put a column where its selection is, in the page and in the state,
+-- | after its contents have been replaced. The browser keeps an
+-- | element's scroll position across a patch, so without this a column
+-- | scrolled halfway down twelve thousand artists opens its replacement
 -- | halfway down as well.
-toTop :: forall o m. MonadAff m => Axis -> M o m Unit
-toTop axis = do
+-- |
+-- | Where there is a selection it is the top row rather than row zero,
+-- | because the row that was just clicked is the one worth looking at
+-- | and hunting for it down a list of a thousand is not a feature.
+restore :: forall o m. MonadAff m => Axis -> Array String -> M o m Unit
+restore axis values = do
   st <- H.get
-  setViewport axis ((viewportOf axis st) { top = 0.0 })
+  let
+    top = toNumber (scrollRowFor axis values st) * rowHeight
+  setViewport axis ((viewportOf axis st) { top = top })
   el <- H.getRef (colRef axis)
-  for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
+  for_ el \e -> liftEffect (Element.setScrollTop top e)
 
 -- | Put a column's values in the browser's store for next time, under
 -- | the database stamp they were read at.
@@ -545,19 +534,32 @@ setViewport axis vp = H.modify_ case axis of
   AxArtist -> _ { vpArtist = vp }
   AxAlbum -> _ { vpAlbum = vp }
 
--- | Load whichever columns the current selection calls for. `list genre`
--- | is a few hundred rows and is asked for unconditionally while the
--- | column is shown; the columns to its right are always bounded by the
--- | selection to their left.
+-- | Load every column and the list under them, for whatever is
+-- | selected now.
 refreshTags :: forall o m. MonadAff m => M o m Unit
 refreshTags = do
   st <- H.get
-  when st.genreColumn (cachedOrAsk AxGenre ("list " <> tagOf AxGenre))
-  loadArtists
-  loadAlbums
+  when st.genreColumn (loadColumn AxGenre)
+  loadColumn AxArtist
+  loadColumn AxAlbum
   -- The list under the columns is the whole library until a column
   -- narrows it, so it is loaded alongside them rather than waiting for
   -- a choice.
+  loadTracks
+
+-- | Reload everything one column's selection narrows: the columns to
+-- | its right, and the track list. Nothing to its left is touched, so
+-- | the column that was just clicked keeps its contents and its scroll
+-- | position, and the row that was clicked stays where it is.
+-- |
+-- | Selections further right are kept rather than cleared. They are
+-- | pruned against the new contents when those arrive, so narrowing by
+-- | a genre does not throw away the four artists already picked, and
+-- | picking a genre those artists are not in does.
+narrow :: forall o m. MonadAff m => Axis -> M o m Unit
+narrow axis = do
+  st <- H.get
+  for_ (rightOf axis st) loadColumn
   loadTracks
 
 -- | Fill the columns that do not depend on a choice, at startup rather
@@ -567,19 +569,45 @@ primeTags = do
   st <- H.get
   when (st.mode == Tags) refreshTags
 
--- | A column whose contents depend on nothing but the database: the
--- | genre list, and the artist list when no genre narrows it. Those are
--- | the two worth keeping between visits, and the only two that can be
--- | answered without asking MPD anything.
-cachedOrAsk :: forall o m. MonadAff m => Axis -> String -> M o m Unit
-cachedOrAsk axis command = do
+-- | One column, built from the selection to its left.
+-- |
+-- | A column narrowed by nothing is one of the three whole-library
+-- | lists, which is what the browser's store holds, so it is answered
+-- | from there when the database has not moved since. A column narrowed
+-- | by a selection is one `list` per combination of those values,
+-- | because MPD's filters have no OR, and the replies are unioned as
+-- | they arrive. It is never cached: there are hundreds of genres and
+-- | thousands of artists, and each narrowed list is small anyway.
+loadColumn :: forall o m. MonadAff m => Axis -> M o m Unit
+loadColumn axis = do
   st <- H.get
-  hit <- liftEffect (Cache.read (tagOf axis) st.dbStamp)
+  let
+    plain = Array.null (narrowedFrom axis st)
+  hit <-
+    if plain then liftEffect (Cache.read (tagOf axis) st.dbStamp)
+    else pure Nothing
   case hit of
     Just values | not (Array.null values) -> do
-      H.modify_ (setValues axis values)
-      toTop axis
-    _ -> send Lib (RTagValues axis) command
+      H.modify_ (setPend axis 0 <<< setValues axis values)
+      restore axis values
+    _ -> do
+      let
+        cmds = listCommands axis st
+      gen <- bumpColumn axis (length cmds)
+      -- Emptied before the first reply, not after, so the column says
+      -- it is loading rather than showing the last selection's
+      -- contents as though they still applied.
+      H.modify_ (setValues axis [])
+      for_ cmds \c -> send Lib (RTagValues axis gen) c
+
+-- | Start a new generation for one column, and say how many replies it
+-- | is waiting for. Anything tagged with an older generation answers a
+-- | question that has since been replaced.
+bumpColumn :: forall o m. Axis -> Int -> M o m Int
+bumpColumn axis n = do
+  gen <- H.gets ((_ + 1) <<< genOf axis)
+  H.modify_ (setPend axis n <<< setGen axis gen)
+  pure gen
 
 setValues :: Axis -> Array String -> State -> State
 setValues axis values = case axis of
@@ -587,92 +615,90 @@ setValues axis values = case axis of
   AxArtist -> _ { artists = values }
   AxAlbum -> _ { albums = values }
 
-loadArtists :: forall o m. MonadAff m => M o m Unit
-loadArtists = do
-  st <- H.get
-  case st.selGenre of
-    -- Narrowed by a genre, so it is neither the cached list nor worth
-    -- caching: it is small and there are hundreds of genres.
-    Just g | st.genreColumn ->
-      send Lib (RTagValues AxArtist) ("list artist genre " <> Mpd.quote g)
-    _ -> cachedOrAsk AxArtist "list artist"
-
--- | The album column is a filter like the others, so with no artist
--- | picked it lists every album in the library, or every album in the
--- | chosen genre.
-loadAlbums :: forall o m. MonadAff m => M o m Unit
-loadAlbums = do
-  st <- H.get
-  case st.selArtist, st.selGenre of
-    Just a, _ -> send Lib (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
-    Nothing, Just g | st.genreColumn -> send Lib (RTagValues AxAlbum) ("list album genre " <> Mpd.quote g)
-    _, _ -> cachedOrAsk AxAlbum "list album"
-
 -- | Start the track list over for whatever the columns now narrow to.
--- | The count comes separately so the scrollbar is the real length from
--- | the first paint, and the first page follows it.
+-- |
+-- | The selection comes to one query per combination of the values
+-- | picked, since MPD cannot be asked for a union. Their counts go out
+-- | together so the scrollbar is the real length as soon as they land,
+-- | and the first page goes out beside them rather than behind them:
+-- | row zero is in the first query whatever the counts turn out to be,
+-- | so there is nothing to wait for.
 loadTracks :: forall o m. MonadAff m => M o m Unit
 loadTracks = do
+  st0 <- H.get
+  let
+    combos = trackCombos st0
+    gen = st0.tracksGen + 1
   H.modify_ \st -> st
     { tagTracks = []
-    , tracksTotal = 0
     , tracksFrom = 0
     , tracksPending = false
+    , tracksGen = gen
+    , trackQueries = map (\t -> { terms: t, count: 0 }) combos
+    -- Nothing picked: MPD has already counted the library in `stats`,
+    -- and there is no filter expression that `count` will accept for
+    -- "everything".
+    , tracksTotal = if Array.null combos then st.songs else 0
     , vpTracks = st.vpTracks { top = 0.0 }
     }
   el <- H.getRef tracksRef
   for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
-  st <- H.get
-  case trackTerms st of
-    -- Nothing picked: MPD has already counted the library in `stats`,
-    -- and there is no filter expression that `count` will accept for
-    -- "everything".
-    [] -> H.modify_ _ { tracksTotal = st.songs }
-    ts -> send Lib RTrackCount ("count " <> joinWith " " ts)
+  for_ (Array.mapWithIndex Tuple combos) \(Tuple i t) ->
+    send Lib (RTrackCount gen i) ("count " <> t)
   trackPageFrom 0
 
 -- | One window of tracks. MPD evaluates the filter and hands back the
 -- | slice, so a scroll into the middle of seventy thousand songs costs
 -- | one request of two hundred rather than the lot.
+-- |
+-- | With several queries the result is their rows laid end to end, and
+-- | a row number is turned into a query and an offset in it by the
+-- | counts. A window never crosses from one query into the next: it
+-- | stops at the end of the one it started in, and the next scroll
+-- | picks up where it left off.
 trackPageFrom :: forall o m. MonadAff m => Int -> M o m Unit
 trackPageFrom from = do
   st <- H.get
-  unless st.tracksPending do
-    H.modify_ _ { tracksPending = true }
-    let
-      -- An empty needle matches every song, which is the only way MPD
-      -- will list the whole library through a filter.
-      query = case trackTerms st of
-        [] -> "search any \"\""
-        ts -> "find " <> joinWith " " ts
-    send Lib (RTracks from)
-      (query <> " window " <> show from <> ":" <> show (from + trackPage))
+  unless st.tracksPending case st.trackQueries of
+    -- An empty needle matches every song, which is the only way MPD
+    -- will list the whole library through a filter.
+    [] -> do
+      H.modify_ _ { tracksPending = true }
+      send Lib (RTracks st.tracksGen from)
+        ("search any \"\" window " <> show from <> ":" <> show (from + trackPage))
+    qs -> do
+      let
+        -- Before any count has come back there is nothing to map a row
+        -- onto, but row zero is in the first query by construction, so
+        -- the first page needs no counts at all.
+        spot =
+          if totalOf qs > 0 then queryAt from qs
+          else if from == 0 then Just { index: 0, offset: 0, left: trackPage }
+          else Nothing
+      for_ spot \at -> for_ (Array.index qs at.index) \q -> do
+        H.modify_ _ { tracksPending = true }
+        send Lib (RTracks st.tracksGen from)
+          ( "find " <> q.terms
+              <> " window "
+              <> show at.offset
+              <> ":"
+              <> show (at.offset + min trackPage at.left)
+          )
 
--- | What to send to queue everything under one value of a column. An
--- | album is qualified by the anchored artist, because album titles
--- | repeat across a library and "Greatest Hits" on its own would queue
--- | a dozen records.
-findaddFor :: Axis -> String -> State -> String
-findaddFor axis v st = case axis of
-  AxGenre -> "findadd genre " <> Mpd.quote v
-  AxArtist -> "findadd artist " <> Mpd.quote v
-  AxAlbum -> case st.selArtist of
-    Just a -> "findadd album " <> Mpd.quote v <> " artist " <> Mpd.quote a
-    Nothing -> "findadd album " <> Mpd.quote v
-
--- | Queue the selected album. `findadd` does it in one command, so a
--- | twenty track album is one round trip and not twenty.
-albumCommand :: forall o m. MonadAff m => Boolean -> M o m Unit
-albumCommand play = do
+-- | Queue everything the columns narrow to, which is what the selection
+-- | means. One `findadd` per query, so four artists with thirty albums
+-- | between them is four commands and not nine hundred.
+filterCommand :: forall o m. MonadAff m => Boolean -> M o m Unit
+filterCommand play = do
   st <- H.get
-  case st.selArtist, st.selAlbum of
-    Just a, Just alb -> do
+  case trackCombos st of
+    [] -> pure unit
+    cs -> do
       when play (send Cmd RFire "clear")
-      send Cmd RFire ("findadd album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
+      for_ cs \t -> send Cmd RFire ("findadd " <> t)
       when play do
         send Cmd RFire "play"
         H.modify_ _ { view = NowPlaying }
-    _, _ -> pure unit
 
 -- | One complete line from MPD on one connection.
 received :: forall o m. MonadAff m => Conn -> String -> M o m Unit
@@ -773,40 +799,80 @@ reply req block = case req of
   RSearch _ -> H.modify_ _ { entries = Mpd.parseEntries block }
   RStickers -> H.modify_ _ { addedBy = Mpd.parseStickers block }
   RVetoes -> H.modify_ _ { vetoes = Mpd.parseStickers block }
-  RTagValues AxGenre -> do
-    let
-      values = Mpd.parseList "Genre" block
-    H.modify_ _ { genres = values }
-    toTop AxGenre
-    keep AxGenre values
-  RTagValues AxArtist -> do
-    let
-      values = Mpd.parseList "Artist" block
-    H.modify_ _ { artists = values }
-    toTop AxArtist
-    -- Only the unnarrowed list is the one the cache is keyed on.
+  -- One of possibly several replies that make up a column. They are
+  -- unioned as they land, because MPD has no OR and a column narrowed
+  -- by three genres is three commands. The column is finished when the
+  -- last of them has arrived.
+  RTagValues axis gen -> do
     st <- H.get
-    when (not st.genreColumn || st.selGenre == Nothing) (keep AxArtist values)
-  RTagValues AxAlbum -> do
-    let
-      values = Mpd.parseList "Album" block
-    H.modify_ _ { albums = values }
-    toTop AxAlbum
+    when (gen == genOf axis st) do
+      let
+        parsed = Mpd.parseList (listLabel axis) block
+        held = valuesOf axis st
+        -- One command, one reply: MPD's own order, kept exactly. It
+        -- collates by its own rules and the page cannot reproduce them,
+        -- so a column that is one `list` is never reindexed here. Only
+        -- a union of several replies has to be merged, and then sorting
+        -- is the only order available.
+        values =
+          if pendOf axis st == 1 && Array.null held then parsed
+          else Array.sort (Array.nub (held <> parsed))
+        left = max 0 (pendOf axis st - 1)
+      H.modify_ (setPend axis left <<< setValues axis values)
+      when (left == 0) do
+        -- A selection the new contents no longer hold has to go, and
+        -- what it was narrowing has to be asked for again. Picking a
+        -- genre that an already chosen artist is not filed under is
+        -- the case this is for.
+        kept <- H.gets (Array.filter (\v -> elem v values) <<< selectedIn axis)
+        chosen <- H.gets (selectedIn axis)
+        if kept /= chosen then do
+          H.modify_ (setSelected axis kept)
+          narrow axis
+        else pure unit
+        restore axis values
+        -- Only the three whole-library lists are what the browser's
+        -- store is keyed on; a narrowed one is not that list.
+        plain <- H.gets (Array.null <<< narrowedFrom axis)
+        when plain (keep axis values)
+  RTrackCount gen i -> do
     st <- H.get
-    -- Only the whole-library list is the one the cache is keyed on.
-    when (st.selArtist == Nothing && st.selGenre == Nothing) (keep AxAlbum values)
-  RTrackCount -> H.modify_ _ { tracksTotal = (Mpd.parseCount block) }
-  RTracks from -> do
+    when (gen == st.tracksGen) do
+      let
+        qs = fromMaybe st.trackQueries
+          (Array.modifyAt i (_ { count = Mpd.parseCount block }) st.trackQueries)
+      H.modify_ _ { trackQueries = qs, tracksTotal = totalOf qs }
+      -- The first page is sent before the counts are back and asks the
+      -- first query for a window it cannot yet clip. If that came back
+      -- empty because the first query matches nothing, this is where
+      -- the real first page is asked for.
+      when (null st.tagTracks && not st.tracksPending) (trackPageFrom st.tracksFrom)
+  RTracks gen from -> do
     let
       page = Mpd.parseSongs block
     H.modify_ \st -> st
       { tracksPending = false
-      -- A page that is not the next one in line is a reply to a request
-      -- the selection has since moved past, so it is dropped.
-      -- A page that is not the next one in the held run answers a
-      -- request the selection or the scroll has since moved past.
+      -- A page that is not the next one in the held run, or belongs to
+      -- a selection that has since changed, answers a request nobody is
+      -- asking any more.
       , tagTracks =
-          if from == st.tracksFrom + length st.tagTracks then st.tagTracks <> page
+          if gen == st.tracksGen && from == st.tracksFrom + length st.tagTracks then st.tagTracks <> page
           else st.tagTracks
       }
+    -- A window clipped at the end of its query comes back short, which
+    -- leaves the run stopping before the rows the viewport wants. The
+    -- next query is asked for straight away rather than waiting for a
+    -- scroll that may never come.
+    --
+    -- The first page is the case that always needs this: it is sent
+    -- before the counts are back, asks the first query blind, and comes
+    -- back empty whenever that query matches nothing. By the time it
+    -- does the counts have landed, because they were sent first on the
+    -- same connection and MPD answers in order.
+    st <- H.get
+    when (gen == st.tracksGen && length page < trackPage) do
+      let
+        held = st.tracksFrom + length st.tagTracks
+        reach = Int.ceil ((st.vpTracks.top + st.vpTracks.height * 2.0) / trackHeight)
+      when (held < st.tracksTotal && reach >= held) (trackPageFrom held)
   RFire -> pure unit
