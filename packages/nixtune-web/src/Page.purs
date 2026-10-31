@@ -5,6 +5,30 @@ module Page where
 import Prelude
 
 import Art (artUrl)
+import Browse
+  ( Axis
+  , ColRow(..)
+  , activeAxis
+  , alphabet
+  , axisLabel
+  , columnOf
+  , heldTo
+  , initialOf
+  , letterRailThreshold
+  , lettersPresent
+  , pluralOf
+  , rowAt
+  , rowCount
+  , rowHeight
+  , shownAxes
+  , sliceFor
+  , tagOf
+  , topRow
+  , trackCombos
+  , trackHeight
+  , trackScope
+  , tracksTotal
+  )
 import Caps (Station)
 import Data.Array (elem, length, null, take, (:))
 import Data.Array as Array
@@ -13,43 +37,28 @@ import Data.Int (toNumber)
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.String (Pattern(..), joinWith, split)
+import Data.Tuple (Tuple(..))
 import Halogen as H
 import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
+import Halogen.HTML.Elements.Keyed as HK
 import Halogen.HTML.Properties as HP
 import Mpd (Entry(..), PlayState(..), Quality(..), Song)
 import Mpd as Mpd
 import Reorder (rowRef, rowShift)
 import Types
   ( Action(..)
-  , Axis(..)
   , BrowseMode(..)
   , Role(..)
   , State
   , View(..)
-  , activeAxis
-  , alphabet
-  , axisLabel
   , colRef
   , isStream
-  , markedIn
   , partyOn
+  , searchLimit
+  , tracksRef
   , vetoLimit
   , votersAgainst
-  , letterRailThreshold
-  , lettersPresent
-  , initialOf
-  , overscan
-  , rowHeight
-  , viewportOf
-  , searchLimit
-  , trackHeight
-  , trackScope
-  , tracksRef
-  , selectionOf
-  , valuesOf
-  , waitingFor
-  , waitingForTracks
   )
 import Ui (classes, cls, iconSized)
 import Volume (playerBar)
@@ -335,17 +344,23 @@ vetoButton st s =
     if mine then "You voted against this: " <> show cast <> " of " <> show limit
     else "Vote against this track"
 
+-- | The search row and the mode switch share one line where there is
+-- | room, so the browser under them gets the height instead.
 libraryView :: forall m. State -> Array (H.ComponentHTML Action () m)
 libraryView st =
-  [ HH.form [ cls "search", HE.onSubmit Search ]
-      [ HH.input
-          [ HP.type_ HP.InputSearch
-          , HP.placeholder "Search artists, albums, titles"
-          , HP.value st.query
-          , HE.onValueInput SetQuery
-          ]
-      , HH.button [ HP.type_ HP.ButtonSubmit ] [ HH.text "Search" ]
-      ]
+  [ HH.div [ cls "libtop" ]
+      ( [ HH.form [ cls "search", HE.onSubmit Search ]
+            [ HH.input
+                [ HP.type_ HP.InputSearch
+                , HP.placeholder "Search artists, albums, titles"
+                , HP.value st.query
+                , HE.onValueInput SetQuery
+                ]
+            , HH.button [ HP.type_ HP.ButtonSubmit ] [ HH.text "Search" ]
+            ]
+        ]
+          <> (if isJust st.searched then [] else [ modeSwitch st ])
+      )
   , scanBanner st
   ]
     <> case st.searched of
@@ -364,7 +379,7 @@ libraryView st =
         , if null st.entries then HH.p [ cls "empty" ] [ HH.text emptyText ]
           else HH.ul [ cls "list" ] (map (entryRow st) st.entries)
         ]
-      Nothing -> [ modeSwitch st ] <> case st.mode of
+      Nothing -> case st.mode of
         Tags -> tagBrowser st
         Folders -> folderView st
   where
@@ -388,7 +403,7 @@ modeSwitch st =
     , case st.mode of
         Tags ->
           HH.button
-            [ classes ([ "mode" ] <> (if st.genreColumn then [ "on" ] else []))
+            [ classes ([ "mode" ] <> (if st.browser.genreColumn then [ "on" ] else []))
             , HP.title "Add a genre column to the left of the artists"
             , HE.onClick \_ -> ToggleGenreColumn
             ]
@@ -452,18 +467,19 @@ entryRow st = case _ of
             [ HH.span [ cls "rowicon" ] [ iconSized "sm" "list" ], HH.text p ]
         ]
     else HH.text ""
-  File s -> songRow st s
+  File s -> songRow s
 
--- | One track, in a search result, a folder listing or an album.
+-- | One track, in a search result, a folder listing or the tag browser.
 -- |
 -- | Both roles get the same thing: a plus, which appends. There is no
 -- | play button on a track row for either of them. This list is the
 -- | quickest way to build up a queue, and a control that throws away
--- | what has been built so far does not belong in it.
-songRow :: forall m. State -> Song -> H.ComponentHTML Action () m
-songRow _ s =
+-- | what has been built so far does not belong in it. The row itself
+-- | appends too, so the whole width is the target.
+songRow :: forall m. Song -> H.ComponentHTML Action () m
+songRow s =
   HH.li [ cls "song" ]
-    [ HH.button [ cls "grow", HE.onClick \_ -> AddPath s.file ]
+    [ HH.button [ cls "grow", HP.title "Add to the queue", HE.onClick \_ -> AddPath s.file ]
         [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
         , HH.div [ cls "line" ] [ HH.text (Mpd.songLine s) ]
         ]
@@ -477,112 +493,111 @@ songRow _ s =
         [ iconSized "sm" "plus" ]
     ]
 
--- | The tag browser: a chain of columns, each one bounded by the
--- | selection to its left, with the chosen album's tracks underneath.
--- | A choice clears everything to its right, which is what makes this a
--- | path through the library rather than a set of filters that can
--- | disagree with each other.
--- | The tag browser. One flex column so the columns and the list below
--- | them divide the height that is actually there, rather than each
--- | stopping at a figure picked in advance.
+-- | The tag browser: a chain of columns, each one narrowed by the
+-- | selection to its left, with the tracks they narrow to underneath.
+-- | One flex column so the columns and the list below them divide the
+-- | height that is actually there, rather than each stopping at a figure
+-- | picked in advance.
+-- |
+-- | The columns are KEYED by axis. Without keys the renderer patches
+-- | children by position, so switching the genre column on turns the
+-- | element that was the artist column into the genre column, and the
+-- | renderer never re-registers a ref whose label changed on a patched
+-- | element. Every scroll aimed at the artist column then lands on the
+-- | genre column, which is the jump to the top this browser used to do
+-- | whenever a genre was clicked.
 tagBrowser :: forall m. State -> Array (H.ComponentHTML Action () m)
 tagBrowser st =
   [ HH.div [ cls "browser" ]
       ( [ tagCrumbs st
-        , HH.div [ cls "columns" ]
-            ( (if st.genreColumn then [ tagColumn st AxGenre ] else [])
-                <> [ tagColumn st AxArtist, tagColumn st AxAlbum ]
-            )
+        , HK.div [ cls "columns" ] (map (\a -> Tuple (tagOf a) (tagColumn st a)) (shownAxes st.browser))
         ]
-          <> albumTracks st
+          <> trackList st
       )
   ]
 
 -- | The choices already made, as chips that clear them. Drawn only when
--- | the columns are stacked, because side by side each column says what
--- | it has selected in its own head and this would say it twice.
+-- | the columns are stacked, because side by side each column shows its
+-- | own selection and this would say it twice.
 tagCrumbs :: forall m. State -> H.ComponentHTML Action () m
 tagCrumbs st =
   if null chips then HH.text ""
   else HH.div [ cls "tagcrumbs" ] chips
   where
-  chips = Array.mapMaybe chip (if st.genreColumn then [ AxGenre, AxArtist ] else [ AxArtist ])
-  chip axis = case selectedIn axis st of
+  chips = Array.mapMaybe chip (shownAxes st.browser)
+  chip axis = case (columnOf axis st.browser).selected of
     [] -> Nothing
     [ v ] -> Just (button axis v)
-    vs -> Just (button axis (show (length vs) <> " " <> axisLabel axis))
+    vs -> Just (button axis (show (length vs) <> " " <> pluralOf axis))
   button axis label =
     HH.button
       [ cls "crumb"
-      , HP.title ("Clear the " <> axisLabel axis <> " choice")
-      , HE.onClick \_ -> Pick axis Nothing
+      , HP.title ("Back to all " <> pluralOf axis)
+      , HE.onClick \_ -> ClearColumn axis
       ]
       [ HH.text ("‹ " <> label) ]
 
+-- | One column: its name and count in the head, the All row and the
+-- | values in a scroller, and a letter rail beside a long list.
 tagColumn :: forall m. State -> Axis -> H.ComponentHTML Action () m
 tagColumn st axis =
-  HH.div [ classes ([ "col" ] <> (if activeAxis st == axis then [ "cur" ] else [])) ]
+  HH.div [ classes ([ "col" ] <> (if activeAxis br == axis then [ "cur" ] else [])) ]
     [ HH.div [ cls "colhead" ]
         [ HH.span [ cls "colname" ] [ HH.text (axisLabel axis) ]
+        , if col.pending > 0 && not (null col.values) then HH.span [ cls "spin" ] [] else HH.text ""
         , HH.span [ cls "count" ] [ HH.text countText ]
-        , if null sel then HH.text ""
-          else
-            HH.button
-              [ cls "ghost icon-btn"
-              , HP.title ("Clear the " <> axisLabel axis <> " choice")
-              , HE.onClick \_ -> Pick axis Nothing
-              ]
-              [ iconSized "sm" "x" ]
         ]
     , HH.div [ cls "colbody" ]
         [ HH.ul
-            ( [ cls "vals"
-              , HP.ref (colRef axis)
-              -- Every scroll says where the column is now; Main turns
-              -- that into the slice below and nothing else happens
-              -- unless the slice actually moved.
-              , HE.handler (EventType "scroll") (Scrolled axis)
-              ]
-            )
+            [ cls "vals"
+            , HP.ref (colRef axis)
+            -- Every scroll says where the column is now; Tags turns
+            -- that into the slice below and nothing else happens
+            -- unless the slice actually moved.
+            , HE.handler (EventType "scroll") (Scrolled axis)
+            ]
             body
-        , if length values > letterRailThreshold then rail else HH.text ""
+        , if length col.values > letterRailThreshold then rail else HH.text ""
         ]
     ]
   where
-  values = valuesOf axis st
-  busy = waitingFor axis st && null values
-  total = length values
-  sel = selectedIn axis st
-  present = lettersPresent values
-
+  br = st.browser
+  col = columnOf axis br
+  total = rowCount col
   -- The slice that is on screen. The whole column is still there as far
   -- as the scrollbar and the scroll position are concerned: the rows
-  -- that are not drawn are stood in for by padding of exactly their
-  -- height, above and below.
-  vp = viewportOf axis st
-  first = clamp 0 (max 0 (total - 1)) (Int.floor (vp.top / rowHeight) - overscan)
-  wanted = Int.ceil (vp.height / rowHeight) + overscan * 2
-  shown = Array.slice first (min total (first + wanted)) values
-  -- The rows that are not drawn are stood in for by two empty rows of
-  -- exactly their height. This has to be CONTENT and not padding on the
-  -- scroller: box-sizing is border-box here, so padding taller than the
-  -- element's own max-height pushes the padding box past it and the
-  -- column stops scrolling altogether.
+  -- that are not drawn are stood in for by two blank rows of exactly
+  -- their height, one above and one below. Both are always present,
+  -- even at zero height, so every row keeps its place among the
+  -- element's children from one render to the next.
+  slice = sliceFor col.vp rowHeight total
+  rows = if slice.count <= 0 then [] else Array.mapMaybe (rowAt col) (Array.range slice.first (slice.first + slice.count - 1))
   spacer n =
-    if n <= 0 then []
-    else [ HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber n * rowHeight) <> "px") ] [] ]
+    HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber (max 0 n) * rowHeight) <> "px") ] []
 
   -- The count says how many of how many once some are picked, because
   -- the number that matters then is the size of the selection.
-  countText = case length sel of
-    0 -> show total
-    n -> show n <> " of " <> show total
+  countText = case length col.selected of
+    0 -> show (length col.values)
+    n -> show n <> " of " <> show (length col.values)
   body
-    | busy = [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
-    | null values = [ HH.li [ cls "val empty" ] [ HH.text "Nothing here" ] ]
-    | otherwise = spacer first <> map row shown <> spacer (total - first - length shown)
-  row v =
-    HH.li [ classes ([ "val" ] <> (if elem v sel then [ "on" ] else [])) ]
+    | null col.values && col.pending > 0 = [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
+    | null col.values = [ HH.li [ cls "val empty" ] [ HH.text "Nothing here" ] ]
+    | otherwise = [ spacer slice.first ] <> map row rows <> [ spacer (total - slice.first - length rows) ]
+  -- The All row is selected exactly when nothing else is, which is what
+  -- the iTunes browser shows and the reason the column is never without
+  -- a highlighted row.
+  row AllRow =
+    HH.li [ classes ([ "val", "all" ] <> (if null col.selected then [ "on" ] else [])) ]
+      [ HH.button
+          [ cls "grow"
+          , HP.title ("Every " <> axisLabel axis)
+          , HE.onClick \_ -> ClearColumn axis
+          ]
+          [ HH.text ("All (" <> show (length col.values) <> " " <> pluralOf axis <> ")") ]
+      ]
+  row (ValueRow v) =
+    HH.li [ classes ([ "val" ] <> (if elem v col.selected then [ "on" ] else [])) ]
       [ HH.button
           [ cls "grow"
           -- A row is one line of a fixed height, which is what the slice
@@ -597,7 +612,10 @@ tagColumn st axis =
       ]
   -- The letter the column is sitting on, which is the one the rail
   -- marks. It follows the scroll rather than being a thing you set.
-  atLetter = map initialOf (Array.index values (Int.floor (vp.top / rowHeight)))
+  atLetter = case rowAt col (topRow col.vp rowHeight) of
+    Just (ValueRow v) -> Just (initialOf v)
+    _ -> Nothing
+  present = lettersPresent col
   rail = HH.div [ cls "rail" ] (map letterButton alphabet)
   letterButton l =
     HH.button
@@ -618,11 +636,11 @@ tagColumn st axis =
 -- | Only the pages that have been scrolled to are held, and only the
 -- | rows in view are drawn, so seventy thousand songs cost one request
 -- | of two hundred and a screenful of elements.
-albumTracks :: forall m. State -> Array (H.ComponentHTML Action () m)
-albumTracks st =
+trackList :: forall m. State -> Array (H.ComponentHTML Action () m)
+trackList st =
   [ HH.div [ cls "row-actions trackhead" ]
-      ( [ HH.span [ cls "crumb-static" ] [ HH.text (trackScope st) ]
-        , HH.span [ cls "count" ] [ HH.text (show st.tracksTotal <> " songs") ]
+      ( [ HH.span [ cls "crumb-static" ] [ HH.text (trackScope br) ]
+        , HH.span [ cls "count" ] [ HH.text (show total <> " songs") ]
         , HH.div [ cls "grow-space" ] []
         ]
           <> bulk
@@ -635,13 +653,16 @@ albumTracks st =
       body
   ]
   where
+  br = st.browser
+  t = br.tracks
+  total = tracksTotal t
   -- Add and Play act on the whole filter rather than on the rows that
   -- happen to be loaded, so queueing four artists does not stop at two
   -- hundred tracks. With nothing selected there is no filter and the
   -- buttons would mean "the entire library", which nobody wants by
   -- accident, so they are not offered.
   bulk =
-    if st.tracksTotal == 0 || Array.null (trackCombos st) then []
+    if total == 0 || Array.null (trackCombos br) then []
     else
       [ HH.button [ HE.onClick \_ -> AddFilter ] [ HH.text "Add these" ] ]
         <>
@@ -650,33 +671,30 @@ albumTracks st =
             else []
           )
 
-  total = st.tracksTotal
-  loaded = length st.tagTracks
-  vp = st.vpTracks
   -- The window of rows to draw, in the whole result's numbering, cut
   -- down to the run actually held. Anything outside it is spacing, so
   -- a scrollbar dragged ahead of the fetch shows empty space of the
   -- right size rather than the wrong rows.
-  from = max st.tracksFrom (Int.floor (vp.top / trackHeight) - overscan)
-  to = min (st.tracksFrom + loaded) (Int.ceil ((vp.top + vp.height) / trackHeight) + overscan)
-  shown = if to <= from then [] else Array.slice (from - st.tracksFrom) (to - st.tracksFrom) st.tagTracks
+  slice = sliceFor t.vp trackHeight total
+  from = max t.from slice.first
+  to = min (heldTo t) (slice.first + slice.count)
+  shown = if to <= from then [] else Array.slice (from - t.from) (to - t.from) t.rows
   drawnFrom = if Array.null shown then 0 else from
   spacer n =
-    if n <= 0 then []
-    else [ HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber n * trackHeight) <> "px") ] [] ]
+    HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber (max 0 n) * trackHeight) <> "px") ] []
 
   body
-    | total == 0 && waitingForTracks st =
+    | total == 0 && t.pending =
         [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
     | total == 0 =
         [ HH.li [ cls "val empty" ] [ HH.text "Nothing matches." ] ]
     | otherwise =
-        spacer drawnFrom
-          <> map (songRow st) shown
+        [ spacer drawnFrom ]
+          <> map songRow shown
           -- The gap below stands in for everything past what has been
           -- fetched as well as for what is simply not drawn, so the
           -- scrollbar is the real length of the result from the start.
-          <> spacer (total - drawnFrom - length shown)
+          <> [ spacer (total - drawnFrom - length shown) ]
 
 -- | What the library is doing, said plainly above the listing.
 scanBanner :: forall w i. State -> HH.HTML w i

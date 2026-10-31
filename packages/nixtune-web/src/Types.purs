@@ -1,20 +1,19 @@
--- | What the page is, as data: the two roles, the two connections, the
+-- | What the page is, as data: the two roles, the three connections, the
 -- | state the component carries, and every constant the rest of the
 -- | modules agree on. Nothing here does anything; it is the vocabulary
--- | the other modules are written in, so it depends on none of them.
+-- | the other modules are written in, so it depends on none of them
+-- | except Browse, which is the tag browser's own vocabulary.
 module Types where
 
 import Prelude
 
+import Browse (Axis, Browser, emptyBrowser, tagOf)
 import Caps (Caps, Station)
 import Data.Array as Array
-import Data.Enum (enumFromTo)
-import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
-import Data.Foldable (foldl, lookup, sum)
-import Data.String (Pattern(..), Replacement(..), indexOf, replaceAll, split, toUpper, trim)
-import Data.String.Common (joinWith)
-import Data.String.CodeUnits as CodeUnits
-import Data.Tuple (Tuple(..), snd)
+import Data.Maybe (Maybe(..), isJust, maybe)
+import Data.Foldable (lookup)
+import Data.String (Pattern(..), indexOf, split, trim)
+import Data.Tuple (Tuple)
 import Halogen as H
 import Mpd (Entry, Song, Status)
 import Mpd as Mpd
@@ -41,20 +40,6 @@ data BrowseMode = Tags | Folders
 
 derive instance eqBrowseMode :: Eq BrowseMode
 
--- | A column of the tag browser. Each column holds a set of selected
--- | values, each column is narrowed by the columns to its left, and the
--- | track list below is narrowed by all three. A column with nothing
--- | selected constrains nothing, so the browser is a filter that only
--- | ever subtracts and never a gate that has to be opened first.
-data Axis = AxGenre | AxArtist | AxAlbum
-
-derive instance eqAxis :: Eq Axis
-
--- | The columns in order, left to right. The genre column is not always
--- | drawn, so this is the full chain and callers skip what is hidden.
-axisOrder :: Array Axis
-axisOrder = [ AxGenre, AxArtist, AxAlbum ]
-
 -- | The three connections to MPD.
 -- |
 -- |   Cmd    transport, the queue, status, attribution
@@ -72,7 +57,7 @@ data Conn = Cmd | Idle | Lib
 
 derive instance eqConn :: Eq Conn
 
--- | What a reply on the command connection is for.
+-- | What a reply on a connection is for.
 data Req
   = RStatus
   | RCurrent
@@ -82,17 +67,16 @@ data Req
   | RSearch String
   | RStickers
   | RVetoes
-  -- A column's values, with the generation they were asked at. A column
-  -- is now the union of one `list` per value selected to its left, so
-  -- several replies build one column and each has to be recognisable as
-  -- belonging to the selection that is still current.
+  -- One of the replies that make up a column, with the generation it
+  -- was asked at. A column narrowed by several values is several `list`
+  -- commands, so several replies build one column and each has to be
+  -- recognisable as belonging to the request that is still current.
   | RTagValues Axis Int
   -- A window of the track list: the generation, and the row the window
   -- starts at in the whole result.
   | RTracks Int Int
   -- How many tracks one of the track queries matches: the generation,
-  -- and which query it is. The totals are summed, and the per-query
-  -- counts are what map a row number onto a query and an offset in it.
+  -- and which query it is.
   | RTrackCount Int Int
   | RFire
 
@@ -192,70 +176,11 @@ type State =
   , artTry :: Int
   -- The queue row under the finger, while one is being dragged.
   , drag :: Maybe Drag
-  -- The tag browser. `mode` picks it or the folder tree; `genreColumn`
-  -- says whether the chain starts at genre or at artist. It starts at
-  -- artist because a library of this age has hundreds of distinct genre
-  -- strings, most of them spellings of each other, and a column of
-  -- hundreds is not a way of choosing anything.
+  -- The tag browser or the folder tree.
   , mode :: BrowseMode
-  , genreColumn :: Boolean
-  , genres :: Array String
-  , artists :: Array String
-  , albums :: Array String
-  -- The tracks the columns narrow to, which is the whole library when
-  -- nothing is picked. Only the pages scrolled to are held: the count
-  -- comes from MPD separately, so the scrollbar is the real length from
-  -- the first paint and the rest arrives as it is reached.
-  , tagTracks :: Array Song
-  , tracksTotal :: Int
-  -- Which row the held run starts at. The page keeps one contiguous
-  -- run rather than a sparse map: scrolling on extends it, and a jump
-  -- that lands outside it starts a new run there, so a drag of the
-  -- scrollbar to the far end costs one request and not three hundred.
-  , tracksFrom :: Int
-  , tracksPending :: Boolean
-  , vpTracks :: Viewport
-  -- The queries the current selection comes to, and how many tracks
-  -- each matches. MPD's filters have AND and NOT and no OR, so a
-  -- selection of three artists is three queries whose results are read
-  -- one after another as one list. An empty array means no filter at
-  -- all, which is the whole library.
-  , trackQueries :: Array TrackQuery
-  -- Which selection the held rows belong to. A reply tagged with an
-  -- older one answers a question nobody is asking any more.
-  , tracksGen :: Int
-  -- What is selected in each column. Several values at once, in the
-  -- column's own order, and empty meaning "no constraint from here".
-  , selGenre :: Array String
-  , selArtist :: Array String
-  , selAlbum :: Array String
-  -- The row a shift click extends from, per column: the last row that
-  -- was clicked without shift.
-  , anchorGenre :: Maybe String
-  , anchorArtist :: Maybe String
-  , anchorAlbum :: Maybe String
-  -- Which selection each column's values belong to, and how many of
-  -- its replies are still outstanding. A column built from several
-  -- `list` commands is only finished when the last of them lands, and
-  -- a reply from before the last click has to be thrown away rather
-  -- than unioned into a column it does not belong to.
-  , colGen :: Triple
-  , colPend :: Triple
-  -- Where each column is scrolled to and how tall it is, which is all
-  -- the page needs to work out which rows are worth drawing.
-  , vpGenre :: Viewport
-  , vpArtist :: Viewport
-  , vpAlbum :: Viewport
+  -- The tag browser: its columns, their selections and the track list.
+  , browser :: Browser
   }
-
--- | One query behind the track list, and how many tracks it matches.
-type TrackQuery = { terms :: String, count :: Int }
-
--- | One number per column.
-type Triple = { genre :: Int, artist :: Int, album :: Int }
-
-zeroTriple :: Triple
-zeroTriple = { genre: 0, artist: 0, album: 0 }
 
 initial :: State
 initial =
@@ -289,28 +214,7 @@ initial =
   , artTry: 0
   , drag: Nothing
   , mode: Tags
-  , genreColumn: false
-  , genres: []
-  , artists: []
-  , albums: []
-  , tagTracks: []
-  , tracksTotal: 0
-  , tracksFrom: 0
-  , tracksPending: false
-  , vpTracks: emptyViewport
-  , trackQueries: []
-  , tracksGen: 0
-  , selGenre: []
-  , selArtist: []
-  , selAlbum: []
-  , anchorGenre: Nothing
-  , anchorArtist: Nothing
-  , anchorAlbum: Nothing
-  , colGen: zeroTriple
-  , colPend: zeroTriple
-  , vpGenre: emptyViewport
-  , vpArtist: emptyViewport
-  , vpAlbum: emptyViewport
+  , browser: emptyBrowser 800.0
   }
 
 data Action
@@ -340,11 +244,17 @@ data Action
   | Browse String
   | SetMode BrowseMode
   | ToggleGenreColumn
-  | Pick Axis (Maybe String)
+  -- A click on a value row: plain, shift or with the platform's
+  -- modifier, which the handler reads off the event.
   | Choose Axis String MouseEvent
+  -- The All row, or a chip on a phone: clear one column's selection.
+  | ClearColumn Axis
   | JumpTo Axis String
   | Scrolled Axis Event
   | ScrolledTracks Event
+  -- The window changed size, or a view with lists in it was opened:
+  -- measure the lists again.
+  | Measure
   | Veto String (Maybe Int)
   | AddFilter
   | PlayFilter
@@ -442,7 +352,7 @@ votersAgainst st uri = case lookup uri st.vetoes of
   Nothing -> []
   Just raw -> Array.filter (_ /= "") (map trim (split (Pattern ",") raw))
 
--- | How many votes it takes, and whether this browser has cast one.
+-- | How many votes it takes.
 vetoLimit :: State -> Int
 vetoLimit st = maybe 3 _.vetoes st.caps
 
@@ -452,357 +362,10 @@ partyOn st = maybe false _.party st.caps
 isStream :: String -> Boolean
 isStream uri = isJust (indexOf (Pattern "://") uri)
 
--- | A column longer than this gets a letter rail. Below it the rail is
--- | more work to read than the list it would filter.
-letterRailThreshold :: Int
-letterRailThreshold = 40
-
--- | A column shows every entry it has. Only the rows inside the scroll
--- | viewport are put in the page, with a blank block above and below
--- | standing in for the rest, so the scrollbar is the true length of the
--- | list and the DOM holds a few dozen nodes instead of twelve thousand.
--- |
--- | That is what makes this work: the page has to know how tall a row is
--- | rather than measure every one. index.html sets the same number on
--- | .val, and the two have to agree.
-rowHeight :: Number
-rowHeight = 40.0
-
--- | Rows drawn above and below the viewport, so a fast scroll does not
--- | show a gap before the next frame lands.
-overscan :: Int
-overscan = 8
-
--- | A column's scroll position and how much of it is on screen.
-type Viewport = { top :: Number, height :: Number }
-
--- | Before a column has been scrolled or measured. The height is
--- | deliberately larger than any column gets, so the first paint
--- | overdraws rather than leaving the bottom of a tall column blank
--- | until the first scroll event.
-emptyViewport :: Viewport
-emptyViewport = { top: 0.0, height: 760.0 }
-
-viewportOf :: Axis -> State -> Viewport
-viewportOf axis st = case axis of
-  AxGenre -> st.vpGenre
-  AxArtist -> st.vpArtist
-  AxAlbum -> st.vpAlbum
-
--- | The scroll element of one column, so a new selection can put it
--- | back at the top.
+-- | The scroll element of one column and of the track list, so a
+-- | handler can move them and measure them.
 colRef :: Axis -> H.RefLabel
 colRef axis = H.RefLabel ("col-" <> tagOf axis)
 
--- | The letter a tag value files under: its first character in upper
--- | case, or "#" when that is not A to Z. A leading article is NOT
--- | stripped. MPD sorts by the value it holds, and a page that silently
--- | reindexes disagrees with its own search results.
-initialOf :: String -> String
-initialOf s = case CodeUnits.uncons (toUpper (trim s)) of
-  Just { head: c } | c >= 'A' && c <= 'Z' -> CodeUnits.singleton c
-  _ -> "#"
-
-alphabet :: Array String
-alphabet = Array.cons "#" (map CodeUnits.singleton (enumFromTo 'A' 'Z'))
-
--- | Where a letter starts in a column, so the rail can scroll to it.
--- | The rail moves the column; it never hides any of it.
-firstUnder :: String -> Array String -> Maybe Int
-firstUnder l = Array.findIndex (\v -> initialOf v == l)
-
--- | Where to put a column after its contents have been replaced: at the
--- | first row that is still selected, or at the top when nothing is.
--- |
--- | Scrolling to the top is the wrong answer once the column keeps a
--- | selection, because the row that was just clicked is then somewhere
--- | below the fold and has to be hunted for. Scrolling to it instead
--- | means the selection is the first thing on screen and everything
--- | earlier in the alphabet is one scroll back.
-scrollRowFor :: Axis -> Array String -> State -> Int
-scrollRowFor axis values st =
-  fromMaybe 0 (Array.head (Array.mapMaybe (\v -> Array.elemIndex v values) (selectedIn axis st)))
-
--- | Which letters a column actually has entries under, so the rail can
--- | grey out the rest instead of scrolling nowhere.
-lettersPresent :: Array String -> Array String
-lettersPresent xs = Array.nub (map initialOf xs)
-
--- | The values in one column, before the letter filter.
-valuesOf :: Axis -> State -> Array String
-valuesOf axis st = case axis of
-  AxGenre -> st.genres
-  AxArtist -> st.artists
-  AxAlbum -> st.albums
-
--- | What is selected in one column. Empty means this column is not
--- | narrowing anything.
-selectedIn :: Axis -> State -> Array String
-selectedIn axis st = case axis of
-  AxGenre -> st.selGenre
-  AxArtist -> st.selArtist
-  AxAlbum -> st.selAlbum
-
-setSelected :: Axis -> Array String -> State -> State
-setSelected axis vs = case axis of
-  AxGenre -> _ { selGenre = vs }
-  AxArtist -> _ { selArtist = vs }
-  AxAlbum -> _ { selAlbum = vs }
-
-anchorIn :: Axis -> State -> Maybe String
-anchorIn axis st = case axis of
-  AxGenre -> st.anchorGenre
-  AxArtist -> st.anchorArtist
-  AxAlbum -> st.anchorAlbum
-
-setAnchor :: Axis -> Maybe String -> State -> State
-setAnchor axis v = case axis of
-  AxGenre -> _ { anchorGenre = v }
-  AxArtist -> _ { anchorArtist = v }
-  AxAlbum -> _ { anchorAlbum = v }
-
--- | Which columns narrow this one: everything to its left that is on
--- | screen. The genre column being switched off takes it out of the
--- | chain entirely rather than leaving it as a hidden constraint.
-leftOf :: Axis -> State -> Array Axis
-leftOf axis st = Array.filter shown case axis of
-  AxGenre -> []
-  AxArtist -> [ AxGenre ]
-  AxAlbum -> [ AxGenre, AxArtist ]
-  where
-  shown a = a /= AxGenre || st.genreColumn
-
--- | Which columns this one narrows: everything to its right that is on
--- | screen. Those are the ones a click here has to ask for again.
-rightOf :: Axis -> State -> Array Axis
-rightOf axis st = Array.filter shown case axis of
-  AxGenre -> [ AxArtist, AxAlbum ]
-  AxArtist -> [ AxAlbum ]
-  AxAlbum -> []
-  where
-  shown a = a /= AxGenre || st.genreColumn
-
--- | What to the left of this column narrows it, with the values each of
--- | those columns has selected. Empty means this column lists the whole
--- | library.
-narrowedFrom :: Axis -> State -> Array (Tuple Axis (Array String))
-narrowedFrom axis st =
-  Array.filter (\(Tuple _ vs) -> not (Array.null vs))
-    (map (\a -> Tuple a (selectedIn a st)) (leftOf axis st))
-
--- | The commands one column is built from: `list <tag>` on its own when
--- | nothing narrows it, and otherwise one per combination of the values
--- | selected to its left, because MPD's filters have no OR. The replies
--- | are unioned as they arrive.
-listCommands :: Axis -> State -> Array String
-listCommands axis st = case productOf (map snd (dimsOf (narrowedFrom axis st))) of
-  [] -> [ "list " <> tagOf axis ]
-  cs -> map (\c -> "list " <> tagOf axis <> " " <> c) cs
-  where
-  dimsOf = map \(Tuple a vs) -> Tuple a (map (\v -> tagOf a <> " " <> quoteArg v) vs)
-
--- | Every combination of one value per dimension, each written out as
--- | one filter's worth of terms. No dimensions is no combinations, which
--- | callers read as "no filter" rather than as "matches nothing".
-productOf :: Array (Array String) -> Array String
-productOf dims = case Array.filter (not <<< Array.null) dims of
-  [] -> []
-  ds -> foldl step [ "" ] ds
-  where
-  step acc ts = do
-    a <- acc
-    t <- ts
-    pure (if a == "" then t else a <> " " <> t)
-
--- | The tag name MPD labels a column's values with in a `list` reply,
--- | which is capitalised where the argument to `list` is not.
-listLabel :: Axis -> String
-listLabel = case _ of
-  AxGenre -> "Genre"
-  AxArtist -> "Artist"
-  AxAlbum -> "Album"
-
--- | Which generation a column's values belong to, and how many of its
--- | replies have still to arrive.
-genOf :: Axis -> State -> Int
-genOf axis st = case axis of
-  AxGenre -> st.colGen.genre
-  AxArtist -> st.colGen.artist
-  AxAlbum -> st.colGen.album
-
-pendOf :: Axis -> State -> Int
-pendOf axis st = case axis of
-  AxGenre -> st.colPend.genre
-  AxArtist -> st.colPend.artist
-  AxAlbum -> st.colPend.album
-
-setGen :: Axis -> Int -> State -> State
-setGen axis n st = st { colGen = write axis n st.colGen }
-
-setPend :: Axis -> Int -> State -> State
-setPend axis n st = st { colPend = write axis n st.colPend }
-
-write :: Axis -> Int -> Triple -> Triple
-write axis n t = case axis of
-  AxGenre -> t { genre = n }
-  AxArtist -> t { artist = n }
-  AxAlbum -> t { album = n }
-
--- | Is this column waiting for its reply. A column that has been asked
--- | for and has not arrived says so, because an empty box that will fill
--- | in a moment looks exactly like a click that did nothing, and the
--- | answer to a click that did nothing is to click again.
-waitingFor :: Axis -> State -> Boolean
-waitingFor axis st = pendOf axis st > 0
-
--- | How many tracks one request brings back. Small enough that the
--- | first page is instant on a library of any size, large enough that
--- | an ordinary scroll does not ask twice a second.
-trackPage :: Int
-trackPage = 200
-
--- | A track row is two lines, and a fixed height is what lets the list
--- | be drawn a slice at a time.
-trackHeight :: Number
-trackHeight = 58.0
-
 tracksRef :: H.RefLabel
 tracksRef = H.RefLabel "tracks"
-
--- | How many queries one selection may come to before the exact form
--- | is given up on. Thirty-two covers every selection a person makes by
--- | hand in three columns.
-maxTrackQueries :: Int
-maxTrackQueries = 32
-
--- | The queries the current selection comes to, each one a filter ready
--- | to follow `find` or `count`.
--- |
--- | MPD's filter language has AND and NOT and no OR. Two selected
--- | artists are therefore two queries, not one filter, and two genres
--- | with three artists are six. Every combination of one value per
--- | selected column is one query; the combinations are mutually
--- | exclusive, so the counts add up and the rows read as one list laid
--- | end to end.
--- |
--- | An empty array means no filter at all. There is deliberately no
--- | term meaning "everything": MPD rejects `base ""` with "Bad URI",
--- | and every other filter that matches all songs is a substring
--- | search, which `count` will not take. The callers handle that case
--- | instead, with `stats` for the total and `search any ""` for the
--- | listing.
--- |
--- | Past `maxTrackQueries` the product is abandoned for the rightmost
--- | selected column on its own, ANDed with whichever columns to its
--- | left hold exactly one value. That is bounded by the rows actually
--- | selected rather than by their product, and it differs from the
--- | exact answer only where a value in the rightmost column also
--- | belongs to something outside the selection to its left, which in a
--- | music library means a compilation filed under two artists.
-trackCombos :: State -> Array String
-trackCombos st = case dims of
-  [] -> []
-  _ -> if Array.length exact <= maxTrackQueries then exact else fallback
-  where
-  dims =
-    Array.filter (not <<< Array.null)
-      [ if st.genreColumn then terms AxGenre else []
-      , terms AxArtist
-      , terms AxAlbum
-      ]
-  terms axis = map (\v -> tagOf axis <> " " <> quoteArg v) (selectedIn axis st)
-
-  exact = productOf dims
-
-  fallback =
-    Array.take maxTrackQueries
-      (map (\t -> if prefix == "" then t else prefix <> " " <> t) rightmost)
-    where
-    rightmost = fromMaybe [] (Array.last dims)
-    prefix =
-      joinWith " "
-        ( Array.concat
-            (map (\d -> if Array.length d == 1 then d else []) (fromMaybe [] (Array.init dims)))
-        )
-
--- | Which query a row of the whole result falls in, how far into that
--- | query it is, and how many of its rows are left. Queries that match
--- | nothing are stepped over, so a combination that happens to be empty
--- | does not stall the list.
-queryAt :: Int -> Array TrackQuery -> Maybe { index :: Int, offset :: Int, left :: Int }
-queryAt row qs = go 0 row
-  where
-  go i n = case Array.index qs i of
-    Nothing -> Nothing
-    Just q
-      | n < q.count -> Just { index: i, offset: n, left: q.count - n }
-      | otherwise -> go (i + 1) (n - q.count)
-
--- | How many tracks the whole selection matches: the per-query counts,
--- | added up.
-totalOf :: Array TrackQuery -> Int
-totalOf = sum <<< map _.count
-
--- | Whether the queries have been reduced, so the list can say that the
--- | selection was too wide to answer exactly.
-combosReduced :: State -> Boolean
-combosReduced st = Array.length (trackCombos st) >= maxTrackQueries
-
--- | What the track list is of, said in words. One value is named; more
--- | than one is counted, because three dozen artist names is not a
--- | heading.
-trackScope :: State -> String
-trackScope st = case parts of
-  [] -> "The whole library"
-  _ -> joinWith ", " parts
-  where
-  parts = Array.mapMaybe describe (Array.filter shown axisOrder)
-  shown a = a /= AxGenre || st.genreColumn
-  describe a = case selectedIn a st of
-    [] -> Nothing
-    [ v ] -> Just v
-    vs -> Just (show (Array.length vs) <> " " <> plural a)
-  plural = case _ of
-    AxGenre -> "genres"
-    AxArtist -> "artists"
-    AxAlbum -> "albums"
-
--- | Local copy of Mpd.quote, which Types cannot import without a cycle.
-quoteArg :: String -> String
-quoteArg v = "\"" <> replaceAll (Pattern "\"") (Replacement "\\\"") (replaceAll (Pattern "\\") (Replacement "\\\\") v) <> "\""
-
-waitingForTracks :: State -> Boolean
-waitingForTracks st = st.tracksPending
-
--- | The column a choice is being made in: the first in the chain with
--- | nothing selected yet, or the album column once everything is chosen.
--- |
--- | Side by side this changes nothing, because every column is on screen.
--- | Stacked on a phone it is the whole navigation model: only this column
--- | is drawn, and the choices already made appear above it as chips that
--- | go back (index.html decides which of the two applies, by width).
-activeAxis :: State -> Axis
-activeAxis st =
-  if st.genreColumn && Array.null st.selGenre then AxGenre
-  else if Array.null st.selArtist then AxArtist
-  else AxAlbum
-
--- | The values between two entries of a column, in the column's own
--- | order, which is what a shift click means.
-spanBetween :: String -> String -> Array String -> Array String
-spanBetween a b values = case Array.elemIndex a values, Array.elemIndex b values of
-  Just i, Just j -> Array.slice (min i j) (max i j + 1) values
-  _, _ -> [ b ]
-
--- | The MPD tag name for a column.
-tagOf :: Axis -> String
-tagOf = case _ of
-  AxGenre -> "genre"
-  AxArtist -> "artist"
-  AxAlbum -> "album"
-
-axisLabel :: Axis -> String
-axisLabel = case _ of
-  AxGenre -> "Genre"
-  AxArtist -> "Artist"
-  AxAlbum -> "Album"
