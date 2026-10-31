@@ -34,7 +34,7 @@ The wifi passphrase is a secret, and a secret needs a host key that does not exi
 
 I made massive changes to this to iterate on the complex task of an every day-use audio interafwce. There are a lot of non-obviouys properties of such a module that I had to arrive at through experimentation.  I have lots of ambition here and will continue to iterate.
 
-Here are some screenshots:
+Current screenshots:
 
 ![screen1](imgs/2026-10-30_21-41.png)
 ![screen2](imgs/2026-10-30_21-44.png)

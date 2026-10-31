@@ -69,6 +69,11 @@ type TrackQuery = { terms :: String, count :: Int }
 -- | The track list. Only one contiguous run of rows is held, starting
 -- | at `from`: scrolling on extends it, and a jump that lands outside
 -- | it starts a new run there.
+-- |
+-- | `picked` is what the user has selected in the list, by URI rather
+-- | than by row, so a selection survives scrolling away and back and
+-- | the rows being refetched. `anchor` is the row a shift click extends
+-- | from.
 type Tracks =
   { rows :: Array Song
   , from :: Int
@@ -76,6 +81,8 @@ type Tracks =
   , queries :: Array TrackQuery
   , gen :: Int
   , vp :: Viewport
+  , picked :: Array String
+  , anchor :: Maybe Int
   }
 
 -- | The whole browser. `genreColumn` says whether the chain starts at
@@ -117,6 +124,8 @@ emptyTracks height =
   , queries: []
   , gen: 0
   , vp: { top: 0.0, height }
+  , picked: []
+  , anchor: Nothing
   }
 
 emptyBrowser :: Number -> Browser
@@ -427,3 +436,34 @@ tracksTotal t = sum (map _.count t.queries)
 -- | The row the held run ends at, exclusive.
 heldTo :: Tracks -> Int
 heldTo t = t.from + Array.length t.rows
+
+-- | The track drawn at one row of the whole result, when that row is in
+-- | the run being held.
+trackAt :: Tracks -> Int -> Maybe Song
+trackAt t row = Array.index t.rows (row - t.from)
+
+isPicked :: Tracks -> Song -> Boolean
+isPicked t s = Array.elem s.file t.picked
+
+-- | What a click on a track row selects.
+-- |
+-- | Plain picks that one row, the platform's modifier adds or removes
+-- | it, and shift takes the run between the anchor and this row. A shift
+-- | range covers the rows actually held: the user had to scroll past
+-- | both ends to click them, so in practice that is the whole range, and
+-- | a row the page has never seen is one it has no URI for.
+pickedBy :: Tracks -> Int -> Boolean -> Boolean -> Array String
+pickedBy t row shift extend = case trackAt t row of
+  Nothing -> t.picked
+  Just s
+    | shift -> rangeFrom (fromMaybe row t.anchor) row
+    | extend -> toggled s.file t.picked
+    | otherwise -> [ s.file ]
+  where
+  rangeFrom a b =
+    Array.nub (Array.mapMaybe (map _.file <<< trackAt t) (Array.range (min a b) (max a b)))
+
+-- | How many of the selected tracks are rows of the current result. A
+-- | selection is held by URI, and the same file can be in the list once.
+pickedCount :: Tracks -> Int
+pickedCount t = Array.length t.picked

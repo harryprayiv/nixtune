@@ -49,9 +49,9 @@ import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int (fromString, toNumber)
-import Data.Maybe (Maybe(..), fromMaybe, isNothing, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, isJust, isNothing, maybe)
 import Data.Number as Number
-import Data.String (Pattern(..), joinWith, split, stripSuffix, trim)
+import Data.String (joinWith, trim)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), delay)
@@ -65,7 +65,7 @@ import Halogen.Subscription as HS
 import Halogen.VDom.Driver (runUI)
 import Mpd (PlayState(..))
 import Mpd as Mpd
-import Net (browse, connect, connectVolume, linkOf, modifyLink, refreshAll, send, setLink)
+import Net (browse, connect, connectVolume, linkOf, liveLink, modifyLink, pushLine, refreshAll, send, setLink, takeBlock, takeLines)
 import Nick (nicknameFor, roleFromPath)
 import Page (render)
 import Reorder (dragTarget, rowMiddles)
@@ -138,25 +138,32 @@ handle = case _ of
         _ <- liftEffect (setInterval 1000 (HS.notify listener Tick))
         void (H.subscribe emitter)
         void (H.subscribe (HQE.eventListener (EventType "resize") (Window.toEventTarget win) (const (Just Measure))))
-  Opened _ -> pure unit
-  Closed conn -> do
-    setLink conn Nothing
-    when (conn == Lib) Tags.dropPending
-    H.modify_ _ { error = Just "The player went away. Reconnecting." }
-    H.liftAff (delay (Milliseconds 2000.0))
-    connect conn
-  Chunk conn raw -> do
+  Opened _ _ -> pure unit
+  -- Only the socket the connection is actually using closing means the
+  -- player went away. A socket dropped on purpose to cancel stale work
+  -- closes too, moments after its replacement is live, and that is not
+  -- an outage and must not take the new socket down with it.
+  Closed conn serial -> do
     st <- H.get
-    let
-      text = maybe "" _.partial (linkOf conn st) <> raw
-      pieces = split (Pattern "\n") text
-      complete = fromMaybe [] (Array.init pieces)
-      rest = fromMaybe "" (Array.last pieces)
-    modifyLink conn _ { partial = rest }
-    for_ complete \l -> do
-      let
-        line = fromMaybe l (stripSuffix (Pattern "\r") l)
-      unless (line == "") (received conn line)
+    when (isJust (liveLink conn serial st)) do
+      setLink conn Nothing
+      when (conn == Lib) Tags.dropPending
+      H.modify_ _ { error = Just "The player went away. Reconnecting." }
+      H.liftAff (delay (Milliseconds 2000.0))
+      connect conn
+  -- One message off the wire. Everything here that is not the end of a
+  -- reply happens in Refs, through liftEffect, and touches no component
+  -- state: Halogen renders the whole page on every state update, and a
+  -- ten thousand line reply collected through the state rendered the
+  -- page ten thousand times, which is what made opening the Library take
+  -- most of a minute against a player that answered in under a second.
+  Chunk conn serial raw -> do
+    st <- H.get
+    for_ (liveLink conn serial st) \k -> do
+      lines <- liftEffect (takeLines k raw)
+      for_ lines \line ->
+        if Mpd.isGreeting line || Mpd.isEnd line then finished conn line
+        else liftEffect (pushLine k line)
   Tick -> do
     before <- H.get
     let
@@ -333,6 +340,8 @@ handle = case _ of
   Choose axis v ev -> Tags.choose axis v ev
   ClearColumn axis -> Tags.clearColumn axis
   JumpTo axis l -> Tags.jumpTo axis l
+  ChooseTrack row ev -> Tags.chooseTrack row ev
+  ClearTracks -> Tags.clearPicked
   Scrolled axis ev -> Tags.scrolled axis ev
   ScrolledTracks ev -> Tags.scrolledTracks ev
   AddFilter -> Tags.filterCommand false
@@ -406,9 +415,10 @@ showTags = do
   when (null st.browser.artist.values && st.browser.artist.pending == 0) Tags.reload
   Tags.sync
 
--- | One complete line from MPD on one connection.
-received :: forall o m. MonadAff m => Conn -> String -> M o m Unit
-received conn l
+-- | A greeting, or the line that ends a reply. These are the only two
+-- | lines off the wire that change anything the page draws.
+finished :: forall o m. MonadAff m => Conn -> String -> M o m Unit
+finished conn l
   | Mpd.isGreeting l = do
       modifyLink conn _ { ready = true }
       H.modify_ _ { error = Nothing }
@@ -419,19 +429,20 @@ received conn l
         Cmd -> refreshAll
         Idle -> send Idle RFire idleCommand
         -- The library connection asks for nothing until a view wants
-        -- something from it. A reconnection while the library is open
-        -- asks for everything again, because whatever was outstanding
-        -- went down with the old socket.
-        Lib -> do
+        -- something from it, and a socket opened to cancel stale work
+        -- already carries what the click asked for in `queued`. Only a
+        -- connection that came back with nothing waiting on it has to
+        -- ask again.
+        Lib -> when (Array.null held) do
           st <- H.get
           when (st.view == Library && isNothing st.searched) $ case st.mode of
             Folders -> browse st.path
             Tags -> Tags.reload
-  | Mpd.isEnd l = do
+  | otherwise = do
       st <- H.get
-      let
-        block = maybe [] _.lines (linkOf conn st)
-      modifyLink conn _ { lines = [] }
+      block <- case linkOf conn st of
+        Just k -> liftEffect (takeBlock k)
+        Nothing -> pure []
       case conn of
         Idle -> do
           changed block
@@ -444,7 +455,6 @@ received conn l
             -- the normal state of a track nobody attributed.
             when (Mpd.isError l && not (isSticker req)) (H.modify_ _ { error = Just l })
             unless (Mpd.isError l) (reply req block)
-  | otherwise = modifyLink conn \k -> k { lines = snoc k.lines l }
 
 -- | The idle connection's reply: which subsystems changed.
 changed :: forall o m. MonadAff m => Array String -> M o m Unit
@@ -512,5 +522,5 @@ reply req block = case req of
   RVetoes -> H.modify_ _ { vetoes = Mpd.parseStickers block }
   RTagValues axis gen -> Tags.tagValues axis gen block
   RTrackCount gen i -> Tags.trackCount gen i block
-  RTracks gen from -> Tags.tracks gen from block
+  RTracks w -> Tags.tracks w block
   RFire -> pure unit

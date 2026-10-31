@@ -14,6 +14,7 @@ import Data.Maybe (Maybe(..), isJust, maybe)
 import Data.Foldable (lookup)
 import Data.String (Pattern(..), indexOf, split, trim)
 import Data.Tuple (Tuple)
+import Effect.Ref (Ref)
 import Halogen as H
 import Mpd (Entry, Song, Status)
 import Mpd as Mpd
@@ -72,18 +73,26 @@ data Req
   -- commands, so several replies build one column and each has to be
   -- recognisable as belonging to the request that is still current.
   | RTagValues Axis Int
-  -- A window of the track list: the generation, and the row the window
-  -- starts at in the whole result.
-  | RTracks Int Int
+  -- A window of the track list. Which query it went to is recorded here
+  -- rather than worked out again when the reply lands: by then the
+  -- counts may have moved, and a count of zero on an earlier query makes
+  -- the same row number name a different query than it did when the
+  -- request went out.
+  --
+  --   gen     the selection it belongs to
+  --   from    the row it starts at in the whole result
+  --   query   which of the selection's queries was asked
+  --   offset  how far into that query the window started
+  --   want    how many rows were asked for, so a short reply is visible
+  | RTracks { gen :: Int, from :: Int, query :: Int, offset :: Int, want :: Int }
   -- How many tracks one of the track queries matches: the generation,
   -- and which query it is.
   | RTrackCount Int Int
   | RFire
 
--- | One connection: its socket, whether MPD has greeted on it, the lines
--- | of the reply being collected, and the unfinished tail of the last
--- | message. websocat frames messages by TCP read, not by line, so one
--- | message may hold a whole reply or end in the middle of a line.
+-- | One connection: its socket, whether MPD has greeted on it, and two
+-- | buffers.
+-- |
 -- | `asked` is this connection's own queue of outstanding requests, in
 -- | the order they were sent, so a reply is read against the right one.
 -- | `queued` is what was asked for before MPD had greeted on this
@@ -91,13 +100,28 @@ data Req
 -- | greet, so a request made in the reply to one of them can arrive
 -- | before another is ready; without this it was dropped silently, and
 -- | the column it was for simply never loaded.
+-- |
+-- | `partial` is the unfinished tail of the last message, because websocat
+-- | frames by TCP read and not by line, and `block` is the reply being
+-- | collected. Both are Refs rather than fields of this record, and Net
+-- | says at length why: Halogen renders the page on every state update,
+-- | and a reply of ten thousand lines collected through the state is ten
+-- | thousand renders of the whole page.
+-- |
+-- | `serial` is which socket this is. A socket the page drops on purpose
+-- | to cancel stale work goes on firing its close and message events
+-- | after its replacement is live; every event carries the serial of the
+-- | socket it came from, and one from a socket that is no longer the
+-- | connection is ignored rather than mistaken for the player going
+-- | away.
 type Link =
   { socket :: WebSocket
+  , serial :: Int
   , ready :: Boolean
-  , lines :: Array String
-  , partial :: String
   , asked :: Array Req
   , queued :: Array { req :: Req, line :: String }
+  , partial :: Ref String
+  , block :: Ref String
   }
 
 -- | A queue row being dragged.
@@ -130,6 +154,8 @@ type State =
   , cmd :: Maybe Link
   , idle :: Maybe Link
   , lib :: Maybe Link
+  -- How many sockets have been opened, which names the next one.
+  , sockets :: Int
   , status :: Status
   , current :: Maybe Song
   , queue :: Array Song
@@ -191,6 +217,7 @@ initial =
   , cmd: Nothing
   , idle: Nothing
   , lib: Nothing
+  , sockets: 0
   , status: Mpd.emptyStatus
   , current: Nothing
   , queue: []
@@ -219,9 +246,9 @@ initial =
 
 data Action
   = Init
-  | Opened Conn
-  | Closed Conn
-  | Chunk Conn String
+  | Opened Conn Int
+  | Closed Conn Int
+  | Chunk Conn Int String
   | Tick
   | Open View
   | Command String
@@ -250,6 +277,10 @@ data Action
   -- The All row, or a chip on a phone: clear one column's selection.
   | ClearColumn Axis
   | JumpTo Axis String
+  -- A click on a track row: plain picks one, the platform's modifier
+  -- adds or removes one, shift extends from the last row picked.
+  | ChooseTrack Int MouseEvent
+  | ClearTracks
   | Scrolled Axis Event
   | ScrolledTracks Event
   -- The window changed size, or a view with lists in it was opened:

@@ -11,6 +11,7 @@ import Browse
   , Browser
   , Column
   , Tracks
+  , activeAxis
   , cleared
   , columnOf
   , firstUnder
@@ -20,6 +21,7 @@ import Browse
   , listLabel
   , modifyColumn
   , orElse
+  , pickedBy
   , queryAt
   , rightOf
   , rowHeight
@@ -48,7 +50,7 @@ import Effect.Aff.Class (class MonadAff)
 import Effect.Class (liftEffect)
 import Halogen as H
 import Mpd as Mpd
-import Net (send)
+import Net (busy, reopen, send)
 import Types (Conn(..), M, Req(..), View(..), colRef, tracksRef)
 import Web.DOM.Element as Element
 import Web.Event.Event (Event, target)
@@ -110,11 +112,32 @@ clearColumn axis = do
     modifyCol axis _ { selected = [], anchor = Nothing }
     narrow axis
 
+-- | Drop whatever the library connection is still working on.
+-- |
+-- | MPD answers one command at a time per connection, in the order they
+-- | arrived, and nothing cancels a command it has started. The three
+-- | whole-library listings the browser opens with take seconds on a
+-- | library this size, so a click that lands while they are in flight
+-- | waits for all of them before the player so much as reads it. Closing
+-- | the socket throws that work away; what the click asks for goes out
+-- | on a connection with nothing in front of it, and `send` holds those
+-- | requests until the new socket has greeted.
+cancelLibrary :: forall o m. MonadAff m => M o m Unit
+cancelLibrary = do
+  st <- H.get
+  when (busy Lib st) do
+    dropPending
+    reopen Lib
+
 -- | Reload everything one column's selection narrows: the columns to its
 -- | right, which go back to All first, and the track list. Every column
 -- | to the right is cleared before any of them is asked for, because
 -- | what a column is asked for depends on the selection in every column
 -- | to its left.
+-- |
+-- | Whatever the library connection was doing is thrown away first. It
+-- | was answering a question about the selection that has just been
+-- | replaced.
 narrow :: forall o m. MonadAff m => Axis -> M o m Unit
 narrow axis = do
   br <- getBrowser
@@ -123,8 +146,12 @@ narrow axis = do
   for_ right \a -> do
     modifyCol a cleared
     scrollColumn a 0.0
-  for_ right loadColumn
+  cancelLibrary
+  -- The list under the columns first: it is what the click was about,
+  -- and the columns to the right are a smaller question that can wait
+  -- the few milliseconds behind it.
   loadTracks
+  for_ right loadColumn
   -- On a phone the column on screen may just have changed, and a column
   -- that was hidden has no measured height.
   measure
@@ -159,10 +186,22 @@ toggleGenreColumn = do
 -- | Load every column on screen and the list under them, for whatever is
 -- | selected now. A column keeps showing what it has until its new list
 -- | is complete; the track list starts over.
+-- |
+-- | The order is the order they are wanted in, because the player works
+-- | through one connection in the order it was asked. The column the
+-- | next click will land in goes first; the track list, which with no
+-- | selection is the whole library and the most expensive thing here,
+-- | goes last. Before this the album column and the whole-library
+-- | listing were queued ahead of the artist list and a click sat behind
+-- | both of them.
 reload :: forall o m. MonadAff m => M o m Unit
 reload = do
   br <- getBrowser
-  for_ (shownAxes br) loadColumn
+  let
+    first = activeAxis br
+    rest = Array.filter (_ /= first) (shownAxes br)
+  loadColumn first
+  for_ rest loadColumn
   loadTracks
 
 -- | Bring the columns and the counts up to date without moving anything,
@@ -369,6 +408,9 @@ loadTracks = do
     , gen = gen
     , queries = queries
     , vp = t.vp { top = 0.0 }
+    -- The selection belonged to the list that has just been replaced.
+    , picked = []
+    , anchor = Nothing
     }
   el <- H.getRef tracksRef
   for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
@@ -423,8 +465,11 @@ trackPageFrom from = do
       else if from == 0 then Just { index: 0, offset: 0, left: trackPage }
       else Nothing
   unless t.pending $ for_ spot \at -> for_ (Array.index t.queries at.index) \q -> do
+    let
+      want = min trackPage at.left
     modifyTracks _ { pending = true }
-    send Lib (RTracks t.gen from) (listing q.terms at.offset (at.offset + min trackPage at.left))
+    send Lib (RTracks { gen: t.gen, from, query: at.index, offset: at.offset, want })
+      (listing q.terms at.offset (at.offset + want))
   where
   -- An empty needle matches every song, which is the only way MPD will
   -- list the whole library through a filter.
@@ -455,41 +500,73 @@ trackCount gen i block = do
 -- | any more.
 -- |
 -- | A page shorter than it was asked for says where its query really
--- | ends, and the count is corrected to match. `find` is the truth and
--- | `count` was the estimate; without this a count that overstates by
--- | one row would have the list asking for that row forever.
-tracks :: forall o m. MonadAff m => Int -> Int -> Array String -> M o m Unit
-tracks gen from block = do
+-- | ends, and that query's count is corrected to match: `find` is the
+-- | truth and `count` was the estimate, and without this a count that
+-- | overstates by a row would have the list asking for that row for
+-- | ever. WHICH query is corrected comes from the request, never from
+-- | the row number: a query that turns out to match nothing changes what
+-- | row maps to what query, so recomputing it here corrected a query the
+-- | reply was not about and set its count to zero.
+tracks :: forall o m. MonadAff m => { gen :: Int, from :: Int, query :: Int, offset :: Int, want :: Int } -> Array String -> M o m Unit
+tracks w block = do
   t <- getTracks
   let
     page = Mpd.parseSongs block
     got = Array.length page
-    at = queryAt from t.queries `orElse` (if from == 0 then Just { index: 0, offset: 0, left: trackPage } else Nothing)
-    corrected = fromMaybe t.queries do
-      a <- at
-      let
-        asked = min trackPage a.left
-        real = a.offset + got
-      Array.modifyAt a.index (\q -> q { count = if got < asked then real else max q.count real }) t.queries
-  when (gen == t.gen) do
+    reached = w.offset + got
+    fix q = q { count = if got < w.want then reached else max q.count reached }
+    corrected = fromMaybe t.queries (Array.modifyAt w.query fix t.queries)
+  when (w.gen == t.gen) do
     modifyTracks \u -> u
       { pending = false
-      , rows = if from == heldTo u then u.rows <> page else u.rows
+      , rows = if w.from == heldTo u then u.rows <> page else u.rows
       , queries = corrected
       }
     fetchAround
 
--- | Queue everything the columns narrow to, which is what the selection
--- | means. One `findadd` per query, so four artists with thirty albums
--- | between them is four commands and not nine hundred.
+-- | A click on a track row. Plain picks that row, the platform's
+-- | modifier adds or removes it, shift takes the run from the last row
+-- | picked. The row's own plus still queues it on its own: this is for
+-- | gathering a handful of tracks and queueing them together.
+chooseTrack :: forall o m. MonadAff m => Int -> MouseEvent -> M o m Unit
+chooseTrack row ev = modifyTracks \t -> t
+  { picked = pickedBy t row (MouseEvent.shiftKey ev) (MouseEvent.ctrlKey ev || MouseEvent.metaKey ev)
+  , anchor = if MouseEvent.shiftKey ev then t.anchor `orElse` Just row else Just row
+  }
+
+clearPicked :: forall o m. M o m Unit
+clearPicked = modifyTracks _ { picked = [], anchor = Nothing }
+
+-- | Queue what the buttons above the list act on: the tracks picked in
+-- | the list when any are, and otherwise everything the columns narrow
+-- | to.
+-- |
+-- | A selection is one `add` per track, in the order they are listed. A
+-- | whole filter is one `findadd` per query, so four artists with thirty
+-- | albums between them is four commands and not nine hundred.
 filterCommand :: forall o m. MonadAff m => Boolean -> M o m Unit
 filterCommand play = do
   br <- getBrowser
-  case trackCombos br of
-    [] -> pure unit
-    cs -> do
-      when play (send Cmd RFire "clear")
+  let
+    picked = inListOrder br.tracks
+  case picked, trackCombos br of
+    [], [] -> pure unit
+    [], cs -> do
+      start play
       for_ cs \c -> send Cmd RFire ("findadd " <> c)
-      when play do
-        send Cmd RFire "play"
-        H.modify_ _ { view = NowPlaying }
+      finish play
+    uris, _ -> do
+      start play
+      for_ uris \u -> send Cmd RFire ("add " <> Mpd.quote u)
+      finish play
+  where
+  start p = when p (send Cmd RFire "clear")
+  finish p = when p do
+    send Cmd RFire "play"
+    H.modify_ _ { view = NowPlaying }
+
+-- | The picked tracks in the order the list shows them, so a queue built
+-- | by selecting an album's second, fourth and fifth tracks arrives in
+-- | that order rather than in the order they were clicked.
+inListOrder :: Tracks -> Array String
+inListOrder t = Array.filter (\u -> Array.elem u t.picked) (map _.file t.rows)

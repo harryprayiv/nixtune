@@ -14,9 +14,11 @@ import Browse
   , columnOf
   , heldTo
   , initialOf
+  , isPicked
   , letterRailThreshold
   , lettersPresent
   , pluralOf
+  , pickedCount
   , rowAt
   , rowCount
   , rowHeight
@@ -27,6 +29,7 @@ import Browse
   , trackCombos
   , trackHeight
   , trackScope
+  , Tracks
   , tracksTotal
   )
 import Caps (Station)
@@ -469,7 +472,7 @@ entryRow st = case _ of
     else HH.text ""
   File s -> songRow s
 
--- | One track, in a search result, a folder listing or the tag browser.
+-- | One track, in a search result or a folder listing.
 -- |
 -- | Both roles get the same thing: a plus, which appends. There is no
 -- | play button on a track row for either of them. This list is the
@@ -629,6 +632,38 @@ tagColumn st axis =
       ]
       [ HH.text l ]
 
+-- | One track in the tag browser's list, where a row is a thing to pick
+-- | as well as a thing to queue.
+-- |
+-- | The body of the row selects: plain picks it alone, the platform's
+-- | modifier adds or removes it, shift takes the run from the last row
+-- | picked. The plus at the end still queues that one track on its own,
+-- | so the quickest path to a queue is unchanged and the slower path of
+-- | gathering a few tracks and queueing them together now exists beside
+-- | it.
+trackRow :: forall m. Tracks -> Int -> Song -> H.ComponentHTML Action () m
+trackRow t row s =
+  HH.li [ classes ([ "song" ] <> (if on then [ "picked" ] else [])) ]
+    [ HH.button
+        [ cls "grow"
+        , HP.title "Click to select, ctrl or cmd click to add to the selection, shift click for a run"
+        , HE.onClick (ChooseTrack row)
+        ]
+        [ HH.div [ cls "title" ] [ HH.text (Mpd.songTitle s) ]
+        , HH.div [ cls "line" ] [ HH.text (Mpd.songLine s) ]
+        ]
+    , formatBadge s.file
+    , HH.span [ cls "time" ] [ HH.text (if s.duration > 0.0 then Mpd.clock s.duration else "") ]
+    , HH.button
+        [ cls "ghost icon-btn"
+        , HP.title "Add this track to the queue"
+        , HE.onClick \_ -> AddPath s.file
+        ]
+        [ iconSized "sm" "plus" ]
+    ]
+  where
+  on = isPicked t s
+
 -- | The tracks the columns narrow to. With nothing picked that is the
 -- | whole library, so this is a filter and never a gate: the list is
 -- | always there and each column only makes it smaller.
@@ -640,7 +675,8 @@ trackList :: forall m. State -> Array (H.ComponentHTML Action () m)
 trackList st =
   [ HH.div [ cls "row-actions trackhead" ]
       ( [ HH.span [ cls "crumb-static" ] [ HH.text (trackScope br) ]
-        , HH.span [ cls "count" ] [ HH.text (show total <> " songs") ]
+        , HH.span [ cls "count" ]
+            [ HH.text (if picked > 0 then show picked <> " of " <> show total <> " selected" else show total <> " songs") ]
         , HH.div [ cls "grow-space" ] []
         ]
           <> bulk
@@ -656,20 +692,31 @@ trackList st =
   br = st.browser
   t = br.tracks
   total = tracksTotal t
-  -- Add and Play act on the whole filter rather than on the rows that
-  -- happen to be loaded, so queueing four artists does not stop at two
-  -- hundred tracks. With nothing selected there is no filter and the
-  -- buttons would mean "the entire library", which nobody wants by
-  -- accident, so they are not offered.
-  bulk =
-    if total == 0 || Array.null (trackCombos br) then []
-    else
-      [ HH.button [ HE.onClick \_ -> AddFilter ] [ HH.text "Add these" ] ]
-        <>
-          ( if st.role == Host then
-              [ HH.button [ cls "primary", HE.onClick \_ -> PlayFilter ] [ HH.text "Play these" ] ]
-            else []
-          )
+  -- With rows picked the buttons act on exactly those. With none they
+  -- act on the whole filter rather than on the rows that happen to be
+  -- loaded, so queueing four artists does not stop at two hundred
+  -- tracks. With nothing picked and no filter they would mean "the
+  -- entire library", which nobody wants by accident, so they are not
+  -- offered at all.
+  picked = pickedCount t
+  bulk
+    | picked > 0 =
+        [ HH.button [ cls "ghost", HP.title "Clear the selection", HE.onClick \_ -> ClearTracks ] [ HH.text "Clear" ]
+        , HH.button [ HE.onClick \_ -> AddFilter ] [ HH.text ("Add " <> show picked) ]
+        ]
+          <>
+            ( if st.role == Host then
+                [ HH.button [ cls "primary", HE.onClick \_ -> PlayFilter ] [ HH.text ("Play " <> show picked) ] ]
+              else []
+            )
+    | total == 0 || Array.null (trackCombos br) = []
+    | otherwise =
+        [ HH.button [ HE.onClick \_ -> AddFilter ] [ HH.text "Add these" ] ]
+          <>
+            ( if st.role == Host then
+                [ HH.button [ cls "primary", HE.onClick \_ -> PlayFilter ] [ HH.text "Play these" ] ]
+              else []
+            )
 
   -- The window of rows to draw, in the whole result's numbering, cut
   -- down to the run actually held. Anything outside it is spacing, so
@@ -690,7 +737,7 @@ trackList st =
         [ HH.li [ cls "val empty" ] [ HH.text "Nothing matches." ] ]
     | otherwise =
         [ spacer drawnFrom ]
-          <> map songRow shown
+          <> Array.mapWithIndex (\i -> trackRow t (drawnFrom + i)) shown
           -- The gap below stands in for everything past what has been
           -- fetched as well as for what is simply not drawn, so the
           -- scrollbar is the real length of the result from the start.

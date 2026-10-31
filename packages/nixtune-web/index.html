@@ -56,14 +56,15 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--
    own. That is what lets the tag browser take the height that is really
    there instead of a height worked out from the chrome above it. dvh
    follows a phone's address bar; vh is the fallback. */
-main { height: 100vh; height: 100dvh; display: flex; flex-direction: column; max-width: 44rem; margin: 0 auto; }
-/* 44rem is a reading width, which is right for now playing and a queue
-   and wrong for three columns of a library. The page widens in steps
-   once the window has room, so the columns get the window instead of
-   being squeezed into a column of text. */
-@media (min-width: 62rem) { main { max-width: 58rem; } }
-@media (min-width: 80rem) { main { max-width: 74rem; } }
-@media (min-width: 104rem) { main { max-width: 92rem; } }
+main { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+/* The page is the window, edge to edge. Views that are a block of text
+   rather than a grid of lists cap their own width and centre it, because
+   a title and an artist name stretched across a wide display is not
+   easier to read; the library does not, because three columns and a
+   track list can use every pixel there is. */
+.page > .now, .page > .modes, .page > .list, .page > .crumbs, .page > .row-actions, .page > .scan, .page > .empty, .page > .note, .page > .qr {
+  width: 100%; max-width: 60rem; margin-left: auto; margin-right: auto;
+}
 
 button, input {
   font: inherit; color: var(--fg); background: var(--raised);
@@ -77,7 +78,7 @@ button.ghost { background: transparent; color: var(--muted); border-color: trans
 button:disabled { opacity: .45; cursor: default; }
 
 /* Top bar: name, connection, which renderers exist. */
-.top { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: .7rem 1rem; display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.top { flex: none; background: var(--panel); border-bottom: 1px solid var(--line); padding: .5rem 1rem; display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
 .brand { display: flex; align-items: center; gap: .5rem; font: 600 1.05rem var(--mono); margin-right: auto; }
 .brand .host { color: var(--muted); font-weight: 400; font-size: .85rem; }
 .dot { width: .6rem; height: .6rem; border-radius: 50%; background: var(--error); display: inline-block; }
@@ -86,11 +87,11 @@ button:disabled { opacity: .45; cursor: default; }
 .badge { font: .72rem var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: .1rem .55rem; }
 
 /* Tabs. */
-.tabs { display: flex; gap: .3rem; padding: .6rem 1rem 0; overflow-x: auto; }
+.tabs { display: flex; gap: .3rem; padding: .45rem 1rem 0; overflow-x: auto; flex: none; }
 .tab { background: transparent; border-color: transparent; color: var(--muted); white-space: nowrap; }
 .tab.current { color: var(--fg); border-color: var(--line); background: var(--raised); }
 
-.page { flex: 1; min-height: 0; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 1rem; }
+.page { flex: 1; min-height: 0; overflow-y: auto; padding: .75rem 1rem 1rem; display: flex; flex-direction: column; gap: .75rem; }
 .empty { color: var(--muted); text-align: center; margin: 3rem auto; max-width: 24rem; display: flex; align-items: center; justify-content: center; gap: .45rem; }
 .note { color: var(--muted); font-size: .9rem; margin: 0; }
 
@@ -159,7 +160,7 @@ button:disabled { opacity: .45; cursor: default; }
    The crowding budget is in the media query at the end of this block:
    under 30rem the typed field and the steppers are not rendered, and
    everything else stays. */
-.playerbar { position: sticky; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .5rem .75rem calc(.5rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: .5rem; }
+.playerbar { flex: none; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .5rem .75rem calc(.5rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: .5rem; }
 .playerbar .transport { flex: none; display: flex; align-items: center; gap: .25rem; }
 .playerbar .tr { width: 2.6rem; height: 2.9rem; padding: 0; border-radius: 10px; background: transparent; border-color: transparent; display: flex; align-items: center; justify-content: center; }
 .playerbar .tr:hover:not(:disabled) { background: var(--raised); border-color: var(--line); }
@@ -293,7 +294,7 @@ button:disabled { opacity: .45; cursor: default; }
 /* The search row and the mode switch: stacked on a phone, one line
    where the width allows, so the columns under them get the height. */
 .libtop { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; }
-.libtop .search { flex: 1 1 18rem; }
+.libtop .search { flex: 1 1 18rem; max-width: 34rem; }
 .modeswitch { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; flex: 1 1 auto; }
 .seg { display: flex; background: var(--raised); border: 1px solid var(--line); border-radius: 9px; padding: 2px; gap: 2px; }
 .segbtn { background: transparent; border-color: transparent; padding: .35rem .75rem; border-radius: 7px; color: var(--muted); }
@@ -363,6 +364,12 @@ button:disabled { opacity: .45; cursor: default; }
 .tracks .title, .tracks .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tracks .spacer { display: block; flex: none; background: none; border: 0; padding: 0; }
 .tracks li.val.empty { border: 0; background: transparent; }
+/* A picked row. The same colour the columns use for a chosen value, so
+   "this is selected" reads the same everywhere on the page. */
+.tracks li.song.picked { background: color-mix(in srgb, var(--accent) 18%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.tracks li.song.picked .title { font-weight: 600; }
+.tracks li.song .grow { cursor: default; }
+.tracks.list { user-select: none; -webkit-user-select: none; }
 .row-actions .count { font: .72rem var(--mono); color: var(--muted); }
 
 .val.on .grow { color: var(--fg); font-weight: 600; }
@@ -387,13 +394,15 @@ button:disabled { opacity: .45; cursor: default; }
   .col { flex: 1; }
   /* Side by side the browser takes the height the page has left under
      the search row and the mode switch, and the columns and the list
-     divide that between them: 55 per cent to the columns and 45 to the
-     list, with no ceiling on either. A tall display gets more rows
-     rather than more empty card. The floor keeps it usable on a short
+     divide it sixty forty, with no ceiling on either. A tall display
+     gets more rows rather than more empty card. The columns take the
+     larger share: they are where the choosing happens and they hold one
+     line per row, where the list below holds two lines per row and is
+     read a screenful at a time. The floor keeps it usable on a short
      laptop screen; below that the page scrolls. */
   .browser { flex: 1 1 auto; min-height: 22rem; }
-  .columns { flex: 55 1 0; }
-  .tracks { flex: 45 1 0; max-height: none; min-height: 7rem; }
+  .columns { flex: 60 1 0; }
+  .tracks { flex: 40 1 0; max-height: none; min-height: 10rem; }
   .vals { max-height: none; }
   .val .grow { padding: 0 .75rem; }
 }
