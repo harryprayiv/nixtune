@@ -11,7 +11,7 @@ import Data.Array as Array
 import Data.Enum (enumFromTo)
 import Data.Maybe (Maybe(..), isJust, maybe)
 import Data.Foldable (lookup)
-import Data.String (Pattern(..), indexOf, split, toUpper, trim)
+import Data.String (Pattern(..), Replacement(..), indexOf, joinWith, replaceAll, split, toUpper, trim)
 import Data.String.CodeUnits as CodeUnits
 import Data.Tuple (Tuple)
 import Halogen as H
@@ -75,7 +75,8 @@ data Req
   | RStickers
   | RVetoes
   | RTagValues Axis
-  | RTagTracks
+  | RTracks Int
+  | RTrackCount
   | RFire
 
 -- | One connection: its socket, whether MPD has greeted on it, the lines
@@ -184,7 +185,19 @@ type State =
   , genres :: Array String
   , artists :: Array String
   , albums :: Array String
+  -- The tracks the columns narrow to, which is the whole library when
+  -- nothing is picked. Only the pages scrolled to are held: the count
+  -- comes from MPD separately, so the scrollbar is the real length from
+  -- the first paint and the rest arrives as it is reached.
   , tagTracks :: Array Song
+  , tracksTotal :: Int
+  -- Which row the held run starts at. The page keeps one contiguous
+  -- run rather than a sparse map: scrolling on extends it, and a jump
+  -- that lands outside it starts a new run there, so a drag of the
+  -- scrollbar to the far end costs one request and not three hundred.
+  , tracksFrom :: Int
+  , tracksPending :: Boolean
+  , vpTracks :: Viewport
   -- The anchor of each column: the one value that drives the column to
   -- its right. Multi-select never changes it, so the chain stays a
   -- single path no matter how many rows are marked.
@@ -245,6 +258,10 @@ initial =
   , artists: []
   , albums: []
   , tagTracks: []
+  , tracksTotal: 0
+  , tracksFrom: 0
+  , tracksPending: false
+  , vpTracks: emptyViewport
   , selGenre: Nothing
   , selArtist: Nothing
   , selAlbum: Nothing
@@ -288,6 +305,7 @@ data Action
   | AddMarked Axis Boolean
   | JumpTo Axis String
   | Scrolled Axis Event
+  | ScrolledTracks Event
   | Veto String (Maybe Int)
   | AddAlbum
   | PlayAlbum
@@ -484,11 +502,53 @@ waitingFor axis st = Array.any match (maybe [] _.asked st.lib)
     RTagValues a -> a == axis
     _ -> false
 
+-- | How many tracks one request brings back. Small enough that the
+-- | first page is instant on a library of any size, large enough that
+-- | an ordinary scroll does not ask twice a second.
+trackPage :: Int
+trackPage = 200
+
+-- | A track row is two lines, and a fixed height is what lets the list
+-- | be drawn a slice at a time.
+trackHeight :: Number
+trackHeight = 58.0
+
+tracksRef :: H.RefLabel
+tracksRef = H.RefLabel "tracks"
+
+-- | What MPD is asked for, built from whatever the columns have
+-- | narrowed to. Nothing picked is the whole library: `base ""` is the
+-- | root of the music directory, which every track is under.
+trackFilter :: State -> String
+trackFilter st = case terms of
+  [] -> "base \"\""
+  ts -> joinWith " " ts
+  where
+  terms =
+    (if st.genreColumn then term "genre" st.selGenre else [])
+      <> term "artist" st.selArtist
+      <> term "album" st.selAlbum
+  term tag = case _ of
+    Nothing -> []
+    Just v -> [ tag <> " " <> quoteArg v ]
+
+-- | What the track list is of, said in words.
+trackScope :: State -> String
+trackScope st = case st.selAlbum, st.selArtist, st.selGenre of
+  Just alb, _, _ -> alb
+  Nothing, Just a, _ -> "Everything by " <> a
+  Nothing, Nothing, Just g | st.genreColumn -> "Everything filed under " <> g
+  _, _, _ -> "The whole library"
+
+-- | Local copy of Mpd.quote, which Types cannot import without a cycle.
+quoteArg :: String -> String
+quoteArg v = "\"" <> replaceAll (Pattern "\"") (Replacement "\\\"") (replaceAll (Pattern "\\") (Replacement "\\\\") v) <> "\""
+
 waitingForTracks :: State -> Boolean
 waitingForTracks st = Array.any isTracks (maybe [] _.asked st.lib)
   where
   isTracks = case _ of
-    RTagTracks -> true
+    RTracks _ -> true
     _ -> false
 
 -- | The column a choice is being made in: the first in the chain with

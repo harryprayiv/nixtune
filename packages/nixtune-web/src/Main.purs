@@ -45,6 +45,7 @@ import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (for_)
 import Data.Int (fromString, toNumber)
+import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe, isNothing, maybe)
 import Data.Number as Number
 import Data.String (Pattern(..), joinWith, split, stripSuffix, trim)
@@ -83,6 +84,10 @@ import Types
   , View(..)
   , arrived
   , tagOf
+  , trackFilter
+  , trackHeight
+  , trackPage
+  , tracksRef
   , idleCommand
   , initial
   , isSticker
@@ -206,7 +211,9 @@ handle = case _ of
       st <- H.get
       when (isNothing st.searched) $ case st.mode of
         Folders -> browse st.path
-        Tags -> refreshTags
+        -- Already fetched at startup, so opening the tab asks for
+        -- nothing. A database change refreshes it through `changed`.
+        Tags -> when (null st.artists) refreshTags
   Command c -> send Cmd RFire c
   SetVolume raw -> for_ (fromString raw) \v -> do
     top <- H.gets maxVolumeOf
@@ -392,6 +399,7 @@ handle = case _ of
         , tagTracks = []
         }
       loadArtists
+      loadTracks
     AxArtist -> do
       H.modify_ _
         { selArtist = v
@@ -401,9 +409,10 @@ handle = case _ of
         , tagTracks = []
         }
       for_ v \_ -> loadAlbums
+      loadTracks
     AxAlbum -> do
-      H.modify_ _ { selAlbum = v, tagTracks = [] }
-      for_ v \_ -> loadTracks
+      H.modify_ _ { selAlbum = v }
+      loadTracks
   -- The rail scrolls the column to where that letter starts. Nothing is
   -- filtered and nothing is hidden: the scroll position moves, the
   -- scroll event that follows recomputes the slice, and everything
@@ -419,6 +428,30 @@ handle = case _ of
         setViewport axis ((viewportOf axis st) { top = toNumber i * rowHeight })
   -- A scroll is the one thing that happens sixty times a second, so it
   -- writes nothing when the numbers have not moved.
+  -- The track list pages in as it is scrolled. Asking when the drawn
+  -- slice comes within one screen of the end means the next page is
+  -- usually there before the rows that need it are.
+  ScrolledTracks ev -> for_ (target ev >>= Element.fromEventTarget) \el -> do
+    top <- liftEffect (Element.scrollTop el)
+    height <- liftEffect (Element.clientHeight el)
+    st <- H.get
+    when (st.vpTracks.top /= top || st.vpTracks.height /= height) do
+      H.modify_ _ { vpTracks = { top, height } }
+      let
+        loaded = length st.tagTracks
+        want = Int.floor (top / trackHeight)
+        reach = Int.ceil ((top + height * 2.0) / trackHeight)
+        held = st.tracksFrom + loaded
+      unless st.tracksPending do
+        if want < st.tracksFrom || want >= held then do
+          -- Landed outside the run that is held, which a dragged
+          -- scrollbar does. Start a new run on a page boundary at the
+          -- row under the viewport rather than walking there.
+          let
+            base = (want / trackPage) * trackPage
+          H.modify_ _ { tagTracks = [], tracksFrom = base }
+          trackPageFrom base
+        else when (reach >= held && held < st.tracksTotal) (trackPageFrom held)
   Scrolled axis ev -> for_ (target ev >>= Element.fromEventTarget) \el -> do
     top <- liftEffect (Element.scrollTop el)
     height <- liftEffect (Element.clientHeight el)
@@ -520,6 +553,10 @@ refreshTags = do
   st <- H.get
   when st.genreColumn (cachedOrAsk AxGenre ("list " <> tagOf AxGenre))
   loadArtists
+  -- The list under the columns is the whole library until a column
+  -- narrows it, so it is loaded alongside them rather than waiting for
+  -- a choice.
+  loadTracks
 
 -- | Fill the columns that do not depend on a choice, at startup rather
 -- | than on the first Library open.
@@ -564,13 +601,39 @@ loadAlbums = do
   for_ st.selArtist \a ->
     send Lib (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
 
+-- | Start the track list over for whatever the columns now narrow to.
+-- | The count comes separately so the scrollbar is the real length from
+-- | the first paint, and the first page follows it.
 loadTracks :: forall o m. MonadAff m => M o m Unit
 loadTracks = do
+  H.modify_ \st -> st
+    { tagTracks = []
+    , tracksTotal = 0
+    , tracksFrom = 0
+    , tracksPending = false
+    , vpTracks = st.vpTracks { top = 0.0 }
+    }
+  el <- H.getRef tracksRef
+  for_ el \e -> liftEffect (Element.setScrollTop 0.0 e)
   st <- H.get
-  case st.selArtist, st.selAlbum of
-    Just a, Just alb ->
-      send Lib RTagTracks ("find album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
-    _, _ -> pure unit
+  send Lib RTrackCount ("count " <> trackFilter st)
+  trackPageFrom 0
+
+-- | One window of tracks. MPD evaluates the filter and hands back the
+-- | slice, so a scroll into the middle of seventy thousand songs costs
+-- | one request of two hundred rather than the lot.
+trackPageFrom :: forall o m. MonadAff m => Int -> M o m Unit
+trackPageFrom from = do
+  st <- H.get
+  unless st.tracksPending do
+    H.modify_ _ { tracksPending = true }
+    send Lib (RTracks from)
+      ( "find " <> trackFilter st
+          <> " window "
+          <> show from
+          <> ":"
+          <> show (from + trackPage)
+      )
 
 -- | What to send to queue everything under one value of a column. An
 -- | album is qualified by the anchored artist, because album titles
@@ -713,5 +776,18 @@ reply req block = case req of
   RTagValues AxAlbum -> do
     H.modify_ _ { albums = Mpd.parseList "Album" block }
     toTop AxAlbum
-  RTagTracks -> H.modify_ _ { tagTracks = Mpd.parseSongs block }
+  RTrackCount -> H.modify_ _ { tracksTotal = (Mpd.parseCount block) }
+  RTracks from -> do
+    let
+      page = Mpd.parseSongs block
+    H.modify_ \st -> st
+      { tracksPending = false
+      -- A page that is not the next one in line is a reply to a request
+      -- the selection has since moved past, so it is dropped.
+      -- A page that is not the next one in the held run answers a
+      -- request the selection or the scroll has since moved past.
+      , tagTracks =
+          if from == st.tracksFrom + length st.tagTracks then st.tagTracks <> page
+          else st.tagTracks
+      }
   RFire -> pure unit

@@ -21,6 +21,7 @@ module Mpd
   , parseEntries
   , Stats
   , parseStats
+  , parseCount
   , parseList
   , parseSticker
   , parseStickers
@@ -248,6 +249,12 @@ parseSticker ls = case lookup "sticker" (pairs ls) of
     Just i -> Just (String.drop (i + 1) kv)
     Nothing -> Nothing
   Nothing -> Nothing
+
+-- | A `count <filter>` reply: how many songs match, which is what makes
+-- | the track list's scrollbar the real length before the rows for it
+-- | have been fetched.
+parseCount :: Array String -> Int
+parseCount ls = fromMaybe 0 (lookup "songs" (pairs ls) >>= fromString)
 
 -- | A `list <tag> ...` reply: one "<Tag>: value" line per distinct
 -- | value, in MPD's own order. Empty values are dropped, because a file

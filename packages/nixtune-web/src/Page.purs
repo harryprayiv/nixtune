@@ -43,6 +43,9 @@ import Types
   , rowHeight
   , viewportOf
   , searchLimit
+  , trackHeight
+  , trackScope
+  , tracksRef
   , selectionOf
   , valuesOf
   , waitingFor
@@ -630,26 +633,70 @@ tagColumn st axis =
       ]
       [ HH.text l ]
 
+-- | The tracks the columns narrow to. With nothing picked that is the
+-- | whole library, so this is a filter and never a gate: the list is
+-- | always there and each column only makes it smaller.
+-- |
+-- | Only the pages that have been scrolled to are held, and only the
+-- | rows in view are drawn, so seventy thousand songs cost one request
+-- | of two hundred and a screenful of elements.
 albumTracks :: forall m. State -> Array (H.ComponentHTML Action () m)
-albumTracks st = case st.selAlbum of
-  Nothing -> []
-  Just alb ->
-    [ HH.div [ cls "row-actions" ]
-        ( [ HH.span [ cls "crumb-static" ] [ HH.text alb ]
-          , HH.div [ cls "grow-space" ] []
-          , HH.button [ HP.disabled (null st.tagTracks), HE.onClick \_ -> AddAlbum ] [ HH.text "Add album" ]
-          ]
-            <>
-              ( if st.role == Host then
-                  [ HH.button [ cls "primary", HP.disabled (null st.tagTracks), HE.onClick \_ -> PlayAlbum ] [ HH.text "Play album" ] ]
-                else []
-              )
-        )
-    , if waitingForTracks st && null st.tagTracks then
-        HH.p [ cls "empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ]
-      else if null st.tagTracks then HH.p [ cls "empty" ] [ HH.text "No tracks under that album for this artist." ]
-      else HH.ul [ cls "list" ] (map (songRow st) st.tagTracks)
-    ]
+albumTracks st =
+  [ HH.div [ cls "row-actions" ]
+      ( [ HH.span [ cls "crumb-static" ] [ HH.text (trackScope st) ]
+        , HH.span [ cls "count" ] [ HH.text (show st.tracksTotal <> " songs") ]
+        , HH.div [ cls "grow-space" ] []
+        ]
+          <> bulk
+      )
+  , HH.ul
+      [ cls "list tracks"
+      , HP.ref tracksRef
+      , HE.handler (EventType "scroll") ScrolledTracks
+      ]
+      body
+  ]
+  where
+  -- Add and Play act on the whole filter rather than on the rows that
+  -- happen to be loaded, so queueing an artist does not stop at two
+  -- hundred tracks.
+  bulk =
+    if st.tracksTotal == 0 then []
+    else
+      [ HH.button [ HE.onClick \_ -> AddAlbum ] [ HH.text "Add these" ] ]
+        <>
+          ( if st.role == Host then
+              [ HH.button [ cls "primary", HE.onClick \_ -> PlayAlbum ] [ HH.text "Play these" ] ]
+            else []
+          )
+
+  total = st.tracksTotal
+  loaded = length st.tagTracks
+  vp = st.vpTracks
+  -- The window of rows to draw, in the whole result's numbering, cut
+  -- down to the run actually held. Anything outside it is spacing, so
+  -- a scrollbar dragged ahead of the fetch shows empty space of the
+  -- right size rather than the wrong rows.
+  from = max st.tracksFrom (Int.floor (vp.top / trackHeight) - overscan)
+  to = min (st.tracksFrom + loaded) (Int.ceil ((vp.top + vp.height) / trackHeight) + overscan)
+  shown = if to <= from then [] else Array.slice (from - st.tracksFrom) (to - st.tracksFrom) st.tagTracks
+  drawnFrom = if Array.null shown then 0 else from
+  spacer n =
+    if n <= 0 then []
+    else [ HH.li [ cls "spacer", HP.style ("height:" <> show (toNumber n * trackHeight) <> "px") ] [] ]
+
+  body
+    | total == 0 && waitingForTracks st =
+        [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
+    | total == 0 =
+        [ HH.li [ cls "val empty" ] [ HH.text "Nothing matches." ] ]
+    | otherwise =
+        spacer drawnFrom
+          <> map (songRow st) shown
+          -- The gap below stands in for everything past what has been
+          -- fetched as well as for what is simply not drawn, so the
+          -- scrollbar is the real length of the result from the start.
+          <> spacer (total - drawnFrom - length shown)
 
 -- | What the library is doing, said plainly above the listing.
 scanBanner :: forall w i. State -> HH.HTML w i
