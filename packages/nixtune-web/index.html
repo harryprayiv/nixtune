@@ -52,6 +52,13 @@
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--sans); -webkit-tap-highlight-color: transparent; }
 main { min-height: 100%; display: flex; flex-direction: column; max-width: 44rem; margin: 0 auto; }
+/* 44rem is a reading width, which is right for now playing and a queue
+   and wrong for three columns of a library. The page widens in steps
+   once the window has room, so the columns get the window instead of
+   being squeezed into a column of text. */
+@media (min-width: 62rem) { main { max-width: 58rem; } }
+@media (min-width: 80rem) { main { max-width: 74rem; } }
+@media (min-width: 104rem) { main { max-width: 92rem; } }
 
 button, input {
   font: inherit; color: var(--fg); background: var(--raised);
@@ -287,7 +294,9 @@ button:disabled { opacity: .45; cursor: default; }
 .colname { font: 600 .78rem var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 .colhead .count { margin-left: auto; font: .72rem var(--mono); color: var(--muted); }
 .colbody { display: flex; min-height: 0; }
-.vals { list-style: none; margin: 0; padding: .25rem; flex: 1; min-width: 0; overflow-y: auto; max-height: 14rem; overscroll-behavior: contain; }
+/* Stacked on a phone, so each column takes a share of the screen
+   rather than a fixed number of rows. */
+.vals { list-style: none; margin: 0; padding: .25rem; flex: 1; min-width: 0; overflow-y: auto; max-height: clamp(11rem, 34vh, 20rem); overscroll-behavior: contain; }
 .val { display: flex; border-radius: 7px; }
 .val .grow { flex: 1; text-align: left; background: transparent; border-color: transparent; padding: .45rem .5rem; min-width: 0; overflow-wrap: anywhere; }
 .val:hover { background: var(--raised); }
@@ -306,9 +315,15 @@ button:disabled { opacity: .45; cursor: default; }
 .rail button:disabled { opacity: .25; }
 
 @media (min-width: 46rem) {
-  .columns { flex-direction: row; align-items: stretch; }
+  .columns { flex-direction: row; align-items: stretch; gap: .75rem; }
   .col { flex: 1; }
-  .vals { max-height: 20rem; }
+  /* Side by side the columns grow with the window instead of stopping at
+     a fixed height: what is subtracted is the header, the tabs, the
+     search row, the mode switch and the player bar. The floor keeps them
+     usable on a short laptop screen and the ceiling stops a tall display
+     from making one column taller than anybody scans. */
+  .vals { max-height: clamp(16rem, calc(100vh - 24rem), 42rem); }
+  .val .grow { padding: .5rem .6rem; }
 }
 
 /* Attribution, the guest footer, search, the QR tab, the scan badge. */
