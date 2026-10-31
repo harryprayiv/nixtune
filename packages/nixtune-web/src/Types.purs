@@ -365,6 +365,19 @@ selectionOf axis st = case axis of
   AxArtist -> st.selArtist
   AxAlbum -> st.selAlbum
 
+-- | The column a choice is being made in: the first in the chain with
+-- | nothing selected yet, or the album column once everything is chosen.
+-- |
+-- | Side by side this changes nothing, because every column is on screen.
+-- | Stacked on a phone it is the whole navigation model: only this column
+-- | is drawn, and the choices already made appear above it as chips that
+-- | go back (index.html decides which of the two applies, by width).
+activeAxis :: State -> Axis
+activeAxis st =
+  if st.genreColumn && st.selGenre == Nothing then AxGenre
+  else if st.selArtist == Nothing then AxArtist
+  else AxAlbum
+
 -- | The MPD tag name for a column.
 tagOf :: Axis -> String
 tagOf = case _ of

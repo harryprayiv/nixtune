@@ -26,6 +26,7 @@ import Types
   , Role(..)
   , State
   , View(..)
+  , activeAxis
   , alphabet
   , axisLabel
   , isStream
@@ -422,16 +423,36 @@ songRow st s =
 -- | disagree with each other.
 tagBrowser :: forall m. State -> Array (H.ComponentHTML Action () m)
 tagBrowser st =
-  [ HH.div [ cls "columns" ]
+  [ tagCrumbs st
+  , HH.div [ cls "columns" ]
       ( (if st.genreColumn then [ tagColumn st AxGenre ] else [])
           <> [ tagColumn st AxArtist, tagColumn st AxAlbum ]
       )
   ]
     <> albumTracks st
 
+-- | The choices already made, as chips that go back to them. Drawn only
+-- | when the columns are stacked, because side by side the columns show
+-- | their own selections and this would say it twice.
+tagCrumbs :: forall m. State -> H.ComponentHTML Action () m
+tagCrumbs st =
+  if null chips then HH.text ""
+  else HH.div [ cls "tagcrumbs" ] chips
+  where
+  chips =
+    (if st.genreColumn then maybe [] (\g -> [ chip AxGenre g ]) st.selGenre else [])
+      <> maybe [] (\a -> [ chip AxArtist a ]) st.selArtist
+  chip axis v =
+    HH.button
+      [ cls "crumb"
+      , HP.title ("Back to the " <> axisLabel axis <> " list")
+      , HE.onClick \_ -> Pick axis Nothing
+      ]
+      [ HH.text ("‹ " <> v) ]
+
 tagColumn :: forall m. State -> Axis -> H.ComponentHTML Action () m
 tagColumn st axis =
-  HH.div [ cls "col" ]
+  HH.div [ classes ([ "col" ] <> (if activeAxis st == axis then [ "cur" ] else [])) ]
     [ HH.div [ cls "colhead" ]
         [ HH.span [ cls "colname" ] [ HH.text (axisLabel axis) ]
         , HH.span [ cls "count" ] [ HH.text countText ]

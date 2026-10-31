@@ -294,9 +294,15 @@ button:disabled { opacity: .45; cursor: default; }
 .colname { font: 600 .78rem var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 .colhead .count { margin-left: auto; font: .72rem var(--mono); color: var(--muted); }
 .colbody { display: flex; min-height: 0; }
-/* Stacked on a phone, so each column takes a share of the screen
-   rather than a fixed number of rows. */
-.vals { list-style: none; margin: 0; padding: .25rem; flex: 1; min-width: 0; overflow-y: auto; max-height: clamp(11rem, 34vh, 20rem); overscroll-behavior: contain; }
+/* Stacked, which on a phone means ONE column at a time: the one a
+   choice is being made in. Three lists down a portrait screen would put
+   the albums below a scroll of artists and the tracks below that, which
+   is not a way to pick a record. The chips above carry the choices
+   already made and go back to them. */
+.col:not(.cur) { display: none; }
+.tagcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.tagcrumbs .crumb { background: var(--raised); border-color: var(--line); border-radius: 999px; padding: .3rem .7rem; }
+.vals { list-style: none; margin: 0; padding: .25rem; flex: 1; min-width: 0; overflow-y: auto; max-height: clamp(14rem, calc(100vh - 22rem), 40rem); overscroll-behavior: contain; }
 .val { display: flex; border-radius: 7px; }
 .val .grow { flex: 1; text-align: left; background: transparent; border-color: transparent; padding: .45rem .5rem; min-width: 0; overflow-wrap: anywhere; }
 .val:hover { background: var(--raised); }
@@ -314,8 +320,12 @@ button:disabled { opacity: .45; cursor: default; }
 .rail button.on { color: var(--accent-fg); background: var(--accent); }
 .rail button:disabled { opacity: .25; }
 
+/* Wide enough for the columns to sit side by side, so every one of
+   them is drawn and the chips are redundant. */
 @media (min-width: 46rem) {
   .columns { flex-direction: row; align-items: stretch; gap: .75rem; }
+  .col:not(.cur) { display: flex; }
+  .tagcrumbs { display: none; }
   .col { flex: 1; }
   /* Side by side the columns grow with the window instead of stopping at
      a fixed height: what is subtracted is the header, the tabs, the
