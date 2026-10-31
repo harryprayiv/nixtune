@@ -197,6 +197,11 @@ type State =
   -- the page walks the list as each one fails to load and shows nothing
   -- once the list runs out.
   , artTry :: Int
+  -- The Clear button has been pressed once and is waiting for the
+  -- second press that confirms it. The number names the press, so the
+  -- timer that disarms it can tell whether a later press re-armed it.
+  , clearArmed :: Maybe Int
+  , clearTick :: Int
   -- The queue row under the finger, while one is being dragged.
   , drag :: Maybe Drag
   -- The tag browser or the folder tree.
@@ -236,6 +241,8 @@ initial =
   , seekDraft: Nothing
   , volLink: Nothing
   , artTry: 0
+  , clearArmed: Nothing
+  , clearTick: 0
   , drag: Nothing
   , mode: Tags
   , browser: emptyBrowser 800.0
@@ -297,6 +304,11 @@ data Action
   | PlayPath String
   | PlayPos Int
   | DeletePos Int
+  -- Clearing the queue takes two presses: the first arms the button, the
+  -- second within clearConfirmMs clears. The timer's disarm names the
+  -- press it belongs to.
+  | ClearQueue
+  | ClearDisarm Int
   | UpdateLibrary
 
 -- | The monad every handler and helper runs in.
@@ -321,6 +333,10 @@ searchPauseMs = 250.0
 
 searchMinChars :: Int
 searchMinChars = 2
+
+-- | How long the Clear button waits for the press that confirms it.
+clearConfirmMs :: Number
+clearConfirmMs = 3000.0
 
 -- | The lowest level the bar itself can reach. The bar cannot silence the
 -- | player: zero belongs to the mute button, which remembers what to come

@@ -10,7 +10,6 @@ import Caps (Station)
 import Data.Array (elem, length, null)
 import Data.Array as Array
 import Data.Foldable (lookup)
-import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.String (joinWith)
 import Halogen as H
@@ -20,6 +19,7 @@ import Halogen.HTML.Properties as HP
 import Library (libraryView)
 import Mpd (PlayState(..))
 import Mpd as Mpd
+import Player (playerBar, seekRow)
 import Reorder (rowRef, rowShift)
 import Types
   ( Action(..)
@@ -32,7 +32,6 @@ import Types
   , votersAgainst
   )
 import Ui (classes, cls, formatBadge, iconSized)
-import Volume (playerBar)
 import Web.Event.Event (EventType(..))
 
 render :: forall m. State -> H.ComponentHTML Action () m
@@ -142,21 +141,25 @@ nowPlaying st =
               Just who -> HH.div [ cls "added" ] [ HH.text ("added by " <> who) ]
               Nothing -> HH.text ""
           ]
-      , if st.status.duration > 0.0 then progress st else HH.text ""
+      -- The host's position is in the player bar under every view, with
+      -- the transport it belongs with. A guest has no bar, so a guest's
+      -- card keeps a plain progress line.
+      , if st.role == Guest && st.status.duration > 0.0 then seekRow st else HH.text ""
       ]
   ]
     <>
-      -- Transport is not here any more: it lives in the bar at the
-      -- bottom of every view (Volume.playerBar). What stays is Stop,
-      -- which belongs with the modes rather than with the three buttons
-      -- a thumb reaches for, and the four MPD playback modes.
+      -- The transport and the position live in the bar at the bottom of
+      -- every view (Player.playerBar). Here are the four MPD playback
+      -- modes and Clear, which is the queue-wide action a host reaches
+      -- for from this view. There is no Stop: pause does what a person
+      -- means by it, and the bar has pause.
       ( if st.role == Host then
           [ HH.div [ cls "modes" ]
               [ toggle "Random" st.status.random ("random " <> flag st.status.random)
               , toggle "Repeat" st.status.repeat ("repeat " <> flag st.status.repeat)
               , toggle "Single" st.status.single ("single " <> flag st.status.single)
               , toggle "Consume" st.status.consume ("consume " <> flag st.status.consume)
-              , HH.button [ cls "mode", HP.title "Stop", HE.onClick \_ -> Command "stop" ] [ HH.text "Stop" ]
+              , clearButton st
               ]
           ]
         else
@@ -175,42 +178,27 @@ nowPlaying st =
       ]
       [ HH.text label ]
 
--- | Elapsed, the bar, and the length. For the host the bar seeks: the
--- | drag is held in seekDraft so the one-second tick does not move the
--- | thumb under the finger, and the position is sent once, on release.
-progress :: forall m. State -> H.ComponentHTML Action () m
-progress st =
-  HH.div [ cls "progress" ]
-    [ HH.span_ [ HH.text (Mpd.clock at) ]
-    , if st.role == Host then
-        HH.div [ cls "seek" ]
-          [ HH.input
-              [ HP.type_ HP.InputRange
-              , HP.min 0.0
-              , HP.max s.duration
-              , HP.step (HP.Step 1.0)
-              , HP.value (show (Int.round at))
-              , HP.style ("--pct:" <> show pct <> "%")
-              , HP.title "Seek"
-              , HE.onValueInput DragSeek
-              , HE.onValueChange CommitSeek
-              ]
-          ]
-      else
-        HH.div [ cls "bar" ]
-          [ HH.div [ cls "fill", HP.style ("width:" <> show pct <> "%") ] [] ]
-    , HH.span_ [ HH.text (Mpd.clock s.duration) ]
+-- | Clear the queue, in two presses. MPD has no undo for `clear`, and a
+-- | queue a room spent an evening building is one stray tap from gone, so
+-- | the first press arms the button and says so, and only a second press
+-- | within a few seconds clears.
+clearButton :: forall m. State -> H.ComponentHTML Action () m
+clearButton st =
+  HH.button
+    [ classes ([ "mode", "clear" ] <> (if armed then [ "armed" ] else []))
+    , HP.disabled (st.status.queueLength == 0)
+    , HP.title (if armed then "Press again to clear the queue" else "Clear the queue")
+    , HE.onClick \_ -> ClearQueue
     ]
+    [ HH.text (if armed then "Press again to clear" else "Clear queue") ]
   where
-  s = st.status
-  at = fromMaybe s.elapsed st.seekDraft
-  pct = if s.duration > 0.0 then clamp 0.0 100.0 (at / s.duration * 100.0) else 0.0
+  armed = isJust st.clearArmed
 
 queueView :: forall m. State -> Array (H.ComponentHTML Action () m)
 queueView st =
   [ if st.role == Host then
       HH.div [ cls "row-actions" ]
-        [ HH.button [ HP.disabled (null st.queue), HE.onClick \_ -> Command "clear" ] [ HH.text "Clear queue" ] ]
+        [ clearButton st ]
     else if partyOn st then
       HH.p [ cls "note" ]
         [ HH.text ("Vote a track off and it goes when " <> show (vetoLimit st) <> " people agree. One vote each.") ]

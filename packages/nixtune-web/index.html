@@ -121,6 +121,11 @@ button:disabled { opacity: .45; cursor: default; }
 .fmt.lossy { color: var(--muted); border: 1px solid var(--line); }
 .fmt.rate { color: var(--muted); border: 1px solid var(--line); font-weight: 400; }
 .progress { display: flex; align-items: center; gap: .6rem; margin-top: .6rem; font: .8rem var(--mono); color: var(--muted); }
+/* Both clocks keep one width, so the bar between them does not change
+   length as the digits do. */
+.progress .clock { flex: none; min-width: 2.8rem; }
+.progress .clock:last-child { text-align: right; }
+.progress input[type=range]:disabled { opacity: .4; cursor: default; }
 .bar { flex: 1; height: .35rem; background: var(--raised); border-radius: 999px; overflow: hidden; }
 .fill { height: 100%; background: var(--accent); }
 /* The host's seek bar replaces the plain progress bar. Same styling rules
@@ -154,13 +159,17 @@ button:disabled { opacity: .45; cursor: default; }
 .modes { display: flex; justify-content: center; gap: .5rem; flex-wrap: wrap; }
 .mode { color: var(--muted); }
 .mode.on { color: var(--fg); border-color: var(--accent); }
+/* Clear, waiting for the press that confirms it. */
+.mode.clear.armed { color: var(--error); border-color: var(--error); background: color-mix(in srgb, var(--error) 12%, transparent); }
 
-/* The player: transport and level in one frame pinned to the bottom of
-   every view, so a track can be skipped without leaving a browse.
-   The crowding budget is in the media query at the end of this block:
-   under 30rem the typed field and the steppers are not rendered, and
-   everything else stays. */
-.playerbar { flex: none; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .5rem .75rem calc(.5rem + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: .5rem; }
+/* The player: the track's position on top, transport and level under
+   it, in one frame pinned to the bottom of every view, so a track can be
+   skipped or scrubbed without leaving a browse. The crowding budget is
+   in the media query at the end of this block: under 30rem the typed
+   field and the steppers are not rendered, and everything else stays. */
+.playerbar { flex: none; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); padding: .3rem .75rem calc(.5rem + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 0; }
+.playerbar .barrow { display: flex; align-items: center; gap: .5rem; }
+.playerbar .progress { margin-top: 0; }
 .playerbar .transport { flex: none; display: flex; align-items: center; gap: .25rem; }
 .playerbar .tr { width: 2.6rem; height: 2.9rem; padding: 0; border-radius: 10px; background: transparent; border-color: transparent; display: flex; align-items: center; justify-content: center; }
 .playerbar .tr:hover:not(:disabled) { background: var(--raised); border-color: var(--line); }
@@ -448,7 +457,8 @@ button:disabled { opacity: .45; cursor: default; }
 @media (min-width: 40rem) {
   .page { padding: 1.5rem; }
   .now { padding: 1.75rem 1.5rem; }
-  .playerbar { padding-left: 1rem; padding-right: 1rem; gap: .75rem; }
+  .playerbar { padding-left: 1rem; padding-right: 1rem; }
+  .playerbar .barrow { gap: .75rem; }
 }
 </style>
 <script defer src="index.js"></script>

@@ -29,12 +29,13 @@
 -- |   Browse.purs   the tag browser as data, and its arithmetic
 -- |   Tags.purs     the tag browser's behaviour
 -- |   Net.purs      the sockets and the requests
--- |   Volume.purs   the level, the glide, the bar
+-- |   Volume.purs   the level and the glide
+-- |   Player.purs   the bar: position, transport, level
 -- |   Reorder.purs  dragging a queue row
 -- |   Art.purs      cover images from the library
 -- |   Nick.purs     the role and the guest nickname
 -- |   Cache.purs    the library index, kept between visits
--- |   Page.purs     everything drawn but the Library view
+-- |   Page.purs     everything drawn but the Library view and the bar
 -- |   Library.purs  the Library view: search, tag browser, folders
 -- |   Filter.purs   MPD filter expressions and their escaping
 -- |   Ui.purs       class attributes, glyphs, the format badge
@@ -82,6 +83,7 @@ import Types
   , Role(..)
   , View(..)
   , arrived
+  , clearConfirmMs
   , idleCommand
   , initial
   , isQuiet
@@ -171,14 +173,15 @@ handle = case _ of
   Tick -> do
     before <- H.get
     let
-      -- The clock is drawn on Now playing and nowhere else, so advancing
-      -- it while the library is on screen re-renders the whole page once
-      -- a second for something nobody is looking at. Over a column of
-      -- thousands of rows that is the difference between a page that
-      -- answers a tap and one that looks dead. Open NowPlaying asks for
-      -- `status`, so the clock is right again the moment it is visible.
+      -- The host's clock is in the player bar, on every view; a guest's
+      -- is on the Now playing card only, so a guest's page does not
+      -- re-render once a second for a clock nobody is looking at. Every
+      -- list on the page is drawn a slice at a time, so a render is a
+      -- few hundred nodes whatever the library holds. Open NowPlaying
+      -- asks for `status`, so a guest's clock is right again the moment
+      -- it is visible.
       running =
-        before.view == NowPlaying
+        (before.role == Host || before.view == NowPlaying)
           && before.status.state == Playing
           && isNothing before.seekDraft
           && before.status.duration > 0.0
@@ -417,6 +420,22 @@ handle = case _ of
     H.modify_ _ { view = NowPlaying }
   PlayPos n -> send Cmd RFire ("play " <> show n)
   DeletePos n -> send Cmd RFire ("delete " <> show n)
+  ClearQueue -> do
+    st <- H.get
+    case st.clearArmed of
+      Just _ -> do
+        H.modify_ _ { clearArmed = Nothing }
+        send Cmd RFire "clear"
+      Nothing -> do
+        let
+          press = st.clearTick + 1
+        H.modify_ _ { clearArmed = Just press, clearTick = press }
+        void $ H.fork do
+          H.liftAff (delay (Milliseconds clearConfirmMs))
+          handle (ClearDisarm press)
+  ClearDisarm press -> do
+    armed <- H.gets _.clearArmed
+    when (armed == Just press) (H.modify_ _ { clearArmed = Nothing })
   UpdateLibrary -> send Cmd RFire "update"
 
 -- | The tag browser has just come on screen. Its columns were fetched at
