@@ -45,9 +45,20 @@ data Axis = AxGenre | AxArtist | AxAlbum
 
 derive instance eqAxis :: Eq Axis
 
--- | The two connections. One carries commands and reads their replies in
--- | order; the other sits in MPD's idle command and is told what changed.
-data Conn = Cmd | Idle
+-- | The three connections to MPD.
+-- |
+-- |   Cmd    transport, the queue, status, attribution
+-- |   Idle   parked in MPD's idle command, told what changed
+-- |   Lib    the library: browsing, the tag columns, search
+-- |
+-- | MPD answers one command at a time per connection, in order. Lib
+-- | exists because of that: queueing a track makes MPD report a playlist
+-- | change, the page answers by refetching the queue, and on a queue of
+-- | a few hundred that reply is large. With one connection the next
+-- | click on an artist waits behind it and the page looks dead, which
+-- | invites a second click and a third. On its own connection a library
+-- | query is never behind anything but another library query.
+data Conn = Cmd | Idle | Lib
 
 derive instance eqConn :: Eq Conn
 
@@ -68,7 +79,15 @@ data Req
 -- | of the reply being collected, and the unfinished tail of the last
 -- | message. websocat frames messages by TCP read, not by line, so one
 -- | message may hold a whole reply or end in the middle of a line.
-type Link = { socket :: WebSocket, ready :: Boolean, lines :: Array String, partial :: String }
+-- | `asked` is this connection's own queue of outstanding requests, in
+-- | the order they were sent, so a reply is read against the right one.
+type Link =
+  { socket :: WebSocket
+  , ready :: Boolean
+  , lines :: Array String
+  , partial :: String
+  , asked :: Array Req
+  }
 
 -- | A queue row being dragged.
 -- |
@@ -99,7 +118,7 @@ type State =
   , view :: View
   , cmd :: Maybe Link
   , idle :: Maybe Link
-  , asked :: Array Req
+  , lib :: Maybe Link
   , status :: Status
   , current :: Maybe Song
   , queue :: Array Song
@@ -170,7 +189,7 @@ initial =
   , view: NowPlaying
   , cmd: Nothing
   , idle: Nothing
-  , asked: []
+  , lib: Nothing
   , status: Mpd.emptyStatus
   , current: Nothing
   , queue: []
@@ -322,6 +341,18 @@ isStream uri = isJust (indexOf (Pattern "://") uri)
 letterRailThreshold :: Int
 letterRailThreshold = 40
 
+-- | The most rows one column puts in the page.
+-- |
+-- | `list artist` over a library of seventy thousand tracks answers with
+-- | something like twelve thousand names. Drawing them is two DOM nodes
+-- | each, and every later redraw walks all of them: measured at 1190 ms
+-- | to first paint on a desktop, and every state change after that
+-- | repeated the cost. A column past this cap draws nothing until a
+-- | letter narrows it, which is one tap and makes the rail the way in
+-- | rather than an extra.
+columnCap :: Int
+columnCap = 400
+
 -- | The letter a tag value files under: its first character in upper
 -- | case, or "#" when that is not A to Z. A leading article is NOT
 -- | stripped. MPD sorts by the value it holds, and a page that silently
@@ -364,6 +395,24 @@ selectionOf axis st = case axis of
   AxGenre -> st.selGenre
   AxArtist -> st.selArtist
   AxAlbum -> st.selAlbum
+
+-- | Is this column waiting for its reply. A column that has been asked
+-- | for and has not arrived says so, because an empty box that will fill
+-- | in a moment looks exactly like a click that did nothing, and the
+-- | answer to a click that did nothing is to click again.
+waitingFor :: Axis -> State -> Boolean
+waitingFor axis st = Array.any match (maybe [] _.asked st.lib)
+  where
+  match = case _ of
+    RTagValues a -> a == axis
+    _ -> false
+
+waitingForTracks :: State -> Boolean
+waitingForTracks st = Array.any isTracks (maybe [] _.asked st.lib)
+  where
+  isTracks = case _ of
+    RTagTracks -> true
+    _ -> false
 
 -- | The column a choice is being made in: the first in the chain with
 -- | nothing selected yet, or the album column once everything is chosen.

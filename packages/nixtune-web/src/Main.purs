@@ -119,6 +119,7 @@ handle = case _ of
         H.modify_ _ { caps = Just caps, role = role, nickname = nick }
         connect Cmd
         connect Idle
+        connect Lib
         for_ caps.volumePath connectVolume
         { emitter, listener } <- liftEffect HS.create
         _ <- liftEffect (setInterval 1000 (HS.notify listener Tick))
@@ -126,7 +127,7 @@ handle = case _ of
   Opened _ -> pure unit
   Closed conn -> do
     setLink conn Nothing
-    H.modify_ _ { error = Just "The player went away. Reconnecting.", asked = [] }
+    H.modify_ _ { error = Just "The player went away. Reconnecting." }
     H.liftAff (delay (Milliseconds 2000.0))
     connect conn
   Chunk conn raw -> do
@@ -142,21 +143,47 @@ handle = case _ of
         line = fromMaybe l (stripSuffix (Pattern "\r") l)
       unless (line == "") (received conn line)
   Tick -> do
-    H.modify_ \st ->
-      let
-        st' = st { ticks = st.ticks + 1 }
-      in
-        if isNothing st.seekDraft && st.status.state == Playing && st.status.duration > 0.0 && st.status.elapsed < st.status.duration then
-          st' { status = st.status { elapsed = st.status.elapsed + 1.0 } }
-        else st'
-    st <- H.get
+    before <- H.get
+    let
+      -- The clock is drawn on Now playing and nowhere else, so advancing
+      -- it while the library is on screen re-renders the whole page once
+      -- a second for something nobody is looking at. Over a column of
+      -- thousands of rows that is the difference between a page that
+      -- answers a tap and one that looks dead. Open NowPlaying asks for
+      -- `status`, so the clock is right again the moment it is visible.
+      running =
+        before.view == NowPlaying
+          && before.status.state == Playing
+          && isNothing before.seekDraft
+          && before.status.duration > 0.0
+          && before.status.elapsed < before.status.duration
+    when running $
+      H.modify_ \st -> st { status = st.status { elapsed = st.status.elapsed + 1.0 } }
     -- A scan that runs for days changes the "database" subsystem only at
     -- its end, so the count is asked for every ten seconds while it runs.
-    when (st.status.updating && st.ticks `mod` 10 == 0) do
-      send Cmd RStats "stats"
-      when (st.view == Library && isNothing st.searched) (browse st.path)
+    -- The counter only turns while a scan is running, which keeps an
+    -- idle page from re-rendering on a timer at all.
+    when before.status.updating do
+      H.modify_ \st -> st { ticks = st.ticks + 1 }
+      st <- H.get
+      when (st.ticks `mod` 10 == 0) do
+        send Cmd RStats "stats"
+        when (st.view == Library && isNothing st.searched) $ case st.mode of
+          Folders -> browse st.path
+          Tags -> refreshTags
   Open v -> do
     H.modify_ _ { view = v }
+    -- The clock stops advancing while another view is up (see Tick), so
+    -- it is resynced on the way back rather than kept warm the whole
+    -- time at the cost of a re-render a second.
+    when (v == NowPlaying) (send Cmd RStatus "status")
+    -- The queue is fetched when the Queue view opens and not before. On
+    -- a few hundred entries that reply is the most expensive thing the
+    -- page asks for, and every other view needs only its length, which
+    -- `status` already carries.
+    when (v == Queue) do
+      send Cmd RQueue "playlistinfo"
+      send Cmd RStickers stickerFind
     when (v == Library) do
       st <- H.get
       when (isNothing st.searched) $ case st.mode of
@@ -339,7 +366,7 @@ handle = case _ of
       -- window, because MPD closes a connection whose reply overruns its
       -- output buffer, and "any" over a library this size can do that on
       -- a common word. The page says when a result set was cut.
-      send Cmd (RSearch q) ("search any " <> Mpd.quote q <> " window 0:" <> show searchLimit)
+      send Lib (RSearch q) ("search any " <> Mpd.quote q <> " window 0:" <> show searchLimit)
   PlayStation s -> do
     send Cmd RFire "clear"
     send Cmd RFire ("add " <> Mpd.quote s.url)
@@ -372,13 +399,13 @@ handle = case _ of
 refreshTags :: forall o m. MonadAff m => M o m Unit
 refreshTags = do
   st <- H.get
-  when st.genreColumn (send Cmd (RTagValues AxGenre) ("list " <> tagOf AxGenre))
+  when st.genreColumn (send Lib (RTagValues AxGenre) ("list " <> tagOf AxGenre))
   loadArtists
 
 loadArtists :: forall o m. MonadAff m => M o m Unit
 loadArtists = do
   st <- H.get
-  send Cmd (RTagValues AxArtist) $ case st.selGenre of
+  send Lib (RTagValues AxArtist) $ case st.selGenre of
     Just g | st.genreColumn -> "list artist genre " <> Mpd.quote g
     _ -> "list artist"
 
@@ -386,14 +413,14 @@ loadAlbums :: forall o m. MonadAff m => M o m Unit
 loadAlbums = do
   st <- H.get
   for_ st.selArtist \a ->
-    send Cmd (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
+    send Lib (RTagValues AxAlbum) ("list album artist " <> Mpd.quote a)
 
 loadTracks :: forall o m. MonadAff m => M o m Unit
 loadTracks = do
   st <- H.get
   case st.selArtist, st.selAlbum of
     Just a, Just alb ->
-      send Cmd RTagTracks ("find album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
+      send Lib RTagTracks ("find album " <> Mpd.quote alb <> " artist " <> Mpd.quote a)
     _, _ -> pure unit
 
 -- | Queue the selected album. `findadd` does it in one command, so a
@@ -419,6 +446,13 @@ received conn l
       case conn of
         Cmd -> refreshAll
         Idle -> send Idle RFire idleCommand
+        -- The library connection asks for nothing until a view wants
+        -- something from it.
+        Lib -> do
+          st <- H.get
+          when (st.view == Library && isNothing st.searched) $ case st.mode of
+            Folders -> browse st.path
+            Tags -> refreshTags
   | Mpd.isEnd l = do
       st <- H.get
       let
@@ -428,10 +462,10 @@ received conn l
         Idle -> do
           changed block
           send Idle RFire idleCommand
-        Cmd -> case uncons st.asked of
+        _ -> case uncons (maybe [] _.asked (linkOf conn st)) of
           Nothing -> pure unit
           Just { head: req, tail } -> do
-            H.modify_ _ { asked = tail }
+            modifyLink conn _ { asked = tail }
             -- A missing sticker is reported by MPD as an error; it is
             -- the normal state of a track nobody attributed.
             when (Mpd.isError l && not (isSticker req)) (H.modify_ _ { error = Just l })
@@ -443,11 +477,11 @@ changed :: forall o m. MonadAff m => Array String -> M o m Unit
 changed block = do
   send Cmd RStatus "status"
   send Cmd RCurrent "currentsong"
-  when (elem "changed: playlist" block) (send Cmd RQueue "playlistinfo")
-  when (elem "changed: sticker" block) (send Cmd RStickers stickerFind)
+  st <- H.get
+  when (elem "changed: playlist" block && st.view == Queue) (send Cmd RQueue "playlistinfo")
+  when (elem "changed: sticker" block && st.view == Queue) (send Cmd RStickers stickerFind)
   when (elem "changed: database" block || elem "changed: update" block) do
     send Cmd RStats "stats"
-    st <- H.get
     when (st.view == Library && isNothing st.searched) $ case st.mode of
       Folders -> browse st.path
       Tags -> refreshTags

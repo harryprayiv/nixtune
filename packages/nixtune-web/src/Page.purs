@@ -29,6 +29,7 @@ import Types
   , activeAxis
   , alphabet
   , axisLabel
+  , columnCap
   , isStream
   , letterOf
   , letterRailThreshold
@@ -37,6 +38,8 @@ import Types
   , selectionOf
   , underLetter
   , valuesOf
+  , waitingFor
+  , waitingForTracks
   )
 import Ui (classes, cls, iconSized)
 import Volume (playerBar)
@@ -72,7 +75,9 @@ render st = HH.main_
   renderers = Array.filter (_ /= "mpd") (maybe [] _.modules st.caps)
   hasLibrary = maybe false _.library st.caps
   stations = maybe [] _.stations st.caps
-  count = if null st.queue then "" else " (" <> show (length st.queue) <> ")"
+  -- From `status`, not from the page's copy of the queue: the queue
+  -- itself is only fetched while the Queue view is open.
+  count = if st.status.queueLength == 0 then "" else " (" <> show st.status.queueLength <> ")"
   tabs = case st.role of
     Guest ->
       [ tab NowPlaying "Now playing" ]
@@ -467,22 +472,41 @@ tagColumn st axis =
             Nothing -> HH.text ""
         ]
     , HH.div [ cls "colbody" ]
-        [ HH.ul [ cls "vals" ]
-            ( if null values then [ HH.li [ cls "val empty" ] [ HH.text waiting ] ]
-              else map row shown
-            )
+        [ HH.ul [ cls "vals" ] body
         , if length values > letterRailThreshold then rail else HH.text ""
         ]
     ]
   where
   values = valuesOf axis st
+  busy = waitingFor axis st && null values
   letter = letterOf axis st
-  shown = underLetter letter values
+  matching = underLetter letter values
+  -- An unnarrowed column past the cap draws nothing. The rail is beside
+  -- it and one tap turns it back into a list.
+  tooMany = letter == Nothing && length values > columnCap
+  shown = Array.take columnCap matching
+  hidden = length matching - length shown
   sel = selectionOf axis st
   present = lettersPresent values
   countText = case letter of
-    Just _ -> show (length shown) <> " of " <> show (length values)
+    Just _ -> show (length matching) <> " of " <> show (length values)
     Nothing -> show (length values)
+  body
+    | busy = [ HH.li [ cls "val empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ] ]
+    | null values = [ HH.li [ cls "val empty" ] [ HH.text waiting ] ]
+    | tooMany =
+        [ HH.li [ cls "val empty" ]
+            [ HH.text (show (length values) <> " entries. Pick a letter on the right, or search.") ]
+        ]
+    | otherwise =
+        map row shown
+          <>
+            ( if hidden > 0 then
+                [ HH.li [ cls "val empty" ]
+                    [ HH.text (show hidden <> " more under " <> fromMaybe "" letter <> ". Search to narrow further.") ]
+                ]
+              else []
+            )
   waiting = case axis of
     AxAlbum -> "Pick an artist"
     AxArtist -> if st.genreColumn && sel == Nothing && st.selGenre == Nothing then "Pick a genre" else "Nothing here"
@@ -517,7 +541,9 @@ albumTracks st = case st.selAlbum of
                 else []
               )
         )
-    , if null st.tagTracks then HH.p [ cls "empty" ] [ HH.text "No tracks under that album for this artist." ]
+    , if waitingForTracks st && null st.tagTracks then
+        HH.p [ cls "empty" ] [ HH.span [ cls "spin" ] [], HH.text " Loading" ]
+      else if null st.tagTracks then HH.p [ cls "empty" ] [ HH.text "No tracks under that album for this artist." ]
       else HH.ul [ cls "list" ] (map (songRow st) st.tagTracks)
     ]
 
