@@ -4,11 +4,13 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    # FOR THE DEVELOPMENT SHELL ONLY. nixpkgs carries purescript and esbuild,
-    # which is all the BUILD needs, but no current spago (only spago-legacy,
-    # 0.21), and spago is the tool that edits packages/nixtune-web/spago.lock.
-    # The module and the packages never touch this input; a consumer that
-    # imports nixosModules.default does not evaluate it.
+    # FOR THE DEVELOPMENT SHELL ONLY: spago, the tool that edits
+    # packages/nixtune-web/spago.lock. nixpkgs carries only spago-legacy
+    # (0.21). The page's compiler is packages/nixtune-web/purs.nix, upstream's
+    # static release at the URL and hash this overlay's manifest records, and
+    # its bundler is nixpkgs' esbuild. The module and the packages never
+    # touch this input; a consumer that imports nixosModules.default does not
+    # evaluate it.
     purescript-overlay = {
       url = "github:thomashoneyman/purescript-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -76,20 +78,22 @@
         nixtune-web = self.packages.${pkgs.stdenv.hostPlatform.system}.nixtune-web;
       })) { x86_64-linux.rehearsal = rehearsal.config.system.build.toplevel; };
 
-      # What `direnv` (use flake .) and `nix develop` give: the compiler and
-      # bundler the build uses, spago for the lock, nixfmt for the Nix.
-      # Evaluating this shell prints purescript-overlay's own deprecation
-      # warning (stdenv.isDarwin); it is theirs, and it does not reach any
-      # consumer of the module.
+      # What `direnv` (use flake .) and `nix develop` give: the same purs and
+      # esbuild the build uses, spago for the lock, nixfmt for the Nix. The
+      # overlay is applied to this pkgs as a function rather than through
+      # pkgs.extend, which would evaluate nixpkgs a second time. Evaluating
+      # spago from it prints the overlay's own deprecation warning
+      # (stdenv.isDarwin); it is theirs, and it does not reach any consumer
+      # of the module.
       devShells = forAllSystems (
         pkgs:
         let
-          ps = pkgs.extend purescript-overlay.overlays.default;
+          ps = purescript-overlay.overlays.default pkgs pkgs;
         in
         {
           default = pkgs.mkShell {
             packages = [
-              pkgs.purescript
+              (pkgs.callPackage ./packages/nixtune-web/purs.nix { })
               pkgs.esbuild
               pkgs.nixfmt
               ps.spago-unstable

@@ -7,8 +7,9 @@
 # package in the lock is one fixed-output fetch of the registry's tarball,
 # checked against the `integrity` hash the lock records, so the inputs are
 # pinned by content and the build runs with the network off. The compiler
-# is nixpkgs' purescript (0.15.15 as of this writing, x86_64 and aarch64)
-# and the bundler is nixpkgs' esbuild; spago itself is not needed to build.
+# is upstream's static release of purs 0.15.16 (./purs.nix says why it is
+# not nixpkgs' purescript) and the bundler is nixpkgs' esbuild; spago
+# itself is not needed to build.
 # spago remains the tool that EDITS the lock: `spago install`, `spago
 # upgrade` in this directory, then commit spago.yaml and spago.lock together.
 #
@@ -20,11 +21,13 @@
 {
   lib,
   stdenvNoCC,
+  callPackage,
   fetchurl,
-  purescript,
   esbuild,
 }:
 let
+  purs = callPackage ./purs.nix { };
+
   lock = builtins.fromJSON (builtins.readFile ./spago.lock);
 
   # Every package the lock resolves. Only registry packages are supported;
@@ -63,7 +66,7 @@ stdenvNoCC.mkDerivation {
   };
 
   nativeBuildInputs = [
-    purescript
+    purs
     esbuild
   ];
 
@@ -98,6 +101,6 @@ stdenvNoCC.mkDerivation {
   meta = {
     description = "The nixtune player's page";
     license = lib.licenses.agpl3Plus;
-    platforms = purescript.meta.platforms;
+    platforms = purs.meta.platforms;
   };
 }
