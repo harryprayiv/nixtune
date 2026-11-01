@@ -78,13 +78,19 @@
         nixtune-web = self.packages.${pkgs.stdenv.hostPlatform.system}.nixtune-web;
       })) { x86_64-linux.rehearsal = rehearsal.config.system.build.toplevel; };
 
-      # What `direnv` (use flake .) and `nix develop` give: the same purs and
-      # esbuild the build uses, spago for the lock, nixfmt for the Nix. The
-      # overlay is applied to this pkgs as a function rather than through
-      # pkgs.extend, which would evaluate nixpkgs a second time. Evaluating
-      # spago from it prints the overlay's own deprecation warning
+      # default is what `direnv` (use flake .) and `nix develop` give: the
+      # same purs and esbuild the build uses, spago for the lock, nixfmt for
+      # the Nix. The overlay is applied to this pkgs as a function rather
+      # than through pkgs.extend, which would evaluate nixpkgs a second time.
+      # Evaluating spago from it prints the overlay's own deprecation warning
       # (stdenv.isDarwin); it is theirs, and it does not reach any consumer
       # of the module.
+      #
+      # room is for packages/nixtune-room until haskell.nix builds it: GHC
+      # and cabal, plus the C libraries its Hackage dependencies link
+      # against. websockets depends on the Haskell zlib package, which needs
+      # libz and finds it through pkg-config; mkShell puts both where cabal
+      # looks, which a bare `nix shell` does not.
       devShells = forAllSystems (
         pkgs:
         let
@@ -98,6 +104,18 @@
               pkgs.nixfmt
               ps.spago-unstable
             ];
+          };
+
+          room = pkgs.mkShell {
+            packages = [
+              pkgs.ghc
+              pkgs.cabal-install
+              pkgs.pkg-config
+            ];
+            # buildInputs, not packages: pkg-config's setup hook adds the
+            # .pc files of buildInputs to PKG_CONFIG_PATH, and the compiler
+            # wrapper adds their library paths.
+            buildInputs = [ pkgs.zlib ];
           };
         }
       );

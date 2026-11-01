@@ -54,6 +54,12 @@
 -- Build started 2026-11-01 with stage 1: nixtune-room's pure core (the
 -- coordinator as a pure state machine, the audio path derived from it,
 -- acoustic alignment, the spec's time filter, psk_id) and its tests.
+-- Stage 2, the same day: the shell (room.json, the line protocol on a
+-- websocket and the control socket, the MPD client, peer calls, the
+-- clock), `nixtune-room keys` and `nixtune-room provision-player`.
+-- Stage 3 is the Sendspin server; the NixOS module, haskell.nix and
+-- MultiroomRehearsal follow it, because the rehearsal needs a server
+-- that can hold a player.
 -- The open questions at the end are the next round. One room exists:
 -- the kitchen (the Pi, host nixtune).
 --
@@ -445,10 +451,13 @@
 --                   multiroom is enabled; a radio that sleeps between
 --                   packets stalls a live stream.
 --
--- `nixtune-room keys --rooms kitchen,lab,living-room` (run on winsmuth)
--- prints a sops-ready YAML of private keys and PSKs and the Nix
--- attrset of public keys, so nothing is copied by hand from one room's
--- status to another's declaration.
+-- `nixtune-room keys --rooms kitchen,lab,living-room --out DIR` (run on
+-- winsmuth) writes DIR/<room>.yaml for every room, mode 0600 and never
+-- over an existing file, holding that room's nixtune-room/server-key,
+-- nixtune-room/player-key, nixtune-room/server-psk/<player room> and
+-- nixtune-room/player-psk/<server room>, ready to merge into the host's
+-- sops file; and prints only the public keys, as the Nix attrset for
+-- multiroom.peers, so nothing secret reaches the terminal.
 --
 -- capabilities.json gains a `multiroom` object: { room, peers: [{ room,
 -- url }], roomPath, libraryWriter: Boolean, libraryId }, where libraryId
@@ -704,13 +713,24 @@ contract Coordinator {
         -- an AirPlay or Sendspin stream is never held up by a peer call.
 
     @guidance
-        -- A websocket line protocol, one request per line, one reply per
-        -- line, plus pushed status lines; served by nixtune-room itself
+        -- A line protocol, one request per line, one reply per line, plus
+        -- pushed status lines (nixtune-room's Nixtune.Room.Wire):
+        --   follow <room> | own | silence | hold <room> | release <room>
+        --   | suspend <room> | pin <room> | unpin
+        --   | interruption-starts <by> | interruption-ends <by>
+        --                     -> ok | refused <reason>
+        --   status            -> status room=.. intent=.. source=..
+        --                        audience=a,b suspended=.. moved-to=..
+        --                        path=.. interrupted-by=.. focus=..
+        --   subscribe         -> a status line now, then one per change
+        -- with "-" for an empty value and <by> one of airplay, upnp,
+        -- foreign-sendspin. Served by nixtune-room itself as a websocket
         -- on 127.0.0.1:8605 behind nginx /room, the same reach as the
-        -- other helpers. Peers use the same endpoint through the peer's
-        -- nginx. The AirPlay hooks and the player's hooks call it
-        -- through a local Unix socket instead, so a hook never depends
-        -- on nginx.
+        -- other helpers; peers use the same endpoint through the peer's
+        -- nginx. The AirPlay hooks and the player's hooks use the Unix
+        -- control socket /run/nixtune-room/control.sock instead, through
+        -- `nixtune-room ctl <request>`, which exits 0 for ok and 1 for a
+        -- refusal, so a hook never depends on nginx.
 }
 
 ------------------------------------------------------------
@@ -925,17 +945,22 @@ rule PlayerCredentialsProvisioned {
         PlayerUnpairedAccess(room) = false
 
     @guidance
-        -- An ExecStartPre in nixtune-room ("nixtune-room provision-player")
-        -- reads the sops-decrypted files under /run/secrets and writes
-        -- identity-daemon.json ({"private_key": <base64url>}) and
-        -- pairing-store-daemon.json (records keyed by psk_id =
-        -- base64url(SHA-256("sendspin-psk-id-v1" || PSK)), each with
-        -- psk, server_id, created_at, last_used_at) into the player's
-        -- StateDirectory, mode 0600, owned by the player's user, replacing
-        -- whatever was there. The declaration is the whole truth: a
-        -- record not declared does not survive a restart. Then it checks
-        -- that the public key derived from the private key equals
-        -- peers.<room>.playerKey and refuses to start the player if not.
+        -- The player unit's ExecStartPre, `nixtune-room provision-player
+        -- --state-dir <the player's StateDirectory>`, reads the
+        -- sops-decrypted files and writes identity-daemon.json
+        -- ({"private_key": <base64url>}) and pairing-store-daemon.json
+        -- (records keyed by psk_id = base64url(SHA-256(
+        -- "sendspin-psk-id-v1" || PSK)), each with psk_id, psk,
+        -- server_id, used, created_at and last_used_at; pairing_config
+        -- with every pairing method and unpaired access off), mode 0600,
+        -- replacing whatever was there. The declaration is the whole
+        -- truth: a record not declared does not survive a restart. The
+        -- one value kept is last_playback_server_id, which the player
+        -- uses to choose between servers, and only if it names a
+        -- declared server. It refuses to write anything if the public
+        -- key derived from the private key is not peers.<room>.playerKey.
+        -- Checked 2026-11-01 by loading the written files with
+        -- aiosendspin's own FileClientPairingStore and Identity.
 }
 
 rule ServerCredentialsLoaded {

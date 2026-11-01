@@ -1,15 +1,18 @@
 cabal-version:      3.0
 name:               nixtune-room
-version:            0.1.0.0
+version:            0.2.0.0
 synopsis:           The nixtune multiroom daemon: coordinator and Sendspin server
 description:
   One process per nixtune room. It decides what the room's DAC plays,
   serves the room's MPD to other rooms over the Sendspin protocol, and
   answers pages and peers. Specified in .inference/nixtune-multiroom.allium.
-  This package is built in stages; stage 1 is the pure core: the
-  coordinator as a state machine, the audio path derived from it, the
-  ordering of output switches, acoustic alignment, the Sendspin time
-  filter and psk_id.
+  Built in stages. Stage 1 is the pure core: the coordinator as a state
+  machine, the audio path derived from it, the ordering of output
+  switches, acoustic alignment, the Sendspin time filter and psk_id.
+  Stage 2 is the shell around it: room.json, the line protocol over a
+  websocket and a control socket, the MPD client, peer calls, key
+  generation and the player's credential provisioning. The Sendspin
+  server itself is stage 3.
 license:            AGPL-3.0-or-later
 author:             Harry Pray IV
 maintainer:         harry@harryprayiv.com
@@ -17,7 +20,7 @@ category:           Sound
 build-type:         Simple
 
 common warnings
-  default-extensions: DerivingStrategies OverloadedStrings
+  default-extensions: DerivingStrategies LambdaCase OverloadedStrings RecordWildCards
   ghc-options:
     -Wall -Wcompat -Widentities -Wincomplete-record-updates
     -Wincomplete-uni-patterns -Wmissing-export-lists
@@ -28,22 +31,58 @@ library
   hs-source-dirs:   src
   default-language: GHC2021
   exposed-modules:
+    Nixtune.Mpd.Client
+    Nixtune.Mpd.Protocol
     Nixtune.Room.Clock
+    Nixtune.Room.Config
     Nixtune.Room.Coordinator
+    Nixtune.Room.Daemon
     Nixtune.Room.Focus
+    Nixtune.Room.Keys
     Nixtune.Room.Name
     Nixtune.Room.Outputs
+    Nixtune.Room.Peer
     Nixtune.Room.Protocol
+    Nixtune.Room.Provision
+    Nixtune.Room.Server
     Nixtune.Room.State
+    Nixtune.Room.Status
+    Nixtune.Room.Sync
+    Nixtune.Room.Wire
     Nixtune.Sendspin.PskId
     Nixtune.Sendspin.TimeFilter
   build-depends:
+    , aeson       >=2.1  && <2.3
+    , async       >=2.2  && <2.3
     , base        >=4.17 && <5
     , bytestring  >=0.11 && <0.13
     , containers  >=0.6  && <0.8
     , crypton     >=1.0  && <1.1
+    , directory   >=1.3  && <1.4
+    , filepath    >=1.4  && <1.6
     , memory      >=0.18 && <0.19
+    , network     >=3.1.2 && <3.3
+    , stm         >=2.5  && <2.6
     , text        >=2.0  && <2.2
+    , unix        >=2.7  && <2.9
+    , websockets  >=0.12.7 && <0.14
+
+executable nixtune-room
+  import:           warnings
+  hs-source-dirs:   app
+  default-language: GHC2021
+  main-is:          Main.hs
+  ghc-options:      -threaded -rtsopts
+  build-depends:
+    , base
+    , bytestring
+    , directory
+    , filepath
+    , network
+    , nixtune-room
+    , optparse-applicative >=0.17 && <0.19
+    , text
+    , unix
 
 test-suite nixtune-room-test
   import:           warnings
@@ -51,17 +90,32 @@ test-suite nixtune-room-test
   hs-source-dirs:   test
   default-language: GHC2021
   main-is:          Main.hs
+  ghc-options:      -threaded
   other-modules:
     CoordinatorSpec
+    DaemonSpec
+    FakeMpd
     FocusSpec
     Generators
+    KeysSpec
+    MpdSpec
     OutputsSpec
     SendspinSpec
+    SyncSpec
+    TempDir
+    WireSpec
   build-depends:
+    , aeson
+    , async
     , base
     , bytestring
     , containers
+    , directory
+    , filepath
     , hspec         >=2.10 && <2.12
+    , network
     , nixtune-room
     , QuickCheck    >=2.14 && <2.16
+    , stm
     , text
+    , unix
