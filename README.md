@@ -8,17 +8,19 @@ It does what moOde audio player does for a Pi with a HiFiBerry, with none of moO
 
 `nixosModules.default` (also `nixosModules.nixtune`) is the whole player: `services.nixtune.*`. Import it and set options. It builds its own packages with the importing host's pkgs, so no overlay is needed.
 
-`packages.<system>.nixtune-web` is the page. `packages.<system>.upmpdcli` is the UPnP renderer, which nixpkgs does not carry; its hashes are not filled in yet, so it does not build (see Known issues).
+`packages.<system>.nixtune-web` is the page. `packages.<system>.nixtune-room` is the multiroom coordinator and Sendspin server, and `packages.<system>.sendspin` is the Sendspin player every room runs: sendspin-cli at a pinned release with nixtune's patches (see Multiroom and Maintenance). `packages.<system>.upmpdcli` is the UPnP renderer, which nixpkgs does not carry; its hashes are not filled in yet, so it does not build (see Known issues).
 
-`checks.<system>.nixtune-web` builds the page. `checks.x86_64-linux.rehearsal` builds a whole system for a QEMU-shaped host with `hardware.profile = "none"`, which is the quickest proof that a change to the module still produces a system.
+`overlays.sendspin` puts the same aiosendspin and sendspin releases into every Python package set of a host that applies it. The module does not need it; it is for a workstation that wants to run `sendspin` by hand against a room.
 
-`devShells.<system>.default` carries purescript, esbuild, nixfmt and spago for working on the page. `formatter.<system>` is nixfmt. Systems are x86_64-linux and aarch64-linux.
+`checks.<system>.nixtune-web`, `checks.<system>.nixtune-room` and `checks.<system>.sendspin` build the packages, which runs their test suites. `checks.x86_64-linux.rehearsal` builds a whole system for a QEMU-shaped host with `hardware.profile = "none"`, which is the quickest proof that a change to the module still produces a system, and `checks.x86_64-linux.rehearsal-multiroom` does the same for a room with multiroom on. `checks.x86_64-linux.multiroom` boots two rooms in VMs and plays a group (see Testing a change to multiroom); it needs KVM.
+
+`devShells.<system>.default` carries purescript, esbuild, nixfmt and spago for working on the page, and `devShells.<system>.room` carries GHC, cabal and the C libraries for working on `packages/nixtune-room`. `formatter.<system>` is nixfmt. Systems are x86_64-linux and aarch64-linux.
 
 The flake does not contain a Pi boot path, an SD image or an example host. Those live in the consuming configuration: import nixos-hardware's `raspberry-pi-5` module and use the generic aarch64 SD image, with `hardware.raspberry-pi.firmware.uboot.enable` set.
 
 ## Using it
 
-Import `nixosModules.default` and set `services.nixtune.*`. The section after Options walks through a complete Raspberry Pi 5 from an empty SD card to a player on wifi; this is the short version for a machine that already boots NixOS:
+Import `nixosModules.default` and set `services.nixtune.*`. The section after Options walks through a complete Raspberry Pi 5 from an empty SD card to a player on wifi, and the one after it adds more rooms that play in sync; this is the short version for a machine that already boots NixOS:
 
 ```nix
 {
@@ -57,6 +59,8 @@ The page is then at `http://<host>/` for guests and `http://<host>/host` for the
 `arbitration.resumeAfterRenderer` (true) resumes MPD after an AirPlay stream that paused it ends.
 
 `renderers.airplay.{enable,name}` and `renderers.upnp.{enable,friendlyName,package}`.
+
+`multiroom.enable` turns on multiroom, described under Multiroom. `multiroom.room` is this room's name (the hostname by default). `multiroom.peers.<room>` declares every room in the home, this one included, with `host`, `port` (80), `serverKey`, `playerKey` and `outputDelay` (0 milliseconds). `multiroom.acoustics.<focus>.<room>` is the travel time in milliseconds from `<room>`'s speakers to the listening spot in `<focus>`. `multiroom.streamFormat` (`44100:24:2`) is what a group streams. `multiroom.playerCard` (the output card) and `multiroom.playerCardDevice` (0) are the ALSA device the player opens. `multiroom.secrets.serverKeyFile`, `multiroom.secrets.playerKeyFile`, `multiroom.secrets.serverPskFiles.<room>` and `multiroom.secrets.playerPskFiles.<room>` are runtime paths to the room's keys. `multiroom.timing` holds `audienceGrace` (10000), `orphanTimeout` (180000), `playerReadyTimeout` (10000), `maxSuspension` (1800000), `reconcileInterval` (2000) and `peerTimeout` (2000), all milliseconds. `multiroom.package` and `multiroom.playerPackage` replace the two programs.
 
 `persistPaths` is read-only output for an impermanence setup: the directories nixtune needs kept across a root wipe.
 
@@ -452,6 +456,399 @@ Edit `hosts/player.nix`, `git add` anything new, and run the same `nixos-rebuild
 
 If the page fails to build with a segfault from `purs`, your nixpkgs is newer than the one the prebuilt PureScript compiler works with; pin your `nixpkgs` input to the revision in nixtune's own `flake.lock` until that is fixed upstream.
 
+## Multiroom
+
+With `services.nixtune.multiroom.enable`, a room can play another room's music in time with it, and serve its own music to other rooms. Each room is one nixtune host. A room playing alone keeps the path it has without multiroom, MPD straight to the DAC, bit for bit. Only while a room is part of a group does its MPD also feed a fifo, resampled to `multiroom.streamFormat`, and the room's own Sendspin server streams that to the players of every room in the group, its own included, with timestamps so they all play the same sample at the same moment.
+
+Two services run beside MPD on every room. `nixtune-room` is the room's coordinator and its Sendspin server in one process: it decides what the room's DAC plays, talks to the other rooms' coordinators through their nginx at `/room`, and reads MPD's fifo when the room is a source. `nixtune-player` is sendspin-cli's player on the room's DAC, listening on port 8928 for the servers of the declared rooms and nothing else. The two never have the DAC open at once: the coordinator turns MPD's ALSA output off before the player is held, and turns it back on only after the player reports that it has closed the device.
+
+Rooms authenticate each other with keys you generate once for the whole home. Every room has a server key and a player key, and every ordered pair of rooms (this room's server, that room's player) shares a pre-shared key. The public keys go in the Nix declaration; the private keys and the pre-shared keys go in each room's sops file. A server or player that does not hold the right keys for a pair is refused.
+
+This section is the recommended way to set it up. It extends the Raspberry Pi walkthrough above, and uses two rooms, `kitchen` and `lab`; a home with more rooms differs only in the list of names.
+
+### What you need first
+
+- Every room set up as a single player with the walkthrough above, through step 6: booted, reachable over ssh, deployed from the repository, with its ssh host key's age key in `.sops.yaml`.
+- Each room's hostname is its room name: lower case letters, digits and hyphens, starting with a letter. The coordinator takes the room name from `networking.hostName`. The walkthrough's `player` would become `kitchen` here.
+- Every room can reach every other room by the name you give it, here `kitchen.lan` and `lab.lan`. The router's DNS names from the walkthrough are enough. A name that resolves to an IPv6 address first is fine.
+- `ui.enable` left on (the default) on every room. The coordinators reach each other through the page's nginx.
+- The rooms on one network with no firewall between them for ports 80 and 8928. The module opens both on each room.
+
+### The files
+
+Three new files in the repository, and two changes to existing ones:
+
+```
+rooms/keys.nix                 public keys, written by nixtune-room keys
+rooms/peers.nix                every room and how to reach it
+rooms/default.nix              the module every room imports
+secrets/kitchen-multiroom.yaml the kitchen's private keys, encrypted
+secrets/lab-multiroom.yaml     the lab's private keys, encrypted
+.sops.yaml                     one new rule per room
+flake.nix                      one host per room, each importing ./rooms
+```
+
+The multiroom secrets are kept in a file of their own per room rather than added to the room's existing secrets file, so that generating new keys for the home never touches anything else.
+
+### 1. Generate the keys
+
+`nixtune-room keys` makes every key and pre-shared key for the whole home in one run. It writes one plaintext file per room into the directory you give it, mode 0600, and refuses to overwrite anything, and it prints the public keys as a Nix attrset. Write the plaintext into `$XDG_RUNTIME_DIR`, which is in memory, and the public keys into the repository:
+
+**workstation**, in the repository:
+```fish
+mkdir -p rooms
+```
+```fish
+nix run github:harryprayiv/nixtune#nixtune-room -- keys --rooms kitchen,lab --out $XDG_RUNTIME_DIR/nixtune-room-keys > rooms/keys.nix
+```
+
+It prints `wrote` and a path for each room. `rooms/keys.nix` now holds `serverKey` and `playerKey` for each room. These are public keys, safe to commit.
+
+### 2. Encrypt each room's keys to that room
+
+Add one rule per room to `.sops.yaml`, beside the rules for the rooms' existing secrets files, each listing your key and that room's key:
+
+```yaml
+keys:
+  - &admin age1youragepublickey
+  - &kitchen age1thekitchenshostkey
+  - &lab age1thelabshostkey
+creation_rules:
+  - path_regex: secrets/kitchen\.yaml$
+    key_groups:
+      - age:
+          - *admin
+          - *kitchen
+  - path_regex: secrets/kitchen-multiroom\.yaml$
+    key_groups:
+      - age:
+          - *admin
+          - *kitchen
+  - path_regex: secrets/lab\.yaml$
+    key_groups:
+      - age:
+          - *admin
+          - *lab
+  - path_regex: secrets/lab-multiroom\.yaml$
+    key_groups:
+      - age:
+          - *admin
+          - *lab
+```
+
+Then encrypt each room's file and delete the plaintext. Every check prints a length, never a value.
+
+**workstation**, in the repository:
+```fish
+nix shell nixpkgs#sops --command sops --encrypt --filename-override secrets/kitchen-multiroom.yaml $XDG_RUNTIME_DIR/nixtune-room-keys/kitchen.yaml > secrets/kitchen-multiroom.yaml
+```
+```fish
+nix shell nixpkgs#sops --command sops --encrypt --filename-override secrets/lab-multiroom.yaml $XDG_RUNTIME_DIR/nixtune-room-keys/lab.yaml > secrets/lab-multiroom.yaml
+```
+```fish
+rm -r $XDG_RUNTIME_DIR/nixtune-room-keys
+```
+```fish
+nix shell nixpkgs#sops --command sops --decrypt --extract '["nixtune-room"]["server-key"]' secrets/kitchen-multiroom.yaml | string length
+```
+```fish
+nix shell nixpkgs#sops --command sops --decrypt --extract '["nixtune-room"]["server-psk"]["lab"]' secrets/kitchen-multiroom.yaml | string length
+```
+
+Both must print 43, the length of a 32-byte key in unpadded base64url. Run the same two checks on `secrets/lab-multiroom.yaml`, with `kitchen` in place of `lab` in the second. Each room's file holds its server key, its player key, a `server-psk` for every room (this room's server with that room's player) and a `player-psk` for every room (this room's player with that room's server), its own pairing included.
+
+### 3. Declare the rooms
+
+`rooms/peers.nix` is every room in the home and how the others reach it. It is identical on every room, which is why it is one file every room imports:
+
+```nix
+# Every room in the home, identical on every room. serverKey and
+# playerKey come from keys.nix, which `nixtune-room keys` wrote; host is
+# how the other rooms reach this one.
+let
+  keys = import ./keys.nix;
+in
+{
+  kitchen = keys.kitchen // {
+    host = "kitchen.lan";
+  };
+  lab = keys.lab // {
+    host = "lab.lan";
+  };
+}
+```
+
+A room's entry can also set `port`, when its page is not on port 80, and `outputDelay`, the milliseconds between its DAC's output and the sound leaving its speakers. That is 0 for a DAC feeding an amplifier with no DSP in between; a room with an active speaker or a DSP stage that delays the signal sets its delay here.
+
+`rooms/default.nix` is the module every room imports. It takes the room from the hostname, the peers from `peers.nix`, and the room's own keys from its sops file, and turns multiroom on only once that file exists, so a new room plays alone until its keys are in place:
+
+```nix
+# Multiroom for every room. Every room imports this one file: the peers
+# and the acoustics are the same everywhere, and each room takes its own
+# keys from its own sops file. The room is the host's name.
+{ config, lib, ... }:
+let
+  peers = import ./peers.nix;
+  rooms = lib.attrNames peers;
+  room = config.networking.hostName;
+
+  # Encrypted to this room's ssh host key, so it can exist only after the
+  # room has booted once. Until it does, the room plays alone.
+  sopsFile = ../secrets + "/${room}-multiroom.yaml";
+  haveKeys = builtins.pathExists sopsFile;
+
+  # The server's key and PSKs are read by nixtune-room, the player's by
+  # nixtune-player. A changed secret restarts the service that reads it.
+  forServer = {
+    inherit sopsFile;
+    owner = "nixtune-room";
+    restartUnits = [ "nixtune-room.service" ];
+  };
+  forPlayer = {
+    inherit sopsFile;
+    owner = "nixtune-player";
+    restartUnits = [ "nixtune-player.service" ];
+  };
+  path = name: config.sops.secrets.${name}.path;
+
+  # The account you log in with. It joins the nixtune-room group, so
+  # `nixtune-room ctl` works over ssh without sudo.
+  operator = "admin";
+in
+{
+  config = lib.mkIf haveKeys {
+    sops.secrets = {
+      "nixtune-room/server-key" = forServer;
+      "nixtune-room/player-key" = forPlayer;
+    }
+    // lib.genAttrs (map (r: "nixtune-room/server-psk/${r}") rooms) (_: forServer)
+    // lib.genAttrs (map (r: "nixtune-room/player-psk/${r}") rooms) (_: forPlayer);
+
+    users.users.${operator}.extraGroups = [ "nixtune-room" ];
+
+    services.nixtune.multiroom = {
+      enable = true;
+      inherit room peers;
+      # Milliseconds of sound travel, the same on every room; see
+      # Acoustics below.
+      acoustics = { };
+      secrets = {
+        serverKeyFile = path "nixtune-room/server-key";
+        playerKeyFile = path "nixtune-room/player-key";
+        serverPskFiles = lib.genAttrs rooms (r: path "nixtune-room/server-psk/${r}");
+        playerPskFiles = lib.genAttrs rooms (r: path "nixtune-room/player-psk/${r}");
+      };
+    };
+  };
+}
+```
+
+The secret names are the paths inside the room's sops file, so `nixtune-room/server-psk/lab` is both the key sops-nix reads and the file it writes, `/run/secrets/nixtune-room/server-psk/lab`.
+
+`flake.nix` makes one host per room, from the same list of names, each importing `./rooms` and its own `hosts/<room>.nix` (the walkthrough's `hosts/player.nix`, with the room's hostname and its own secrets file):
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixos-hardware.url = "github:NixOS/nixos-hardware/master";
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    nixtune = {
+      url = "github:harryprayiv/nixtune";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs =
+    {
+      self,
+      nixpkgs,
+      nixos-hardware,
+      sops-nix,
+      nixtune,
+    }:
+    let
+      lib = nixpkgs.lib;
+
+      # One host per room, named after it; peers.nix is the list.
+      rooms = lib.attrNames (import ./rooms/peers.nix);
+
+      room =
+        name:
+        lib.nixosSystem {
+          modules = [
+            nixos-hardware.nixosModules.raspberry-pi-5
+            sops-nix.nixosModules.sops
+            nixtune.nixosModules.default
+            (
+              { modulesPath, ... }:
+              {
+                imports = [ (modulesPath + "/installer/sd-card/sd-image-aarch64.nix") ];
+                sdImage.compressImage = false;
+                sdImage.expandOnBoot = false;
+              }
+            )
+            ./rooms
+            (./hosts + "/${name}.nix")
+          ];
+        };
+    in
+    {
+      nixosConfigurations = lib.genAttrs rooms room;
+
+      # nix build .#packages.aarch64-linux.kitchen is the kitchen's SD image.
+      packages.aarch64-linux = lib.genAttrs rooms (
+        name: self.nixosConfigurations.${name}.config.system.build.sdImage
+      );
+    };
+}
+```
+
+A room added later is a new entry in `peers.nix`, a new `hosts/<room>.nix`, and the walkthrough for its card; the flake picks it up from the list. Its keys need the steps under Adding or removing a room.
+
+### 4. Deploy every room
+
+Make the new files visible to the flake, then deploy each room the way the walkthrough does. Deploy every room in the same sitting: a room's keys only work with the keys of the same run on the other rooms.
+
+**workstation**, in the repository:
+```fish
+git add rooms secrets/kitchen-multiroom.yaml secrets/lab-multiroom.yaml .sops.yaml flake.nix
+```
+```fish
+nixos-rebuild switch --flake .#kitchen --target-host admin@kitchen.lan --build-host admin@kitchen.lan --sudo --ask-sudo-password
+```
+```fish
+nixos-rebuild switch --flake .#lab --target-host admin@lab.lan --build-host admin@lab.lan --sudo --ask-sudo-password
+```
+
+The first deploy builds nixtune-room (Haskell) and the Sendspin player (Python) on each Pi, running both test suites, which takes a while on a Pi.
+
+### 5. Check each room
+
+The group membership from `rooms/default.nix` takes effect on a new login, so these are fresh ssh sessions.
+
+**workstation**
+```fish
+ssh admin@kitchen.lan "systemctl is-active nixtune-room nixtune-player; nixtune-room ctl status"
+```
+
+That prints `active` twice and a status line starting `status room=kitchen intent=own` with `path=direct` in it. Then check that the secrets arrived, by length only:
+
+```fish
+ssh -t admin@kitchen.lan "sudo wc -c /run/secrets/nixtune-room/server-key /run/secrets/nixtune-room/player-key"
+```
+
+Each is 43 bytes. Repeat both for `lab.lan`.
+
+### 6. Group the rooms
+
+There is no rooms panel on the page yet, so grouping is done with `nixtune-room ctl` on the room that changes. Start music on the lab from its page, then:
+
+**workstation**
+```fish
+ssh admin@kitchen.lan "nixtune-room ctl follow lab"
+```
+
+It prints `ok` once the kitchen is playing the lab's music. The kitchen's status now reads `intent=following source=lab path=peer-server`, and the lab's reads `audience=kitchen path=own-server`. To take the kitchen back to its own queue:
+
+```fish
+ssh admin@kitchen.lan "nixtune-room ctl own"
+```
+
+The lab keeps streaming for ten seconds (`multiroom.timing.audienceGrace`) in case someone joins again, then goes back to playing straight to its DAC.
+
+### Using a group
+
+Every request goes to the coordinator of the room it is about, with `nixtune-room ctl <request>` on that room, and is answered `ok` or `refused <reason>`:
+
+| Request | What it does |
+| --- | --- |
+| `follow <room>` | This room plays `<room>`'s music. Its own MPD pauses where it was. |
+| `own` | This room goes back to its own queue, paused where it left it. |
+| `silence` | This room's speakers go quiet. A room that others are following keeps serving them. |
+| `pin <room>` | The room whose listening spot the group's timing is aligned to (see Acoustics), on the source room. `unpin` lets the source choose again. |
+| `status` | One line: what this room intends, what it follows, who follows it, and the path its DAC is on. |
+
+The refusals are `unknown-room` (not in `peers.nix`), `self`, `interrupted` (an AirPlay stream holds the room), `busy` (another request for this room is still waiting), `source-unreachable` (the source's coordinator did not answer) and `player-not-ready` (the source could not reach this room's player in time; see Troubleshooting).
+
+While a room follows another, the music is the source's: play, pause, skip and the queue are on the source room's page. The follower's own page shows its own paused queue. Volume is per room: each room's page still sets its own DAC's hardware volume, and that is the level its speakers play the group at.
+
+A follower that loses its source, because the source rebooted or dropped off the network, keeps trying to reach it for three minutes (`multiroom.timing.orphanTimeout`), longer than a Pi takes to reboot, and then goes back to its own queue, paused.
+
+AirPlay still works on every room. When an AirPlay stream starts on a room that is following, the room steps out of the group for as long as the stream lasts, and goes back to following when it ends; the source keeps its place for up to thirty minutes (`multiroom.timing.maxSuspension`). When AirPlay starts on a source, its followers keep playing the source's music.
+
+The `/room` websocket that pages and peers use speaks the same requests, one per line, and anyone on the LAN can send them, as anyone on the LAN can send MPD commands to the page's websocket. Port 8928, which carries the audio, accepts only the declared rooms' servers, through Noise with the pre-shared keys.
+
+### Acoustics
+
+A group plays in time at each room's DAC. Sound then takes time to travel, about 2.9 milliseconds per metre, so a listener standing in one room hears that room's speakers before the speakers in the next room. `multiroom.acoustics` declares those travel times, and the source delays the nearer rooms so that the sound from every room arrives together at one listening spot, the focus.
+
+`acoustics.<focus>.<room>` is the number of milliseconds from `<room>`'s speakers to the listening spot in `<focus>`, `<focus>` included. For a kitchen listener 2 metres from the kitchen speakers and 6 metres from the lab's, and a lab listener 2 metres from the lab speakers and 6 metres from the kitchen's:
+
+```nix
+acoustics = {
+  kitchen = {
+    kitchen = 6;
+    lab = 17;
+  };
+  lab = {
+    lab = 6;
+    kitchen = 17;
+  };
+};
+```
+
+Leave a room out of a focus where it cannot be heard. The focus is the source room while it plays its own queue, otherwise the first follower by name; `pin <room>` on the source fixes it. Without `acoustics` every room is aligned at its DAC, which is right for rooms you cannot hear from each other. A calibration by ear from the page is specified but not built yet, so the numbers come from a tape measure. Declare them in `rooms/default.nix`, because every room must hold the same ones.
+
+### Adding or removing a room, or replacing the keys
+
+The pre-shared keys are per pair of rooms, so a change to the list of rooms is a new run of `nixtune-room keys` for the whole home: run step 1 with the new list into an empty directory (it writes `rooms/keys.nix` again), add or remove the `.sops.yaml` rules, run step 2 for every room, edit `peers.nix`, and deploy every room in the same sitting. A room still holding keys from the earlier run is refused by the others until it is deployed. The same procedure replaces every key, for instance after a card is lost.
+
+### Troubleshooting
+
+Every check here prints states and log lines, never a secret.
+
+**workstation**
+```fish
+ssh admin@kitchen.lan "nixtune-room ctl status; mpc outputs"
+```
+```fish
+ssh admin@kitchen.lan "journalctl -b -u nixtune-room -u nixtune-player --no-pager -n 100"
+```
+
+`mpc outputs` shows what MPD is actually doing, which is what to compare with the status line: a room alone (`path=direct`) has its DAC output enabled and `(multiroom)` disabled, a source (`path=own-server`) has its DAC output disabled and `(multiroom)` enabled, and a follower (`path=peer-server`) has both disabled. These are the messages that matter, and what each one means:
+
+| Log line | Meaning |
+| --- | --- |
+| `the server key's public half is ..., but this room is declared with ...` | nixtune-room refuses to start: the room's server key and its `serverKey` in `keys.nix` are from different runs of `nixtune-room keys`. |
+| `PSK for <room>: ...` | A pre-shared key file is missing or is not a 32-byte key. Check the lengths as in step 5. |
+| `<room>'s player: does not hold this server's PSK (it answered with the Sentinel); its pairing store needs provisioning` | That room's player has keys from a different run. Deploy every room from the same run. |
+| `<room>'s player: answered with client_id ..., not the declared player key` | The player that answered is not the one `peers.nix` declares for that room: a wrong `host`, or keys from a different run. |
+| `<room>'s player: ...; trying again while it is held` | Nothing listens on that room's port 8928 yet. Normal for a moment while a player restarts; if a follow then fails `player-not-ready`, look at that room's own log. |
+| `Audio device 'nixtune' not found. Waiting for it to become available.` | The player started while another program had the DAC open, and waits for it. Something other than MPD is holding the card, since the coordinator frees it from MPD before the player needs it. |
+| `<source> did not answer hold <room>: ...` | The follower could not reach the source's coordinator through `http://<source host>/room`: a name that does not resolve, a source that is down, or a source without multiroom enabled. |
+| `the player did not report the DAC closed within 3 seconds; going on` | The player's stop hook did not reach the coordinator. The coordinator waits three seconds and goes on, and MPD may then find the card busy. |
+| `effect Act ... failed: ...` | A switch the coordinator meant to make did not happen; `mpc outputs` shows the result. |
+| `<room>'s player is a second behind; a chunk was dropped` | That room's network or player fell more than a second behind the group. A weak wifi link is the usual cause. |
+
+### What the network carries
+
+A group streams uncompressed PCM at `multiroom.streamFormat`, 44.1 kHz, 24 bits, stereo by default: about 2.1 Mbit/s to each room in the group, the source's own player included, which stays on the source. Most music libraries are 44.1 kHz, which then is not resampled, and 16-bit files pass through 24 bits unchanged. FLAC in the stream is planned.
+
+### Testing a change to multiroom
+
+`checks.x86_64-linux.multiroom` boots two rooms in VMs, with the player on snd-aloop in place of a DAC, and checks a whole cycle: both rooms start alone, the lab plays, the kitchen follows, both players receive and play the stream for a minute with no underflow or dropped chunk, the kitchen goes back to its own queue and both rooms' MPD outputs are switched back, and a player started while something else holds the DAC waits for it. It needs a machine with KVM:
+
+**workstation**, in a checkout of nixtune:
+```fish
+nix build .#checks.x86_64-linux.multiroom -L
+```
+
+`checks.x86_64-linux.rehearsal-multiroom` only builds a room's system, which is quicker and needs no KVM. The VMs cannot show how well the rooms keep time with each other: that needs real rooms and ears.
+
 ## Hardware
 
 One profile today, `pi5-dac2hd`: a Raspberry Pi 5 with a HiFiBerry DAC2 HD. The DAC's overlay, `hifiberry-dacplushd`, is applied two ways so that whichever device tree the kernel is given carries it: as a `config.txt` line for the GPU firmware, and at build time onto the generation's device tree with its compatible string rewritten for the Pi 5, because nixpkgs skips an overlay whose compatible string does not match the board. The ALSA card is addressed by name, `sndrpihifiberry`, so the Pi's HDMI audio devices cannot take its place by renumbering. Volume is the card's hardware control, `DAC`.
@@ -514,7 +911,7 @@ YouTube changes what yt-dlp has to do every few weeks. When fetches start failin
 
 ## Renderers
 
-**AirPlay** runs shairport-sync straight to the DAC. A hook before its first frame pauses MPD if it was playing, and a hook after its last resumes it if it was the one that paused it. MPD releases the card on pause, so AirPlay can open it.
+**AirPlay** runs shairport-sync straight to the DAC. A hook before its first frame pauses MPD if it was playing, and a hook after its last resumes it if it was the one that paused it. MPD releases the card on pause, so AirPlay can open it. With multiroom on, the hooks ask the room's coordinator instead, which also frees the DAC from the group's player and takes the room out of its group for as long as the stream lasts (see Using a group).
 
 **UPnP** runs upmpdcli, which drives MPD over the protocol rather than opening the card. Its package does not build yet.
 
@@ -539,6 +936,14 @@ The page is built from `packages/nixtune-web/spago.lock` with nothing but nixpkg
 - shairport-sync is given the hardware mixer, and nobody has yet checked whether its writes hold on this card.
 - The page reads the whole queue and the whole of an open playlist at once. Both are fine at a few hundred tracks and are meant to become windowed reads.
 - Nothing on the root filesystem is ephemeral yet; `persistPaths` is published for when it is.
+- Multiroom has been run in VMs, two rooms on snd-aloop, and not yet on two Pis. How the DAC2 HD behaves when it is handed between MPD and the player at real switch times is not yet known.
+- The page has no rooms panel: grouping is done with `nixtune-room ctl` or the `/room` websocket, and a following room's page shows its own paused queue rather than the source's.
+- How closely two rooms keep time has not been measured. `multiroom.acoustics` is declared by hand; the calibration by ear from the page is specified and not built.
+- Adding or removing a room means new keys for the whole home and a deploy of every room.
+- The player's start and stop hooks run as separate processes. When a player is handed straight from one room's server to another's, their reports to the coordinator can arrive out of order, and the coordinator may then hand the DAC back without waiting.
+- AirPlay is the only interruption a room understands. A Sendspin server that is not one of the declared rooms cannot reach the player at all yet.
+- A group streams PCM; FLAC in the stream, track metadata to followers, and one library shared by every room are planned.
+- The Sendspin protocol is a preview, and a new sendspin-cli or aiosendspin release can change the wire format or the player's state files. Move to a new release only as described under Maintenance.
 
 ## Notes
 
@@ -554,6 +959,8 @@ Screenshots:
 ## Maintenance
 
 `nix flake update` on the `update` branch, the workflow in `.github/workflows/check.yml`, merge to `main`. Nothing else.
+
+Sendspin is the exception: its releases are pinned in `packages/sendspin/python-overrides.nix`, not taken from nixpkgs, because nixpkgs carries older ones. To move to a newer release, set `version` and `tag` for `aiosendspin` or `sendspin` there, set `hash` to `lib.fakeHash`, run `nix build .#sendspin`, and copy the hash Nix reports into the file. The build applies nixtune's three patches to sendspin-cli and runs its test suite. A patch that no longer applies has to be remade against the new release; patches are byte-exact, so edit them as files and never paste them through a web page or chat, which strips the single spaces that blank context lines carry. Then run `nix build .#checks.x86_64-linux.multiroom` before deploying to any room.
 
 ## Licence
 
