@@ -133,7 +133,7 @@ folderView st =
             )
       )
   , if null st.entries then HH.p [ cls "empty" ] [ HH.text emptyText ]
-    else HH.ul [ cls "list" ] (map (entryRow st) st.entries)
+    else HH.ul [ cls "list" ] (map entryRow st.entries)
   ]
   where
   parts = if st.path == "" then [] else split (Pattern "/") st.path
@@ -144,21 +144,20 @@ folderView st =
     if st.status.updating then "Nothing here yet. The library is still being scanned."
     else "Nothing here. If the library is empty, the NAS may not be mounted yet."
 
-entryRow :: forall m. State -> Entry -> H.ComponentHTML Action () m
-entryRow st = case _ of
+entryRow :: forall m. Entry -> H.ComponentHTML Action () m
+entryRow = case _ of
   Dir d ->
     HH.li [ cls "dir" ]
       [ HH.button [ cls "grow", HE.onClick \_ -> Browse d ]
           [ HH.span [ cls "rowicon" ] [ iconSized "sm" "folder" ], HH.text (Mpd.basename d) ]
       , HH.button [ cls "ghost icon-btn", HP.title "Add this folder", HE.onClick \_ -> AddPath d ] [ iconSized "sm" "plus" ]
       ]
-  Playlist p ->
-    if st.role == Host then
-      HH.li [ cls "dir" ]
-        [ HH.button [ cls "grow", HE.onClick \_ -> Command ("load " <> Mpd.quote p) ]
-            [ HH.span [ cls "rowicon" ] [ iconSized "sm" "list" ], HH.text p ]
-        ]
-    else HH.text ""
+  -- A playlist file found in the library: written by some other program
+  -- years ago, naming paths that were true for that program. MPD indexes
+  -- them because the m3u plugin is on for nixtune's own playlists (see
+  -- database.nix), and the page leaves them out. The playlists worth
+  -- loading are the saved ones, on the Queue view.
+  Playlist _ -> HH.text ""
   File s -> songRow s
 
 -- | One track in a folder listing.
@@ -461,5 +460,6 @@ scanBanner st =
       ]
   else if st.songs == 0 then
     HH.div [ cls "scan idle" ]
-      [ HH.span_ [ HH.text "The library has not been scanned. The first scan starts two minutes after boot; if the NAS was down then, the host can start it with Rescan." ] ]
+      [ HH.span_ [ HH.text ("The library has not been scanned. The first scan starts two minutes after boot; if the NAS was down then, the host can start it with Rescan.") ]
+      ]
   else HH.text ""

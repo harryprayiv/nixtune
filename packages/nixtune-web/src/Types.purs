@@ -35,6 +35,23 @@ data View = NowPlaying | Queue | Library | Radio | Qr
 
 derive instance eqView :: Eq View
 
+-- | What the host's Queue view shows: the queue itself, the playlists
+-- | saved on the player, or one of them open for editing, by name.
+data QueuePane = PaneQueue | PaneSaved | PaneEdit String
+
+derive instance eqQueuePane :: Eq QueuePane
+
+-- | One playlist saved on the player: MPD's stored playlists, in its
+-- | playlist directory, which outlives the queue and a reboot.
+type SavedPlaylist = { name :: String, modified :: String }
+
+-- | A playlist action waiting for the press that confirms it: replacing
+-- | a saved playlist with the queue, or deleting one. Both are
+-- | irreversible, like clearing the queue.
+data PlArm = ArmReplace String | ArmDelete String
+
+derive instance eqPlArm :: Eq PlArm
+
 -- | How the library is being looked at. The folder tree is what MPD
 -- | indexes; the tag browser is what a person actually chooses music by.
 data BrowseMode = Tags | Folders
@@ -81,6 +98,10 @@ data Req
   -- Whether MPD takes regular expression filters, asked once per
   -- command connection. An ACK means it was built without pcre.
   | RProbe
+  -- The playlists saved on the player, and one playlist's tracks by its
+  -- name, so a reply for a playlist that is no longer open is dropped.
+  | RSaved
+  | RPlaylistSongs String
   | RFire
 
 -- | One connection: its socket, whether MPD has greeted on it, and two
@@ -211,8 +232,21 @@ type State =
   -- timer that disarms it can tell whether a later press re-armed it.
   , clearArmed :: Maybe Int
   , clearTick :: Int
-  -- The queue row under the finger, while one is being dragged.
+  -- The queue row under the finger, while one is being dragged. In an
+  -- open playlist the same drag moves that playlist's rows.
   , drag :: Maybe Drag
+  -- The host's Queue view: which pane is up, the playlists saved on the
+  -- player, the tracks of the open one, the save-as and rename fields,
+  -- a replace or delete waiting for its second press (numbered like
+  -- clearArmed), and the last word about a playlist action.
+  , pane :: QueuePane
+  , saved :: Array SavedPlaylist
+  , plSongs :: Array Song
+  , plName :: String
+  , plRename :: String
+  , plArmed :: Maybe { arm :: PlArm, press :: Int }
+  , plTick :: Int
+  , plNote :: Maybe String
   -- The tag browser or the folder tree.
   , mode :: BrowseMode
   -- The tag browser: its columns, their selections and the track list.
@@ -258,6 +292,14 @@ initial =
   , clearArmed: Nothing
   , clearTick: 0
   , drag: Nothing
+  , pane: PaneQueue
+  , saved: []
+  , plSongs: []
+  , plName: ""
+  , plRename: ""
+  , plArmed: Nothing
+  , plTick: 0
+  , plNote: Nothing
   , mode: Tags
   , browser: emptyBrowser 800.0
   }
@@ -330,13 +372,27 @@ data Action
   | YtChunk String
   | YtText String
   | YtSubmit Event
+  -- Saved playlists, on the host's Queue view: switching panes, the
+  -- save-as field and its submit, play (replace the queue), add (append
+  -- to it), append the queue to a playlist, delete, the rename field and
+  -- its submit, and removing one row of the open playlist.
+  | SetPane QueuePane
+  | PlNameText String
+  | SaveQueue Event
+  | PlayPlaylist String
+  | AddPlaylist String
+  | AppendQueueTo String
+  | DeletePlaylist String
+  | RenameText String
+  | RenamePlaylist Event
+  | PlRemove Int
   | UpdateLibrary
 
 -- | The monad every handler and helper runs in.
 type M o m = H.HalogenM State Action () o m
 
 idleCommand :: String
-idleCommand = "idle player mixer playlist options database update sticker"
+idleCommand = "idle player mixer playlist stored_playlist options database update sticker"
 
 stickerName :: String
 stickerName = "nixtune.added_by"
@@ -407,6 +463,9 @@ isQuiet = case _ of
   RStickers -> true
   RVetoes -> true
   RProbe -> true
+  -- A playlist deleted from another page between the click that opened
+  -- it and the reply: the editor says so from the saved list instead.
+  RPlaylistSongs _ -> true
   _ -> false
 
 -- | Every attribution in the database, in one command.

@@ -20,9 +20,11 @@ import Library (libraryView)
 import Mpd (PlayState(..))
 import Mpd as Mpd
 import Player (playerBar, seekRow)
+import PlaylistView as PlaylistView
 import Reorder (rowRef, rowShift)
 import Types
   ( Action(..)
+  , QueuePane(..)
   , Role(..)
   , State
   , View(..)
@@ -194,21 +196,30 @@ clearButton st =
   where
   armed = isJust st.clearArmed
 
+-- | The Queue view. The host's has two panes: the queue, with the
+-- | YouTube field and the save-as field above it, and the playlists saved
+-- | on the player, one of which can be open for editing (PlaylistView). A
+-- | guest's is the queue alone, and only in party mode.
 queueView :: forall m. State -> Array (H.ComponentHTML Action () m)
-queueView st =
-  youtubeForm st
-    <>
-  [ if st.role == Host then
-      HH.div [ cls "row-actions" ]
-        [ clearButton st ]
-    else if partyOn st then
-      HH.p [ cls "note" ]
-        [ HH.text ("Vote a track off and it goes when " <> show (vetoLimit st) <> " people agree. One vote each.") ]
-    else HH.text ""
-  , if null st.queue then HH.p [ cls "empty" ] [ HH.text "The queue is empty. Add something from the library or pick a station." ]
-    else HH.ul [ classes ([ "list" ] <> (if isJust st.drag then [ "dragging" ] else [])) ] (Array.mapWithIndex item st.queue)
-  ]
+queueView st = case st.role, st.pane of
+  Host, PaneSaved -> [ PlaylistView.paneSwitch st [] ] <> PlaylistView.savedView st
+  Host, PaneEdit name -> [ PlaylistView.paneSwitch st [] ] <> PlaylistView.editView st name
+  Host, PaneQueue ->
+    [ PlaylistView.paneSwitch st [ clearButton st ] ]
+      <> youtubeForm st
+      <> PlaylistView.saveForm st
+      <> [ queueList ]
+  Guest, _ ->
+    [ if partyOn st then
+        HH.p [ cls "note" ]
+          [ HH.text ("Vote a track off and it goes when " <> show (vetoLimit st) <> " people agree. One vote each.") ]
+      else HH.text ""
+    , queueList
+    ]
   where
+  queueList =
+    if null st.queue then HH.p [ cls "empty" ] [ HH.text "The queue is empty. Add something from the library or pick a station." ]
+    else HH.ul [ classes ([ "list" ] <> (if isJust st.drag then [ "dragging" ] else [])) ] (Array.mapWithIndex item st.queue)
   -- Where the player is. Everything before it has been played, which is
   -- what dims those rows; with random on the order is not the order they
   -- were heard in, so nothing is dimmed.

@@ -6,23 +6,26 @@
 #
 # MPD recognises playlist files it finds in the library (.m3u, .pls, .xspf,
 # .asx, .rss, .cue, and cuesheets embedded in FLAC files) and indexes them
-# beside the directories and songs, so lsinfo returns them and the page
-# offers them. A library that decades of other programs have written to is
-# full of these, and they point at paths that were true when some other
-# program wrote them. Every playlist plugin MPD carries is off here, so the
-# database holds directories and audio files and nothing else.
+# beside the directories and songs, so lsinfo returns them. A library that
+# decades of other programs have written to is full of these, and they
+# point at paths that were true when some other program wrote them.
 #
-# Two consequences, both deliberate:
+# MPD's own stored playlists, the ones the page saves from the queue, are
+# m3u files in its playlist directory, and loading one or listing its
+# tracks goes through the same plugin registry as a playlist found in the
+# library: load and listplaylistinfo fail without the m3u plugin. Writing
+# and editing do not need it (save, playlistadd, playlistmove,
+# playlistdelete, rename and rm work on the file directly), which is why
+# saving worked before loading did.
 #
-#   An album ripped as one file plus a .cue is one long track, because the
-#   cue that would split it is not read. Per-track files are unaffected.
+# So m3u and extm3u are on, for nixtune's playlists, and every other
+# playlist plugin is off. The library's own .m3u files are indexed as a
+# consequence; the page leaves them out of the folder listing, and the tag
+# browser never sees them because `list` and `find` return songs only.
 #
-#   MPD's own stored playlists cannot be LOADED. Writing one still works
-#   (the save command writes the file itself), but loading goes through the
-#   same plugin registry as a playlist found in the library, so it needs
-#   the m3u plugin. When nixtune grows playlists of its own, m3u and extm3u
-#   come back on and the page filters the library's playlist entries out of
-#   its listing instead.
+# One consequence of the plugins left off, deliberate: an album ripped as
+# one file plus a .cue is one long track, because the cue that would split
+# it is not read. Per-track files are unaffected.
 #
 # ============================================================================
 # THE DATABASE AND THE EXPORT MUST AGREE
@@ -57,21 +60,21 @@ let
   cfg = config.services.nixtune;
   mpd = config.services.mpd;
 
-  # Every playlist plugin in MPD 0.24, by the name its config block uses.
-  # The NixOS mpd module validates the rendered mpd.conf by running mpd on
-  # it at build time, so a name MPD does not know fails the build here
-  # rather than the daemon on the player.
-  playlistPlugins = [
-    "extm3u"
-    "m3u"
-    "pls"
-    "xspf"
-    "asx"
-    "rss"
-    "flac"
-    "cue"
-    "embcue"
-  ];
+  # Every playlist plugin in MPD 0.24, by the name its config block uses,
+  # and whether it is on. The NixOS mpd module validates the rendered
+  # mpd.conf by running mpd on it at build time, so a name MPD does not
+  # know fails the build here rather than the daemon on the player.
+  playlistPlugins = {
+    extm3u = true;
+    m3u = true;
+    pls = false;
+    xspf = false;
+    asx = false;
+    rss = false;
+    flac = false;
+    cue = false;
+    embcue = false;
+  };
 
   # The string the stamp holds. A host with no library still gets a stamp,
   # so moving from an export to none and back is caught as well.
@@ -87,9 +90,8 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
-    services.mpd.settings.playlist_plugin = map (name: {
-      inherit name;
-      enabled = false;
+    services.mpd.settings.playlist_plugin = lib.mapAttrsToList (name: enabled: {
+      inherit name enabled;
     }) playlistPlugins;
 
     systemd.services.nixtune-database-stamp = {

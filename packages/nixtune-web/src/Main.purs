@@ -38,6 +38,8 @@
 -- |   Library.purs  the Library view: search, tag browser, folders
 -- |   Filter.purs   MPD filter expressions and their escaping
 -- |   Youtube.purs  queueing a track from a YouTube link
+-- |   Playlists.purs      saved playlists: the commands
+-- |   PlaylistView.purs   saved playlists: the Queue view's panes
 -- |   Ui.purs       class attributes, glyphs, the format badge
 -- |   Mpd.purs      the protocol's text, parsed
 -- |   Caps.purs     capabilities.json
@@ -81,6 +83,7 @@ import Types
   , M
   , Req(..)
   , Role(..)
+  , State
   , View(..)
   , arrived
   , clearConfirmMs
@@ -102,6 +105,7 @@ import Types
   )
 import Volume (setVolume)
 import Youtube as Youtube
+import Playlists as Playlists
 import Web.Event.Event (EventType(..), preventDefault)
 import Web.HTML (window)
 import Web.HTML.HTMLDocument as HTMLDocument
@@ -216,6 +220,8 @@ handle = case _ of
       send Cmd RQueue "playlistinfo"
       send Cmd RStickers stickerFind
       send Cmd RVetoes vetoFind
+      st <- H.get
+      when (st.role == Host) Playlists.refresh
     when (v == Library) do
       st <- H.get
       case st.mode of
@@ -260,14 +266,18 @@ handle = case _ of
   VolumeKey k -> when (k == "Enter") (handle CommitVolume)
   GrabRow i ev -> do
     st <- H.get
+    let
+      -- The queue's rows, or the open playlist's: the two are never on
+      -- the page at once, and both carry the same row refs.
+      rows = shownRows st
     -- A pointer event is a mouse event, so one pair of handlers covers a
     -- mouse, a finger and a stylus. preventDefault stops the drag being
     -- read as a text selection; touch-action on the handle stops it
     -- being read as a scroll.
-    for_ (MouseEvent.fromEvent ev) \me -> when (isNothing st.drag && length st.queue > 1) do
+    for_ (MouseEvent.fromEvent ev) \me -> when (isNothing st.drag && rows > 1) do
       liftEffect (preventDefault ev)
-      mids <- rowMiddles (length st.queue)
-      when (length mids == length st.queue) do
+      mids <- rowMiddles rows
+      when (length mids == rows) do
         doc <- liftEffect (window >>= document)
         let
           target = HTMLDocument.toEventTarget doc
@@ -296,18 +306,23 @@ handle = case _ of
       let
         to = dragTarget d
         at j = fromMaybe j (Array.index st.queue j >>= _.pos)
-      when (to /= d.from) (send Cmd RFire ("move " <> show (at d.from) <> " " <> show (at to)))
+      case Playlists.editing st of
+        Just _ -> Playlists.move d.from to
+        Nothing -> when (to /= d.from) (send Cmd RFire ("move " <> show (at d.from) <> " " <> show (at to)))
   GripKey pos ev -> do
     st <- H.get
     let
-      lastPos = length st.queue - 1
+      lastPos = shownRows st - 1
+      step to = case Playlists.editing st of
+        Just _ -> Playlists.move pos to
+        Nothing -> send Cmd RFire ("move " <> show pos <> " " <> show to)
     case KE.key ev of
       "ArrowUp" -> when (pos > 0) do
         liftEffect (preventDefault (KE.toEvent ev))
-        send Cmd RFire ("move " <> show pos <> " " <> show (pos - 1))
+        step (pos - 1)
       "ArrowDown" -> when (pos < lastPos) do
         liftEffect (preventDefault (KE.toEvent ev))
-        send Cmd RFire ("move " <> show pos <> " " <> show (pos + 1))
+        step (pos + 1)
       _ -> pure unit
   ToggleMute -> do
     st <- H.get
@@ -444,6 +459,23 @@ handle = case _ of
   YtChunk raw -> Youtube.received raw
   YtText t -> H.modify_ _ { ytText = t }
   YtSubmit ev -> Youtube.submit ev
+  SetPane p -> Playlists.setPane p
+  PlNameText t -> H.modify_ _ { plName = t, plArmed = Nothing }
+  SaveQueue ev -> Playlists.saveQueue ev
+  PlayPlaylist n -> Playlists.play n
+  AddPlaylist n -> Playlists.append n
+  AppendQueueTo n -> Playlists.appendQueue n
+  DeletePlaylist n -> Playlists.delete n
+  RenameText t -> H.modify_ _ { plRename = t }
+  RenamePlaylist ev -> Playlists.rename ev
+  PlRemove i -> Playlists.remove i
+
+-- | How many rows the reorderable list on screen has: the open
+-- | playlist's while one is open, the queue's otherwise.
+shownRows :: State -> Int
+shownRows st = case Playlists.editing st of
+  Just _ -> length st.plSongs
+  Nothing -> length st.queue
 
 -- | The tag browser has just come on screen. Its columns were fetched at
 -- | startup, so this usually asks for nothing; a page whose fetch never
@@ -511,6 +543,10 @@ changed block = do
   -- playlist back even though the page's own tab is what gates the
   -- fetch above.
   when (elem "changed: playlist" block && st.view == Queue) (send Cmd RVetoes vetoFind)
+  -- Every stored playlist command raises this, from this page or any
+  -- other, so the saved list and the open playlist are only ever what
+  -- MPD has on disk.
+  when (elem "changed: stored_playlist" block && st.view == Queue && st.role == Host) Playlists.refresh
   when (elem "changed: database" block || elem "changed: update" block) do
     -- Only the folder tree is refreshed here. The tag columns follow
     -- the database stamp that this `stats` carries, so reloading them
@@ -565,6 +601,8 @@ reply req block = case req of
   RTracks w -> Tags.tracks w block
   -- An OK is the answer; the reply's rows do not matter.
   RProbe -> Tags.modifyBrowser _ { regex = true }
+  RSaved -> Playlists.savedReply block
+  RPlaylistSongs n -> Playlists.songsReply n block
   RFire -> pure unit
 
 -- | What the search box holds, as a search: trimmed, and Nothing when it
