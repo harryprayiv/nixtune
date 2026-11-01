@@ -552,6 +552,12 @@ Screenshots:
 ![broswe phone](imgs/2026-10-31_22-45.png)
 
 ## Maintenance
+![screen1](imgs/2026-10-30_21-41.png)
+![screen2](imgs/2026-10-30_21-44.png)
+![screen3](imgs/2026-10-30_21-47.png)
+![party mode, guest page](imgs/party-guest.png)
+
+## Maintenance
 
 `nix flake update` on the `update` branch, the workflow in `.github/workflows/check.yml`, merge to `main`. Nothing else.
 
