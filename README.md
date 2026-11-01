@@ -544,12 +544,12 @@ The page is built from `packages/nixtune-web/spago.lock` with nothing but nixpkg
 
 I made massive changes to this to iterate on the complex task of an everyday-use audio interface. There are a lot of non-obvious properties of such a module that I had to arrive at through experimentation. I have lots of ambition here and will continue to iterate.
 
-Current screenshots:
+Screenshots:
 
-![screen1](imgs/2026-10-30_21-41.png)
-![screen2](imgs/2026-10-30_21-44.png)
-![screen3](imgs/2026-10-30_21-47.png)
-![party mode, guest page](imgs/party-guest.png)
+![now playing](imgs/2026-10-31_22-42.png)
+![queue](imgs/2026-10-31_22-44_1.png)
+![browse](imgs/2026-10-31_22-44.png)
+![broswe phone](imgs/2026-10-31_22-45.png)
 
 ## Maintenance
 
