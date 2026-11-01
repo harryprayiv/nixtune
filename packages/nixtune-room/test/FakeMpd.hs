@@ -6,6 +6,7 @@ module FakeMpd
   , startFakeMpd
   , mpdLog
   , mpdOutputs
+  , dropClients
   )
 where
 
@@ -30,6 +31,7 @@ data FakeMpd = FakeMpd
   , fakeVersion :: TVar Int
   , fakeOutputs :: TVar (Map Int (Text, Bool))
   , fakeLog :: TVar [Text]
+  , fakeClients :: TVar [Socket.Socket]
   }
 
 mpdLog :: FakeMpd -> IO [Text]
@@ -37,6 +39,13 @@ mpdLog f = reverse <$> readTVarIO (fakeLog f)
 
 mpdOutputs :: FakeMpd -> IO (Map Int (Text, Bool))
 mpdOutputs = readTVarIO . fakeOutputs
+
+-- | Close every client connection, as MPD does to a client that has been
+-- quiet for its connection_timeout, or when it restarts.
+dropClients :: FakeMpd -> IO ()
+dropClients f = do
+  cs <- atomically (swapTVar (fakeClients f) [])
+  mapM_ (\c -> Socket.shutdown c Socket.ShutdownBoth `catchSync` \_ -> pure ()) cs
 
 -- | Output 0 is the DAC, output 1 the multiroom fifo, both as nixtune's
 -- MPD has them before the daemon starts: whatever the state file said.
@@ -53,8 +62,10 @@ startFakeMpd playing = do
       <*> newTVarIO 0
       <*> newTVarIO (Map.fromList [(0, ("dac", False)), (1, ("multiroom", True))])
       <*> newTVarIO []
+      <*> newTVarIO []
   void . forkIO . forever $ do
     (c, _) <- Socket.accept s
+    atomically (modifyTVar' (fakeClients f) (c :))
     void . forkIO $ (serve f c `catchSync` \_ -> pure ()) `finally` Socket.close c
   pure f
 

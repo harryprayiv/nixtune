@@ -8,8 +8,8 @@
 # kitchen's player and its own, with credentials provisioned from the
 # secret files; PCM reaches both players and plays for a minute without
 # an underflow or a dropped chunk; leaving puts both rooms back on the
-# direct path, each coordinator waiting for its player to report the DAC
-# closed; and a player started while something else holds the DAC waits
+# direct path, with MPD's outputs switched back, each coordinator waiting
+# for its player to report the DAC closed; and a player started while something else holds the DAC waits
 # for it instead of exiting. snd-aloop gets one substream per device, as a
 # DAC has, so a held device is really busy. What it cannot prove: sync
 # between the two outputs, which needs the real rooms and a microphone
@@ -157,6 +157,15 @@ pkgs.testers.runNixOSTest {
     with subtest("each coordinator heard its player close the DAC before giving it back"):
         for machine in (kitchen, lab):
             machine.fail("journalctl -u nixtune-room.service | grep 'did not report the DAC closed'")
+
+    # A coordinator's status says what it intends; MPD's outputs say what
+    # it did. After a minute of nothing on its command connection, MPD had
+    # closed it, and the switches back failed while the status read direct.
+    with subtest("both rooms have the DAC output back on and the multiroom output off"):
+        for machine in (kitchen, lab):
+            machine.wait_until_succeeds("mpc outputs | grep -q '(null) is enabled'", timeout=timedelta(seconds=10))
+            machine.succeed("mpc outputs | grep -q '(multiroom) is disabled'")
+            machine.fail("journalctl -u nixtune-room.service | grep -E 'effect .* failed'")
 
     with subtest("a player started while something else holds the DAC waits for it"):
         kitchen.succeed(

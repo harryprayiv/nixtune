@@ -176,6 +176,14 @@ spec = describe "two daemons" $ do
         wait leaving `shouldReturn` Right (Right ())
       after' <- settled dacEnables (== before' + 1)
       after' `shouldBe` before' + 1
+  it "carries on after MPD drops its connections, as it does to quiet clients" $
+    withHome $ \h kd _ -> do
+      dropClients (kitchenMpd h)
+      dropClients (labMpd h)
+      askRoom h kitchen (ReqFollow lab) `shouldReturn` Right (Right ())
+      _ <- eventually kd ((== "peer-server") . wsPath)
+      has "disableoutput 0" (kitchenMpd h) `shouldReturn` True
+      has "enableoutput 1" (labMpd h) `shouldReturn` True
   it "refuses to follow a room that is not running, and stays as it was" $
     withHome $ \h kd _ -> do
       askRoom h kitchen (ReqFollow livingRoom) `shouldReturn` Right (Left SourceUnreachable)

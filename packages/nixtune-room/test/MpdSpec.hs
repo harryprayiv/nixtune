@@ -1,6 +1,8 @@
 module MpdSpec (spec) where
 
 import Data.Maybe (mapMaybe)
+import FakeMpd
+import Nixtune.Mpd.Client qualified as Client
 import Nixtune.Mpd.Protocol
 import Test.Hspec
 
@@ -29,3 +31,11 @@ spec = describe "MPD protocol" $ do
             ]
     parseOutputs kv `shouldBe` [Output 0 "sndrpihifiberry" True, Output 1 "multiroom" False]
     fmap outputId (outputNamed "multiroom" (parseOutputs kv)) `shouldBe` Just 1
+  it "sends a command again on a new connection after MPD closes the old one" $ do
+    f <- startFakeMpd True
+    c <- Client.connect "127.0.0.1" (fakePort f)
+    Client.command c "status" `shouldReturn` Done [("state", "play")]
+    dropClients f
+    Client.command c "pause 1" `shouldReturn` Done []
+    mpdLog f `shouldReturn` ["pause 1"]
+    Client.close c

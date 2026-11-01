@@ -71,7 +71,11 @@
 -- release order (KnownIssue release_does_not_wait_for_player), through
 -- the player's stop hook, and a player that waits for a busy DAC
 -- (KnownIssue player_starts_only_with_dac_free), both by patches to
--- sendspin-cli.
+-- sendspin-cli. The same runs found that MPD closes a client that sends
+-- nothing for its connection_timeout (60 seconds by default), which the
+-- coordinator's command connection is whenever the room plays alone or
+-- in a steady group; nixtune-room's MPD client now reconnects and sends
+-- the command again, once.
 -- The open questions at the end are the next round. One room exists:
 -- the kitchen (the Pi, host nixtune).
 --
