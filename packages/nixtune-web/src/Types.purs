@@ -198,11 +198,13 @@ type State =
   -- once the list runs out.
   , artTry :: Int
   -- The YouTube helper's socket, when the host has one; what is in the
-  -- link field; whether a fetch is under way; and the last thing the
-  -- helper said, shown under the field.
+  -- link field; whether a request is under way; which video of how many
+  -- the helper is on, which is one of one for a video link; and the last
+  -- thing the helper said, shown under the field.
   , ytLink :: Maybe { socket :: WebSocket, ready :: Boolean }
   , ytText :: String
   , ytBusy :: Boolean
+  , ytCount :: { at :: Int, total :: Int }
   , ytNote :: Maybe String
   -- The Clear button has been pressed once and is waiting for the
   -- second press that confirms it. The number names the press, so the
@@ -251,6 +253,7 @@ initial =
   , ytLink: Nothing
   , ytText: ""
   , ytBusy: false
+  , ytCount: { at: 0, total: 0 }
   , ytNote: Nothing
   , clearArmed: Nothing
   , clearTick: 0

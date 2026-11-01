@@ -24,6 +24,7 @@ import Browse
   , modifyColumn
   , orElse
   , pickedBy
+  , pinFirst
   , railLetters
   , rightOf
   , rowHeight
@@ -282,9 +283,13 @@ tagValues axis gen block = do
 -- | was narrowing is asked for again. That happens after a rescan that
 -- | removed something, and when a search no longer matches it.
 arrive :: forall o m. MonadAff m => Axis -> Array TagValue -> Boolean -> M o m Unit
-arrive axis values store = do
+arrive axis fetched store = do
   st <- H.get
   let
+    -- The YouTube row is pinned here rather than in what is stored, so
+    -- the store holds the library's own order and a host rebuilt with a
+    -- different youtube.artist pins the right row from a warm store.
+    values = pinFirst (st.caps >>= _.youtubeArtist) axis fetched
     br = st.browser
     col = columnOf axis br
     held v = Array.any (\x -> x.display == v) values
@@ -301,7 +306,7 @@ arrive axis values store = do
   -- Only the whole-library lists are what the browser's store is keyed
   -- on; a narrowed or searched one is not that list.
   when (store && isPlain axis br) $
-    liftEffect (Cache.write (tagOf axis) st.dbStamp values)
+    liftEffect (Cache.write (tagOf axis) st.dbStamp fetched)
 
 -- | The library connection went away, or was dropped to cancel. Replies
 -- | to what was outstanding will never come, so nothing may wait for

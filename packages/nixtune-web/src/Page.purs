@@ -270,10 +270,11 @@ queueView st =
           ]
       ]
 
--- | A YouTube link to fetch into the library and queue, on the host page
--- | of a host built with services.nixtune.youtube. The field stays as
--- | typed while the fetch runs and empties when the track is queued; the
--- | line under it is the last thing the helper said.
+-- | A YouTube video or playlist link to fetch into the library and queue,
+-- | on the host page of a host built with services.nixtune.youtube. The
+-- | field stays as typed while the request runs and empties once anything
+-- | from it is queued; the line under it is the last thing the helper
+-- | said.
 youtubeForm :: forall m. State -> Array (H.ComponentHTML Action () m)
 youtubeForm st =
   if st.role /= Host || isNothing (st.caps >>= _.youtubePath) then []
@@ -282,7 +283,7 @@ youtubeForm st =
         [ HH.form [ cls "search", HE.onSubmit YtSubmit ]
             [ HH.input
                 [ HP.type_ HP.InputUrl
-                , HP.placeholder "YouTube link to add to the queue"
+                , HP.placeholder "YouTube video or playlist link to add to the queue"
                 , HP.value st.ytText
                 , HP.disabled st.ytBusy
                 , HE.onValueInput YtText

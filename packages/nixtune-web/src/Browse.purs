@@ -309,6 +309,20 @@ columnValues axis byYear block =
           }
   order = if byYear then byYearThenKey else byKey
 
+-- | A column with one value moved to its head whatever its sort key: in
+-- | the artist column, on a host with the YouTube helper, the album
+-- | artist the downloads are tagged with (Caps.youtubeArtist). It takes
+-- | the empty key, which is the key that sorts first, so the letter rail,
+-- | which is worked out from the keys, counts it under # with everything
+-- | else that sorts before A. Any other column, or a column without that
+-- | value, is returned as it came.
+pinFirst :: Maybe String -> Axis -> Array TagValue -> Array TagValue
+pinFirst name axis values = case axis, name of
+  AxArtist, Just n -> case Array.partition (\v -> v.display == n) values of
+    { yes: [ v ], no } -> Array.cons (v { key = "" }) no
+    _ -> values
+  _, _ -> values
+
 -- | The first four characters of a Date tag, when they are a year.
 yearOf :: String -> Maybe Int
 yearOf d = case Int.fromString (String.take 4 d) of

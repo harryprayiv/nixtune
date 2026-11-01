@@ -280,13 +280,14 @@ in
 
     youtube = {
       enable = lib.mkEnableOption ''
-        queueing a track from a YouTube link.
+        queueing tracks from a YouTube link.
 
-        The host page gains a field for a YouTube link. The player fetches
-        the audio with yt-dlp into youtube.directory, a folder inside the
-        library export on the NAS, has MPD index it, and adds it to the end
-        of the queue. youtube.nix describes what the helper will and will
-        not run.
+        The host page gains a field for a YouTube video or playlist link.
+        The player fetches the audio with yt-dlp into youtube.directory, a
+        folder inside the library export on the NAS, has MPD index it, and
+        adds it to the end of the queue: one track for a video, the
+        playlist's tracks in order for a playlist. youtube.nix describes
+        what the helper will and will not run.
 
         The folder has to exist on the NAS before the first fetch, and the
         export has to let this host write to it: either the export maps all
@@ -322,6 +323,25 @@ in
         type = types.strMatching "[0-9]+[KMG]";
         default = "300M";
         description = "The largest audio stream the helper will download, in yt-dlp's notation.";
+      };
+      artist = mkOption {
+        type = types.strMatching "[A-Za-z0-9][A-Za-z0-9 ._-]*";
+        default = "YouTube";
+        description = ''
+          The album artist every download is tagged with. The page pins this
+          row to the top of its artist column, so the downloads are one
+          place to look until they are retagged. Letters, digits, spaces,
+          dots, underscores and hyphens.
+        '';
+      };
+      maxPlaylistItems = mkOption {
+        type = types.ints.between 1 500;
+        default = 50;
+        description = ''
+          How many videos of a playlist link the helper fetches, from the
+          top. The limits above apply to each of them. The videos are fetched
+          one after another, so a long playlist fills the queue over minutes.
+        '';
       };
     };
 

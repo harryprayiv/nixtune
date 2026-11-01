@@ -41,6 +41,9 @@ type Caps =
   -- Where YouTube links are sent, or null when the host has no YouTube
   -- helper. See nix/module/youtube.nix.
   , youtubePath :: Maybe String
+  -- The album artist those downloads are tagged with, which heads the
+  -- artist column, or null without the helper.
+  , youtubeArtist :: Maybe String
   , maxVolume :: Int
   , publicUrl :: String
   , hostPath :: String

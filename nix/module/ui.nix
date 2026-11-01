@@ -50,6 +50,9 @@ let
       # Where YouTube links go, or null when youtube.nix is off. Like the
       # volume helper, a socket nginx serves beside the page.
       youtubePath = cfg.youtube.path;
+      # The album artist youtube.nix tags downloads with, which the page
+      # pins to the top of the artist column; null when it is off.
+      youtubeArtist = cfg.youtube.pinnedArtist;
       maxVolume = cfg.mpd.maxVolume;
       # Party mode and how many votes it takes to drop a track. Both are
       # build-time facts, like everything else here.
