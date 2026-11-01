@@ -1,0 +1,67 @@
+cabal-version:      3.0
+name:               nixtune-room
+version:            0.1.0.0
+synopsis:           The nixtune multiroom daemon: coordinator and Sendspin server
+description:
+  One process per nixtune room. It decides what the room's DAC plays,
+  serves the room's MPD to other rooms over the Sendspin protocol, and
+  answers pages and peers. Specified in .inference/nixtune-multiroom.allium.
+  This package is built in stages; stage 1 is the pure core: the
+  coordinator as a state machine, the audio path derived from it, the
+  ordering of output switches, acoustic alignment, the Sendspin time
+  filter and psk_id.
+license:            AGPL-3.0-or-later
+author:             Harry Pray IV
+maintainer:         harry@harryprayiv.com
+category:           Sound
+build-type:         Simple
+
+common warnings
+  default-extensions: DerivingStrategies OverloadedStrings
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wmissing-export-lists
+    -Wpartial-fields -Wredundant-constraints -Wunused-packages
+
+library
+  import:           warnings
+  hs-source-dirs:   src
+  default-language: GHC2021
+  exposed-modules:
+    Nixtune.Room.Clock
+    Nixtune.Room.Coordinator
+    Nixtune.Room.Focus
+    Nixtune.Room.Name
+    Nixtune.Room.Outputs
+    Nixtune.Room.Protocol
+    Nixtune.Room.State
+    Nixtune.Sendspin.PskId
+    Nixtune.Sendspin.TimeFilter
+  build-depends:
+    , base        >=4.17 && <5
+    , bytestring  >=0.11 && <0.13
+    , containers  >=0.6  && <0.8
+    , crypton     >=1.0  && <1.1
+    , memory      >=0.18 && <0.19
+    , text        >=2.0  && <2.2
+
+test-suite nixtune-room-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  default-language: GHC2021
+  main-is:          Main.hs
+  other-modules:
+    CoordinatorSpec
+    FocusSpec
+    Generators
+    OutputsSpec
+    SendspinSpec
+  build-depends:
+    , base
+    , bytestring
+    , containers
+    , hspec         >=2.10 && <2.12
+    , nixtune-room
+    , QuickCheck    >=2.14 && <2.16
+    , text

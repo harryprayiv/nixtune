@@ -1,0 +1,1769 @@
+-- allium: 3
+--
+-- nixtune multiroom: several nixtune hosts in one home, each a room with
+-- its own MPD, its own queue and its own volume, any of which can play
+-- in sync with any other, take the music from another room, or hand its
+-- music to another room. There is no controller host. Every room is a
+-- peer; a group is a room whose Sendspin server is holding other rooms'
+-- players, and nothing else records it.
+--
+-- THIS FILE AND ITS SIBLINGS. nixtune.allium covers one player: the
+-- module, the hardware, the library, the renderers and their
+-- arbitration. nixtune-page.allium covers the page. This file covers
+-- what changes when more than one room exists: the audio transport
+-- between rooms (Sendspin), the per-room daemon that serves it and
+-- decides what the room's DAC plays, the credentials, the acoustic
+-- alignment between rooms, interruptions, the shared library and
+-- playlists, the page's rooms panel, publishing, and the failure rules.
+-- Where this file changes a rule in nixtune.allium (output arbitration,
+-- the database, decision 3, how the module gets its packages), it names
+-- the rule.
+--
+-- STATUS, 2026-11-01: DRAFT, nothing built. The basis for a new branch
+-- of ~/git/nixtune. Decided in two rounds of questions today:
+--   transport Sendspin, server written in Haskell (M1);
+--   a room alone keeps the direct path (M4);
+--   nixtune-room is Haskell, a static aarch64 binary via haskell.nix
+--     (M10), published from the flake with a binary cache (M17);
+--   rooms declared in Nix only (M7);
+--   one room writes the library database to the NAS for the others
+--     (M12); saved playlists in one NAS directory (M13);
+--   credentials provisioned from sops from day one, pairing mandatory,
+--     with a layer or a fork where sendspin-cli lacks a way (M15);
+--   AirPlay, a foreign Sendspin server and any later announcement
+--     source interrupt a room and then return it to exactly where it
+--     was; a group whose source room is interrupted keeps playing (M16);
+--   three rooms, audible from each other, two of them wired; per-room
+--     and per-pair delays are numbers declared in Nix and found with a
+--     calibration step (M14).
+-- Decided in a third round:
+--   the rooms are kitchen, lab and living-room, all stereo (THE HOME);
+--   nixtune-room for the fleet comes from the self-hosted attic cache,
+--     and a cache for other adopters waits until there are some (M17);
+--   the focus moves only when pinned (M14);
+--   the player is sendspin-cli, patched and wrapped, with no native
+--     player planned unless sendspin-cli causes a problem nixtune cannot
+--     fix around it; nixtune's own Sendspin code is the server, covering
+--     the spec subset nixtune uses rather than parity with the Python
+--     projects (M18);
+--   lab and living-room are wired, the kitchen stays on Wi-Fi, the lab
+--     is the library writer, and pinning is on the rooms panel only;
+--   the kitchen feeds M-Audio monitors, the lab Yamaha monitors through
+--     an Ashly rack mixer, the living room KRK monitors and a sub through
+--     an 8-channel Ashly rack mixer, none with DSP.
+-- Build started 2026-11-01 with stage 1: nixtune-room's pure core (the
+-- coordinator as a pure state machine, the audio path derived from it,
+-- acoustic alignment, the spec's time filter, psk_id) and its tests.
+-- The open questions at the end are the next round. One room exists:
+-- the kitchen (the Pi, host nixtune).
+--
+-- ============================================================================
+-- THE HOME
+-- ============================================================================
+--
+--   kitchen      the Pi 5 with the HiFiBerry DAC2 HD built so far, host
+--                nixtune. Its room name is declared, because it differs
+--                from the host name.
+--                On Wi-Fi. Feeds a pair of M-Audio monitors.
+--   lab          a second nixtune, to be built. Wired. Feeds an Ashly rack
+--                mixer driving Yamaha studio monitors. The library
+--                writer, because it is wired and rarely in use.
+--   living-room  a third nixtune, to be built. Wired. Feeds an 8-channel
+--                Ashly rack mixer driving two KRK studio monitors and a
+--                subwoofer.
+-- All three are stereo, with no DSP anywhere in the chain and none
+-- planned, so every outputDelay starts at 0 and calibration confirms or
+-- corrects it. Each room can be heard from the others to some degree,
+-- which is why acoustics are declared for every pair. The two wired
+-- rooms report the smallest buffers; the kitchen, on Wi-Fi, sets the
+-- send-ahead of any group it is in.
+--
+-- ============================================================================
+-- WHAT EXISTS, CHECKED 2026-11-01
+-- ============================================================================
+--
+-- Synchronised playback across rooms has several mature FOSS answers,
+-- and every one has the same shape: one process per group stamps each
+-- chunk of audio with the time it must leave the speaker; every player
+-- keeps an estimate of the offset between its clock and that process's
+-- clock, measured continuously; every player corrects for its own DAC's
+-- crystal running fast or slow by dropping or duplicating single
+-- samples or by resampling. They differ in the clock protocol, the wire
+-- format, security and who controls a group.
+--
+--   AES67 / Dante / RAVENNA (pro audio). PTP (IEEE 1588) with hardware
+--     timestamps, a grandmaster elected by PTP's Best Master Clock
+--     Algorithm, uncompressed RTP multicast at a fixed link offset.
+--     Sub-microsecond. PipeWire speaks AES67 from 1.1.0 and the Pi 5's
+--     Ethernet does hardware timestamping, but it needs every room
+--     wired and a multicast-friendly switch. One of the three rooms
+--     stays on Wi-Fi. Not used.
+--   Snapcast (v0.35.0, 2026-03-10; in nixpkgs with a NixOS module).
+--     Clients sync to one snapserver over the TCP connection that
+--     carries the audio and correct drift by removing or duplicating
+--     single samples; the README gives a typical deviation below 0.2 ms,
+--     as a claim rather than a requirement. One fixed buffer per server
+--     (1000 ms by default), one stream format per server, plain TCP
+--     unless optional TLS is set up, and a client follows the one server
+--     on its command line. Not chosen (M1).
+--   Sendspin (Open Home Foundation; spec at github.com/Sendspin/spec,
+--     last changed 2026-10-28). Websocket transport; a mandated
+--     two-dimensional Kalman filter for clock offset and drift; a
+--     normative accuracy floor of +-1 ms at the output and a target of
+--     +-0.5 ms; per-player output delay that the player persists and a
+--     server may set; per-player lead time from which the server sets
+--     one send-ahead for the group; multiple servers by design, where a
+--     player holds one admitted connection and a server that connects
+--     declaring playback takes it over; external-source handling; Noise
+--     KKpsk2 encryption with Curve25519 identities and pairing; roles
+--     for player, controller, metadata, artwork, visualizer and colour.
+--     A technical preview whose spec changed substantially in 2026.
+--     Implementations: aiosendspin and Music Assistant (Python, the only
+--     production servers), sendspin-cli (Python player, in nixpkgs),
+--     sendspin-go (marked unmaintained 2026-10-14), sendspin-rs (Rust,
+--     client only, marked work in progress). Chosen (M1).
+--   AirPlay 2 (shairport-sync with NQPTP). Grouping is done by the
+--     sender; NQPTP owns UDP 319 and 320. Not a group transport here.
+--   Lyrion Music Server with squeezelite. One central server owns every
+--     group. The model this file rejects.
+--   moOde's multiroom. trx multicasting Opus over RTP with no clock sync
+--     at all, a fixed delay that relies on the network delivering every
+--     packet to every receiver within about 1 ms, and a sender that
+--     cannot be a receiver. Nothing of it is reused.
+--
+-- What none of these does: let every room keep its own player and
+-- queue, group and ungroup with no central server, move a session from
+-- one room to another without stopping it, and align the rooms
+-- acoustically for wherever the listener is. Sendspin's multiple-server
+-- rule is the closest any protocol comes, and this file builds the rest
+-- on it.
+--
+-- ============================================================================
+-- WHAT TIMING NEEDS NUMBERS AND WHAT DOES NOT
+-- ============================================================================
+--
+-- Three different delays reach a listener's ear, and only two of them
+-- are declared.
+--
+--   Network delay, including how far a room is from the router and
+--     whether it is wired. Not declared. Sendspin's clock filter measures
+--     the offset between each player and the server continuously and
+--     removes it, so the network's delay never shows up as a timing
+--     error. What the network does change is jitter: a Wi-Fi room needs
+--     a deeper buffer, it reports that as min_buffer_ms, and the server
+--     sets the whole group's send-ahead from the deepest buffer any
+--     member asks for. A wired room on its own, or a group of wired
+--     rooms, runs with less delay.
+--   Output delay, per room: anything after the DAC's output, such as an
+--     amplifier or speaker with its own DSP. Declared as outputDelay.
+--     Usually 0 for a passive amplifier.
+--   Acoustic delay, per pair of rooms: the time sound takes from one
+--     room's speakers to the place a listener stands in another room,
+--     about 2.9 ms per metre. Declared as acoustics, and the only
+--     number that depends on where the listener is.
+--
+-- A one-off "start at time T" between rooms, with latencies measured
+-- once, was the first idea and was rejected: two DAC crystals 50 ppm
+-- apart drift 3 ms apart every minute, and Wi-Fi delay changes packet
+-- by packet. Only continuous correction at the player holds rooms
+-- together, and MPD has none.
+--
+-- ============================================================================
+-- THE MODEL
+-- ============================================================================
+--
+-- Every room runs, beside MPD:
+--
+--   nixtune-room, one Haskell process, which is:
+--     - the room's Sendspin SERVER. Its one audio source is this room's
+--       MPD, through a fifo output. It connects out to the players it
+--       is asked to hold, and sets each one's output delay for the
+--       current focus.
+--     - the room's COORDINATOR. It owns the room's intent (below), its
+--       MPD output switches and its interruptions, answers pages and
+--       peers, and reconciles what is with what is intended.
+--     - an MPD client of its own room's MPD, for metadata, for pause and
+--       skip handling, and for the output switches.
+--   a Sendspin PLAYER on the room's DAC (sendspin-cli's daemon to start
+--     with), always running and listening, admitting only servers it
+--     holds a provisioned pairing record for, and opening the DAC only
+--     after its coordinator has freed it.
+--
+-- Each room's coordinator is the only writer of that room's INTENT:
+--
+--   own        the speaker plays this room's MPD
+--   following  the speaker plays another room's server; `source` names it
+--   silent     the speaker plays nothing; this room's MPD may still be
+--              feeding other rooms
+--
+-- A room's AUDIENCE is the set of other rooms' players its server holds
+-- with the playback activity, plus those SUSPENDED (interrupted for a
+-- while, and coming back). A room with an audience is a SOURCE. A GROUP
+-- is a source plus its audience, plus the source room itself when its
+-- intent is own. A player belongs to exactly one server at a time, by
+-- Sendspin's own rule, so a speaker is in exactly one group and groups
+-- cannot chain: a room that follows another while it has an audience is
+-- a source whose own speaker is elsewhere.
+--
+-- An INTERRUPTION (AirPlay, a paired foreign Sendspin server, later
+-- Bluetooth) sits on top of a room's intent without changing it. When it
+-- ends, the room is put back exactly as it was.
+--
+-- What feeds the DAC follows from intent, audience and interruption:
+--
+--   interrupted  intent     audience  DAC fed by                    bit-perfect
+--   yes          any        any       the interrupting source        -
+--   no           own        none      MPD's ALSA output, as today    yes
+--   no           own        some      own player, from own server    no
+--   no           following  any       own player, from the source    no
+--   no           silent     some      nothing; MPD feeds the server  -
+--   no           silent     none      not a resting state: own, paused
+--
+-- ============================================================================
+-- DESIGN DECISIONS
+-- ============================================================================
+--
+--   M1. The transport is Sendspin, and nixtune's server is written in
+--       Haskell inside nixtune-room. Chosen over Snapcast for the
+--       specified accuracy, the per-player lead time and output delay,
+--       the multiple-server rule (which is the decentralised model this
+--       file needs), external-source handling, mandatory encryption, and
+--       the metadata and visualizer roles the party direction will want.
+--       The cost, accepted: the spec is a preview and nixtune tracks it;
+--       the server is ours to write. cacophony, the Haskell Noise
+--       library, has KKpsk2, Curve25519, ChaChaPoly and AES-GCM.
+--   M2. No group is stored. Each room writes only its own intent; each
+--       server knows only the players it holds. A group is derived by
+--       asking every room for its status. Nothing is elected or
+--       replicated, because no fact has two writers.
+--   M3. Rooms reconcile. Each coordinator compares its intent with what
+--       is (which server holds its player, whether its source still
+--       exists, whether its source has moved) every
+--       config.reconcile_interval and on every event, and corrects the
+--       difference by asking, never by writing another room's state.
+--   M4. A room alone keeps today's path exactly: MPD straight to the
+--       DAC, no resampling, no format conversion. Only a room in a group
+--       plays through Sendspin. Group playback is not bit-perfect: MPD
+--       resamples to multiroom.streamFormat, and the player drops and
+--       duplicates single samples to hold sync, which Sendspin's own
+--       guidance notes leaves the audio bit-exact between corrections.
+--       Switching costs a gap in the source room when its first
+--       follower arrives and when its last one leaves.
+--   M5. Transport commands from a room that is following go to the
+--       source's MPD. A page in a following room shows the source's
+--       queue and sends play, pause, next and queue edits there. One
+--       queue per group; MPD stays the truth for it.
+--   M6. Volume is per room, written by that room's volume helper on its
+--       own hardware mixer. nixtune's server never sends a volume or
+--       mute command; the only player command it sends is
+--       set_output_delay (M14). The player's software volume stays at
+--       100 and its hardware volume is off: sendspin-cli's
+--       use_hardware_volume, on by default in daemon mode, would write
+--       the DAC2 HD's mixer, which is the write nixtune.allium's
+--       mpd_setvol_mutes_dac2hd says goes to mute. A group volume
+--       control on the page is a relative change sent to each member
+--       room's own helper.
+--   M7. Rooms are declared in Nix: multiroom.peers is the same list on
+--       every room, with each room's server and player public keys.
+--       Servers connect to declared hosts only and never browse mDNS.
+--   M8. Intent lives in /run. A room that reboots comes back own and
+--       paused. A source that reboots keeps its audience, because the
+--       followers did not reboot and their intent still names it; they
+--       ask it to hold them again when it returns, and fall back to own
+--       only after config.orphan_timeout.
+--   M9. Two ways to take music to another room, the cheap one first.
+--       BRING: the destination follows the source and the origin goes
+--       silent; nothing is copied and nothing stops. MOVE: the
+--       destination copies the source's queue and position into its own
+--       MPD and becomes the source; the old source returns to own and
+--       paused; its audience is taken over by the new source. MOVE has a
+--       gap; it exists because a BRING leaves the old room's MPD tied up
+--       feeding the group.
+--   M10. nixtune-room is the first resident service in nixtune, and it
+--       ends nixtune.allium's decision 3 for this feature: a server that
+--       timestamps audio, answers clock exchanges and reconciles while
+--       no page is open cannot be a one-shot helper. The page still
+--       holds no state of its own about groups and never writes MPD
+--       outputs or starts units.
+--   M11. Pause and skip are immediate in a group. The source's server
+--       watches its MPD; on pause, a seek, or a song change before the
+--       previous song ended, it sends stream/clear so every player drops
+--       what it has buffered, and on pause it seeks MPD back by the
+--       audio that was sent but not yet heard, so resuming loses
+--       nothing. A natural track change is not cleared, so gapless
+--       albums stay gapless.
+--   M12. One library database for the home. The room declared as
+--       multiroom.library.writer scans, as every room does today, and
+--       publishes its database file to the NAS after each scan. Every
+--       other room never scans: it adopts a newer published database
+--       when it is idle, by copying the file and restarting MPD. No room
+--       depends on another being up to see its library.
+--   M13. One saved-playlist directory for the home, on the NAS, as
+--       every room's MPD playlist_directory. MPD replaces a saved
+--       playlist through a temporary file and a rename, so no room ever
+--       reads half a file. Two rooms editing the same playlist at the
+--       same moment lose one edit (KnownIssue shared_playlist_races).
+--   M14. Acoustic alignment for a FOCUS room. Rooms that can hear each
+--       other line up at the listener only if each speaker leads by the
+--       extra distance its sound travels to reach them. The focus is the
+--       room the listener is in; for focus f, each member r of the group
+--       gets output_delay = outputDelay[r] + (A - acoustics[f][r]), where
+--       acoustics[f][r] is the travel time from r's speakers to f's
+--       listening spot and A is the largest acoustics[f][x] over the
+--       group's members. The focus room itself, nearest to the
+--       listener, therefore gets the most added delay, and the farthest
+--       audible room gets none. That delay is a few tens of
+--       milliseconds on top of a send-ahead the whole group already
+--       runs on; what the listener hears is one sound with no echo from
+--       the rooms next door. Sendspin forbids negative output delays,
+--       which this form never needs. A room not declared audible from f
+--       is treated as if it were the focus. The focus moves only when a
+--       room is pinned on the rooms panel; unpinned, it is the source
+--       room when the source room is listening, otherwise the first
+--       member by name. When it moves, the server sends
+--       set_output_delay to every member, and the player moves to the
+--       new delay gradually instead of restarting. Following the
+--       listener automatically (the last page touch, presence) is
+--       deferred (Multiroom.focus_follows_listener).
+--   M15. Credentials are provisioned from sops, and every connection is
+--       paired. Each room has a server identity and a player identity
+--       (Curve25519 private keys), and every ordered pair (server room,
+--       player room) has a long-term PSK. Public keys are declared in
+--       Nix; private keys and PSKs live in sops. nixtune's server and
+--       nixtune's players hold pairing records for each other from first
+--       boot, and players run with unpaired access off. sendspin-cli has
+--       no option for provisioned credentials, so nixtune provides the
+--       layer (rule PlayerCredentialsProvisioned) and carries a patch
+--       where sendspin-cli's behaviour is wrong for this (KnownIssue
+--       player_start_hook_does_not_wait), offered upstream.
+--   M16. Interruptions return the room to where it was. AirPlay starting,
+--       a declared foreign Sendspin server taking the player (an
+--       announcement, say), or any later renderer suspends the room's
+--       part in its group for as long as it lasts and then restores the
+--       room's intent, its source and its MPD's play state. A source
+--       room that is interrupted keeps feeding its group; only its own
+--       speaker changes. A follower that is interrupted is SUSPENDED in
+--       its source's audience, so the source does not switch paths for
+--       an announcement.
+--   M17. nixtune-room is a package of this flake, published. haskell.nix
+--       becomes an input of the public flake; packages.<sys>.nixtune-room
+--       is a static musl binary for x86_64-linux and aarch64-linux
+--       (cross-built), and the module defaults
+--       services.nixtune.multiroom.package to this flake's own package
+--       for the host's system, so a host fetches it from a binary cache
+--       instead of building GHC. That changes nixosModules.default from
+--       a path to a function of the flake, which nixtune.allium's
+--       decision about the module bringing its own packages built with
+--       the host's pkgs does not cover; this package is the exception.
+--       For the fleet, the cache is the self-hosted attic: winsmuth
+--       builds both systems and pushes them there, and neoblade-config
+--       lists that cache as a substituter. The nixtune flake does not
+--       name the attic cache in its nixConfig, because adopters would
+--       then be asked to trust a private cache; a public cache for
+--       adopters waits until there are adopters (KnownIssue
+--       binary_cache_needed).
+--   M18. The player starts as sendspin-cli, patched and wrapped, and
+--       nixtune's own Sendspin code covers the spec, not the Python
+--       projects. Everything in the Sendspin organisation is Apache-2.0
+--       and the spec is under the Community Specification License with
+--       a patent grant; both allow an AGPLv3 nixtune to implement the
+--       spec, carry patches, and port logic with attribution in a
+--       NOTICE file. Measured 2026-11-01 in non-blank, non-comment lines
+--       of Python: aiosendspin's server 15,036, its client 3,916, its
+--       Noise and pairing 3,393, its audio 1,165, and sendspin-cli
+--       8,851; sendspin-rs, a client only, is 6,880 lines of Rust.
+--       Parity with that is not a goal: most of it serves Music
+--       Assistant, Chromecast, a party mode, terminal and web user
+--       interfaces and code-based pairing for devices with screens.
+--       nixtune implements the subset it uses, conformant to the spec
+--       for each role it claims:
+--         nixtune-room's server (needed first, there is no other non-
+--           Python server): core messages, Noise KKpsk2 with
+--           provisioned PSKs, the time responder, FLAC encoding,
+--           send-ahead across a group, stream start, clear and end,
+--           set_output_delay, player@v1 and metadata@v1;
+--         only if sendspin-cli causes a problem nixtune cannot fix
+--           around it, a native player behind SendspinPlayer: the Noise
+--           responder, the spec's time filter (an exact algorithm, about
+--           a hundred lines), FLAC decoding, buffer accounting, and the
+--           real-time ALSA output with sample insertion and deletion.
+--           The last is the hard part, because GHC's garbage collector
+--           must never stall the output; it is planned as a small C
+--           ring buffer and output thread called through the FFI, with
+--           Haskell doing everything else.
+--       Not planned: code-based pairing (CPace), which only devices
+--       without provisioned keys need; the controller, artwork,
+--       visualizer and colour roles until the features that use them.
+--       sendspin-cli is what plays, with nixtune's patch (KnownIssue
+--       player_start_hook_does_not_wait) and nixtune's provisioning
+--       layer (rule PlayerCredentialsProvisioned) around it. Neither is
+--       large: the patch awaits one hook, and the layer writes two JSON
+--       files from sops.
+--       Build order: the server and coordinator first, developed
+--       against MultiroomRehearsal (three VMs with sendspin-cli
+--       players), which needs no second Pi; then the kitchen plus one
+--       wired room; then calibration on the real rooms.
+--
+-- ============================================================================
+-- MODULE OPTIONS (planned; services.nixtune.multiroom.*)
+-- ============================================================================
+--
+--   enable          false. Off contributes nothing (nixtune.allium
+--                   decision 2).
+--   package         this flake's packages.<system>.nixtune-room.
+--   room            this room's name, strMatching "[a-z][a-z0-9-]*".
+--                   Defaults to networking.hostName.
+--   peers           attrset by room name of { host; serverKey;
+--                   playerKey; outputDelay; }, every room in the home,
+--                   this one included, identical on every room. The keys
+--                   are base64url Curve25519 public keys, which are the
+--                   Sendspin server_id and client_id. outputDelay is in
+--                   milliseconds, 0 to 5000.
+--   acoustics       attrset of attrsets, acoustics.<focus>.<room> =
+--                   milliseconds of travel from <room>'s speakers to the
+--                   listening spot in <focus>. Rooms that cannot be heard
+--                   from <focus> are left out. Found by calibration
+--                   (rule CalibrationAdjusts) and then declared.
+--   secrets         sops paths: serverPrivateKey, playerPrivateKey,
+--                   and psks.<serverRoom>.<playerRoom> for every pair
+--                   this room takes part in, both directions.
+--   interrupters    attrset by name of { serverKey; } for foreign
+--                   Sendspin servers allowed to interrupt this room's
+--                   player, with their PSKs under secrets.psks.<name>.
+--                   Empty by default.
+--   streamFormat    "44100:24:2". MPD resamples to it in group mode only.
+--                   44.1 kHz because most of the library is 44.1 kHz and
+--                   is then not resampled; 24 bits so 16-bit files pass
+--                   through unchanged. FLAC at 44.1 or 48 kHz and 16 or 24
+--                   bits is what every Sendspin server and player must
+--                   support.
+--   library.writer  the room that scans and publishes the database.
+--   library.published  path on the NAS mount for the published database.
+--   playlists.path  path on the NAS mount for the shared playlist
+--                   directory.
+--   wifiPowerSave   false. Turned off on the wireless interface when
+--                   multiroom is enabled; a radio that sleeps between
+--                   packets stalls a live stream.
+--
+-- `nixtune-room keys --rooms kitchen,lab,living-room` (run on winsmuth)
+-- prints a sops-ready YAML of private keys and PSKs and the Nix
+-- attrset of public keys, so nothing is copied by hand from one room's
+-- status to another's declaration.
+--
+-- capabilities.json gains a `multiroom` object: { room, peers: [{ room,
+-- url }], roomPath, libraryWriter: Boolean, libraryId }, where libraryId
+-- is the library.export string database.nix already stamps. MOVE
+-- refuses a pair of rooms whose libraryId differs.
+
+------------------------------------------------------------
+-- Given
+------------------------------------------------------------
+
+given {
+    home: Home
+    room: Room
+}
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity Home {
+    rooms: Set<Room>
+    nas: Nas
+}
+
+-- A browser showing some room's page. It can talk to every peer.
+external entity Client {
+    served_by: Room
+    role: host | guest
+}
+
+-- A Sendspin server that is not a nixtune room: Music Assistant, Home
+-- Assistant announcements. Admitted only if declared as an interrupter
+-- with a provisioned PSK; otherwise the player refuses it in the
+-- handshake.
+external entity ForeignServer {
+    name: String
+    server_key: String
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value Peer {
+    room: String
+    host: String
+    server_key: String
+    player_key: String
+    output_delay: Duration
+    link: wired | wifi
+}
+
+value StreamFormat {
+    codec: flac | pcm
+    rate: Integer
+    bits: Integer
+    channels: Integer
+}
+
+-- What the coordinator saves when an interruption starts and restores
+-- when it ends.
+value Resumption {
+    intent: Intent
+    source: Room?
+    mpd_was_playing: Boolean
+}
+
+-- What a coordinator answers to `status` and pushes on every change.
+value RoomStatus {
+    room: String
+    intent: Intent
+    source: String?
+    audience: Set<String>
+    suspended: Set<String>
+    moved_to: String?
+    path: AudioPath
+    interrupted_by: String?
+    focus: String?
+    library_id: String
+    database_version: Timestamp?
+}
+
+value Group {
+    source: Room
+    members: Set<Room>
+    focus: Room
+}
+
+-- What a MOVE copies from the old source's MPD into the new one.
+value Session {
+    uris: List<String>
+    current: Integer?
+    elapsed: Duration?
+    state: playing | paused | stopped
+    repeat: Boolean
+    random: Boolean
+    single: Boolean
+    consume: Boolean
+    audience: Set<Room>
+    focus: Room?
+    focus_pinned: Boolean
+}
+
+------------------------------------------------------------
+-- Enums
+------------------------------------------------------------
+
+enum Intent { own | following | silent }
+
+-- What feeds the DAC. `direct` is today's path.
+enum AudioPath { direct | own_server | peer_server | off | interrupted }
+
+enum Interrupter { airplay | upnp | foreign_sendspin }
+
+enum Outcome { done | refused }
+
+enum RefusalReason {
+    unknown_room
+    self
+    library_differs
+    source_unreachable
+    source_is_following
+    player_not_ready
+    interrupted
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+-- The room's Sendspin server, inside nixtune-room.
+contract SendspinServer {
+    hold: (player: Peer) -> Outcome
+    suspend: (player: Peer) -> Outcome
+    release: (player: Peer) -> Outcome
+    audience: () -> Set<Peer>
+    clear: () -> Result
+    set_delay: (player: Peer, delay: Duration) -> Result
+
+    @invariant ConformsToSpec
+        -- Core messages version 1; roles player@v1 and metadata@v1.
+        -- controller@v1, artwork@v1 and visualizer@v1 are deferred.
+        -- Both cipher suites. server/time answered per spec, stamped as
+        -- late as the implementation allows, from CLOCK_MONOTONIC in
+        -- microseconds. The server records the spec commit it
+        -- implements in its server/hello.
+
+    @invariant OneSource
+        -- The only audio is this room's MPD, read from its fifo output
+        -- in multiroom.streamFormat, except the click track of a
+        -- calibration (rule CalibrationAdjusts), which the server
+        -- generates itself. The server never decodes files.
+
+    @invariant ServerInitiatedOnly
+        -- The server connects out to declared players' hosts on port
+        -- 8928, path /sendspin, and never browses mDNS. It also listens
+        -- on 8927 for client-initiated connections, as servers must
+        -- support, without advertising _sendspin-server._tcp.
+
+    @invariant PairedOnly
+        -- Every handshake uses a provisioned long-term PSK. A client_id
+        -- that is not a declared player key is refused in the
+        -- handshake. No Sentinel-keyed session ever reaches playback.
+
+    @invariant OneSendAheadForTheGroup
+        -- The send-ahead is the maximum over held players of
+        -- min_buffer_ms plus output_delay_ms, recomputed when a player
+        -- joins, leaves or reports new timing. MPD's fifo output paces
+        -- in real time, so the stream is live in the spec's sense.
+
+    @invariant OnlyDelayCommands
+        -- M6. server/command is only ever set_output_delay.
+
+    @guidance
+        -- Haskell: websockets for the transport, cacophony for Noise,
+        -- a small FFI binding to libFLAC's stream encoder, stm for the
+        -- shared state, and the MPD protocol spoken directly over the
+        -- loopback socket. Chunks of 20 to 50 ms; the spec bounds them at
+        -- 15 to 150 ms. MPD's output: type "fifo", name "multiroom",
+        -- path /run/nixtune/room/fifo, format <streamFormat>, disabled
+        -- at boot. MPD's 24-bit format is 24 bits in 32-bit containers;
+        -- the server packs it for FLAC. suspend keeps a player in the
+        -- audience for path decisions while another server holds it.
+}
+
+-- The room's Sendspin player on the DAC.
+contract SendspinPlayer {
+    client_id: () -> String
+
+    @invariant AlwaysListening
+        -- Runs whenever multiroom is enabled, on port 8928, so a peer
+        -- can hold it and an interrupter can reach it at any time.
+
+    @invariant PairedServersOnly
+        -- Unpaired access off. It admits only servers for which it
+        -- holds a provisioned pairing record: the declared rooms'
+        -- servers and the declared interrupters.
+
+    @invariant OpensDacOnlyWhenFreed
+        -- On stream/start it runs its start hook, which asks the room's
+        -- coordinator to free the DAC, and opens the output only after
+        -- the hook returns. On stream/end it closes the output and runs
+        -- its stop hook. Both hooks carry the server_id, which is how the
+        -- coordinator tells a peer from an interrupter.
+
+    @invariant NoVolumeOfItsOwn
+        -- Software volume fixed at 100; hardware volume off.
+
+    @guidance
+        -- To start with: sendspin-cli's `sendspin daemon` from nixpkgs
+        -- (python3Packages.sendspin) pinned to a tested version, with
+        -- --name <room>, --audio-device <output.device>, --port 8928,
+        -- --audio-format flac:<streamFormat>, --hardware-volume false,
+        -- --unpaired-access false, --output-delay-ms <outputDelay>,
+        -- --hook-start and --hook-stop calling the coordinator. Its
+        -- settings, identity and pairing store live in its
+        -- StateDirectory and are written by PlayerCredentialsProvisioned
+        -- before every start. A native player replaces it later behind
+        -- this contract; that is the hardest part of the design
+        -- (real-time ALSA output and drift correction) and is
+        -- deliberately not first.
+}
+
+-- The room's authority, inside nixtune-room.
+contract Coordinator {
+    status: () -> RoomStatus
+    follow: (target: String) -> Outcome
+    own: () -> Outcome
+    silence: () -> Outcome
+    hold: (room: String) -> Outcome
+    suspend: (room: String) -> Outcome
+    move_from: (source: String) -> Outcome
+    hand_over: (to: String) -> Session
+    focus: (room: String, pinned: Boolean) -> Outcome
+    interruption_starts: (by: Interrupter, server_key: String?) -> Outcome
+    interruption_ends: (by: Interrupter) -> Outcome
+    calibrate: (focus: String, room: String, travel: Duration) -> Outcome
+
+    @invariant SingleWriter
+        -- Only room r's coordinator writes r.intent, r.source,
+        -- r.moved_to, r.resumption, r's MPD output switches and r's
+        -- interruption state. Requests from pages and peers are requests.
+
+    @invariant Serialised
+        -- One request at a time per coordinator, in arrival order.
+
+    @invariant AnswersFromMemory
+        -- status never waits on a peer, so a page drawing every room is
+        -- never held up by one room that is down.
+
+    @invariant HooksAnswerFast
+        -- interruption_starts returns as soon as the DAC is free, so
+        -- an AirPlay or Sendspin stream is never held up by a peer call.
+
+    @guidance
+        -- A websocket line protocol, one request per line, one reply per
+        -- line, plus pushed status lines; served by nixtune-room itself
+        -- on 127.0.0.1:8605 behind nginx /room, the same reach as the
+        -- other helpers. Peers use the same endpoint through the peer's
+        -- nginx. The AirPlay hooks and the player's hooks call it
+        -- through a local Unix socket instead, so a hook never depends
+        -- on nginx.
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity Room {
+    name: String
+    host: String
+    peers: Set<Peer>
+    intent: Intent
+    source: Room?
+    moved_to: Room?
+    audience: Set<Room>
+    suspended: Set<Room>
+    held_by: Room?
+    path: AudioPath
+    interrupted_by: Interrupter?
+    resumption: Resumption?
+    focus: Room?
+    focus_pinned: Boolean
+    mpd_playing: Boolean
+    alsa_output_enabled: Boolean
+    fifo_output_enabled: Boolean
+    output_delay: Duration
+    library_id: String
+    library_writer: Boolean
+    library_published: String
+    database_version: Timestamp?
+    source_unreachable_since: Timestamp?
+    audience_empty_since: Timestamp?
+
+    invariant SourceOnlyWhenFollowing {
+        (intent = following) = (source != null)
+    }
+
+    invariant NeverFollowsItself {
+        source != this
+    }
+
+    invariant InterruptedHasResumption {
+        (path = interrupted) = (interrupted_by != null)
+        and (interrupted_by != null) = (resumption != null)
+    }
+
+    invariant AlsaOutputOnlyWhenDirect {
+        alsa_output_enabled implies path = direct
+    }
+
+    invariant FifoOutputOnlyWithListeners {
+        fifo_output_enabled implies
+            ((audience + suspended).count > 0 or audience_empty_since != null or path = own_server)
+    }
+
+    invariant HeldByMatchesPath {
+        (path = own_server implies held_by = this)
+        and (path = peer_server implies held_by = source)
+    }
+
+    invariant FocusIsAMember {
+        focus != null implies focus in DerivedGroup(this).members
+    }
+}
+
+entity HandoffRun {
+    kind: bring | move
+    origin: Room
+    destination: Room
+    source: Room
+    started: Timestamp
+    finished: Timestamp?
+    gap: Duration?
+    outcome: Outcome?
+}
+
+entity CalibrationRun {
+    focus: Room
+    room: Room
+    travel: Duration
+    started: Timestamp
+    finished: Timestamp?
+}
+
+entity PublishedDatabase {
+    writer: Room
+    path: String
+    version: Timestamp
+    library_id: String
+}
+
+entity KnownIssue {
+    name: String
+    status: open | closed
+    effect: String
+    closes_when: String
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    room_port: Integer = 8605
+    server_port: Integer = 8927
+    player_port: Integer = 8928
+    stream_format: StreamFormat = { codec: flac, rate: 44100, bits: 24, channels: 2 }
+    reconcile_interval: Duration = 2.seconds
+    audience_grace: Duration = 10.seconds
+    orphan_timeout: Duration = 3.minutes
+    player_ready_timeout: Duration = 10.seconds
+    max_suspension: Duration = 30.minutes
+    move_gap_budget: Duration = 2.seconds
+    database_poll: Duration = 5.minutes
+    max_output_delay: Duration = 5.seconds
+}
+
+-- orphan_timeout is longer than a Pi 5 takes to reboot, so a source that
+-- reboots keeps its audience (M8). audience_grace keeps a source on its
+-- server path through a follower's reconnect, so a Wi-Fi blip in one
+-- room does not cost the source room two gaps. player_ready_timeout
+-- covers the player's start plus its time filter converging, before
+-- which a Sendspin player must not report itself available.
+
+------------------------------------------------------------
+-- Defaults
+------------------------------------------------------------
+
+default KnownIssue spec_is_preview = {
+    name: "Sendspin is a technical preview",
+    status: open,
+    effect: "a spec change can break nixtune's server against newer players, or the pinned sendspin-cli against nixtune's server",
+    closes_when: "Sendspin declares a stable core and player@v1; until then the server names the spec commit it implements and the rehearsal pins the player version"
+}
+
+default KnownIssue player_store_is_private_format = {
+    name: "credentials reach sendspin-cli through its own state files",
+    status: open,
+    effect: "PlayerCredentialsProvisioned writes identity-daemon.json and pairing-store-daemon.json in the formats aiosendspin's FileClientPairingStore and sendspin-cli's settings use today; those are implementation files, not a documented interface, and a new version can change them",
+    closes_when: "sendspin-cli takes provisioned credentials through a documented option (offered upstream), or the native player replaces it; until then the rehearsal fails on any format change because the player then refuses every server"
+}
+
+default KnownIssue player_start_hook_does_not_wait = {
+    name: "sendspin-cli runs its start hook without waiting for it",
+    status: open,
+    effect: "daemon.py starts hook_start as a background task (create_task), so the player can open the DAC while MPD still holds it; the open fails and the interruption or the group join has no sound in that room",
+    closes_when: "nixtune's sendspin-cli carries a patch that awaits hook_start before opening the output stream, offered upstream as an option; or the native player"
+}
+
+default KnownIssue shared_playlist_races = {
+    name: "two rooms editing one saved playlist at once",
+    status: open,
+    effect: "the later save wins and the earlier edit is lost; MPD's stored_playlist idle event fires only for changes made through that MPD, so a page sees another room's edit only when it lists playlists again",
+    closes_when: "accepted for a household; revisit only if it happens"
+}
+
+default KnownIssue nas_permissions_for_mpd = {
+    name: "every room's mpd user must write the shared playlist directory and the writer room the published database",
+    status: open,
+    effect: "the Synology checks the client uid against the folder's ACLs (the _youtube lesson in nixtune.allium); without the same mpd uid on every room and an ACL for it, saves fail with permission denied",
+    closes_when: "users.users.mpd.uid is pinned by the module when multiroom is enabled and the README's NAS section names the ACL"
+}
+
+default KnownIssue renderer_hooks_pause_group = {
+    name: "the AirPlay hooks pause MPD unconditionally",
+    status: open,
+    effect: "an AirPlay stream starting in a source room would pause the whole group",
+    closes_when: "the hooks call interruption_starts and interruption_ends when multiroom is enabled, and the rehearsal covers it"
+}
+
+default KnownIssue binary_cache_needed = {
+    name: "adopters need a binary cache for nixtune-room",
+    status: open,
+    effect: "without one, an adopter's first build of a multiroom host builds GHC and the cross toolchain, which takes hours and is the opposite of 'anyone who can flash a card'",
+    closes_when: "a public cache exists for adopters, the flake names it in nixConfig, and CI pushes both systems' nixtune-room to it; the fleet already pulls from the self-hosted attic (M17)"
+}
+
+------------------------------------------------------------
+-- Rules: boot and credentials
+------------------------------------------------------------
+
+rule RoomBoots {
+    when: HostBootsGeneration(room)
+    ensures:
+        room.intent = own
+        room.source = null
+        room.moved_to = null
+        room.audience = {}
+        room.suspended = {}
+        room.held_by = null
+        room.path = direct
+        room.interrupted_by = null
+        room.resumption = null
+        room.focus = null
+        room.focus_pinned = false
+        room.alsa_output_enabled = true
+        room.fifo_output_enabled = false
+
+    @guidance
+        -- MPD's state file remembers enabled outputs across restarts.
+        -- nixtune-room does not trust it: before it accepts its first
+        -- request it sends enableoutput for the ALSA output and
+        -- disableoutput for multiroom.
+}
+
+rule PlayerCredentialsProvisioned {
+    when: PlayerUnitStarts(room)
+    ensures:
+        PlayerIdentity(room) = Secret(room.secrets.playerPrivateKey)
+        PlayerPairingRecords(room) =
+            { for p in room.peers: Record(server_key: p.server_key, psk: Secret(room.secrets.psks[p.room][room.name])) }
+            + { for i in room.interrupters: Record(server_key: i.server_key, psk: Secret(room.secrets.psks[i.name][room.name])) }
+        PlayerUnpairedAccess(room) = false
+
+    @guidance
+        -- An ExecStartPre in nixtune-room ("nixtune-room provision-player")
+        -- reads the sops-decrypted files under /run/secrets and writes
+        -- identity-daemon.json ({"private_key": <base64url>}) and
+        -- pairing-store-daemon.json (records keyed by psk_id =
+        -- base64url(SHA-256("sendspin-psk-id-v1" || PSK)), each with
+        -- psk, server_id, created_at, last_used_at) into the player's
+        -- StateDirectory, mode 0600, owned by the player's user, replacing
+        -- whatever was there. The declaration is the whole truth: a
+        -- record not declared does not survive a restart. Then it checks
+        -- that the public key derived from the private key equals
+        -- peers.<room>.playerKey and refuses to start the player if not.
+}
+
+rule ServerCredentialsLoaded {
+    when: RoomDaemonStarts(room)
+    ensures:
+        ServerIdentity(room) = Secret(room.secrets.serverPrivateKey)
+        ServerPairingRecords(room) =
+            { for p in room.peers: Record(client_key: p.player_key, psk: Secret(room.secrets.psks[room.name][p.room])) }
+
+    @guidance
+        -- nixtune-room refuses to start if its derived public key is not
+        -- peers.<room>.serverKey, or if any declared peer lacks a PSK.
+        -- The server_id must never change (identity in sops, not
+        -- generated), or every player sees a different server.
+}
+
+------------------------------------------------------------
+-- Rules: requests a room makes about itself
+------------------------------------------------------------
+
+rule FollowRequested {
+    when: CoordinatorReceives(room, follow, target)
+    let t = Room{name: target}
+    ensures:
+        if target not in room.peers:
+            Reply(refused, unknown_room)
+        else if t = room:
+            Reply(refused, self)
+        else if room.path = interrupted:
+            Reply(refused, interrupted)
+        else if not Reachable(t):
+            Reply(refused, source_unreachable)
+        else:
+            if room.mpd_playing and (room.audience + room.suspended).count = 0:
+                room.mpd_playing = false
+            room.alsa_output_enabled = false
+            room.intent = following
+            room.source = t
+            room.path = peer_server
+            CoordinatorReceives(t, hold, room.name)
+            Reply(done)
+            RoomStatusChanged(room: room)
+
+    @guidance
+        -- Order: pause this room's MPD if it was playing alone, disable
+        -- its ALSA output so the DAC is free, then ask t to hold the
+        -- player. The reply waits for t's answer. If t refuses, undo in
+        -- reverse and pass the reason on; MPD stays paused where it was.
+        -- A second follow while one is waiting is refused busy; own or
+        -- silence while one is waiting answers the waiting one busy.
+        -- A room with an audience may follow: its MPD keeps feeding its
+        -- own server and only its speaker moves. If t is itself
+        -- following, t still holds this player; what t's server streams
+        -- is t's MPD, so there is no chain.
+}
+
+rule OwnRequested {
+    when: CoordinatorReceives(room, own)
+    requires: room.path != interrupted
+    ensures:
+        room.intent = own
+        room.source = null
+        if (room.audience + room.suspended).count > 0:
+            SendspinServerHolds(room, room)
+            room.held_by = room
+            room.path = own_server
+        else:
+            ReleaseOwnPlayer(room)
+            room.held_by = null
+            room.alsa_output_enabled = true
+            room.path = direct
+        Reply(done)
+        RoomStatusChanged(room: room)
+
+    @guidance
+        -- With an audience, the room's own server holds its own player,
+        -- which by Sendspin's rule displaces the source that held it;
+        -- that source sees client/goodbye another_server. Without one,
+        -- the coordinator asks the source to release the player
+        -- (ReleaseOwnPlayer), waits for the player's stop hook, then
+        -- enables the ALSA output. The room returns to its own queue,
+        -- paused where it was.
+}
+
+rule SilenceRequested {
+    when: CoordinatorReceives(room, silence)
+    requires: room.path != interrupted
+    ensures:
+        if (room.audience + room.suspended).count > 0:
+            room.intent = silent
+            room.source = null
+            ReleaseOwnPlayer(room)
+            room.held_by = null
+            room.alsa_output_enabled = false
+            room.path = off
+        else:
+            room.mpd_playing = false
+            room.intent = own
+            room.source = null
+            ReleaseOwnPlayer(room)
+            room.held_by = null
+            room.alsa_output_enabled = true
+            room.path = direct
+        Reply(done)
+        RoomStatusChanged(room: room)
+}
+
+------------------------------------------------------------
+-- Rules: a source's server
+------------------------------------------------------------
+
+rule HoldRequested {
+    when: CoordinatorReceives(source, hold, follower)
+    let f = Room{name: follower}
+    ensures:
+        if follower not in source.peers:
+            Reply(refused, unknown_room)
+        else:
+            if source.path = direct:
+                SwitchToOwnServer(source)
+            source.fifo_output_enabled = true
+            source.suspended = source.suspended - f
+            SendspinServerHolds(source, f)
+            ApplyFocus(source)
+            Reply(done)
+
+    @guidance
+        -- The server connects to f's host:8928/sendspin, completes the
+        -- Noise handshake with the pair's provisioned PSK, then sends
+        -- server/activate with activities ['playback'] and player@v1,
+        -- metadata@v1. The reply waits for the player's first
+        -- client/state with available true, up to
+        -- config.player_ready_timeout; after that it is refused
+        -- player_not_ready and the server disconnects.
+}
+
+-- The order is fixed: MPD cannot release the DAC while its ALSA output
+-- is enabled and playing, and the player cannot open it until it has.
+rule SwitchToOwnServer {
+    when: SwitchToOwnServer(room)
+    requires: room.intent = own
+    requires: room.path = direct
+    ensures:
+        room.fifo_output_enabled = true
+        room.alsa_output_enabled = false
+        SendspinServerHolds(room, room)
+        room.held_by = room
+        room.path = own_server
+
+    @guidance
+        -- enableoutput multiroom; disableoutput <alsa>; the server holds
+        -- its own player like any other. The source room hears a gap of
+        -- about one send-ahead plus the player's start. The audience
+        -- does not: it joins a stream already running.
+}
+
+rule AudienceJoins {
+    when: PlayerAvailable(source, follower)
+    ensures:
+        source.audience = source.audience + follower
+        source.audience_empty_since = null
+        RoomStatusChanged(room: source)
+}
+
+rule AudienceSuspends {
+    when: CoordinatorReceives(source, suspend, follower)
+    ensures:
+        source.audience = source.audience - follower
+        source.suspended = source.suspended + follower
+        ApplyFocus(source)
+        Reply(done)
+        RoomStatusChanged(room: source)
+
+    @guidance
+        -- Sent by a follower's coordinator when an interruption starts in
+        -- it (M16). The source keeps its path and its stream; when the
+        -- interruption ends, the follower asks to be held again. A
+        -- suspended member that has not come back within
+        -- config.max_suspension is dropped, because a follower that is
+        -- interrupted and then reboots never says so.
+}
+
+rule AudienceLeaves {
+    when: PlayerGone(source, follower)
+    requires: follower not in source.suspended
+    ensures:
+        source.audience = source.audience - follower
+        if (source.audience + source.suspended).count = 0:
+            source.audience_empty_since = now
+        ApplyFocus(source)
+        RoomStatusChanged(room: source)
+
+    @guidance
+        -- PlayerGone is a closed connection, client/goodbye for any
+        -- reason, client/state with available false, or client/leave.
+}
+
+rule AudienceGoneForGood {
+    when: source: Room.audience_empty_since + config.audience_grace <= now
+    requires: (source.audience + source.suspended).count = 0
+    ensures:
+        source.audience_empty_since = null
+        source.fifo_output_enabled = false
+        source.focus = null
+        source.focus_pinned = false
+        if source.intent = own and source.path = own_server:
+            ReleaseOwnPlayer(source)
+            source.held_by = null
+            source.alsa_output_enabled = true
+            source.path = direct
+        if source.intent = silent:
+            source.mpd_playing = false
+            source.intent = own
+            source.alsa_output_enabled = true
+            source.path = direct
+        if source.intent = following:
+            -- Its speaker is elsewhere and nobody hears its MPD.
+            source.mpd_playing = false
+        RoomStatusChanged(room: source)
+
+    @guidance
+        -- Pause before switching outputs, so a silent room does not
+        -- start playing into its own speaker. Then release the player,
+        -- disableoutput multiroom, enableoutput <alsa>.
+}
+
+-- M11.
+rule PauseClears {
+    when: MpdStateChanges(source, playing, paused)
+    requires: source.fifo_output_enabled
+    let unheard = LastChunkEnd(source) - ServerNow(source)
+    ensures:
+        SendspinServerClears(source)
+        MpdReceives(source, seekcur(-unheard))
+}
+
+rule JumpClears {
+    when: MpdSongOrPositionJumps(source)
+    requires: source.fifo_output_enabled
+    ensures: SendspinServerClears(source)
+
+    @guidance
+        -- A jump is a seek, or a song change that came before the
+        -- previous song's elapsed time reached its duration minus one
+        -- chunk. A song change at the end of a song is a natural track
+        -- change and is not cleared. This tells the cases apart for every
+        -- MPD client (pages, Home Assistant, mpc), because they all go
+        -- through MPD rather than through nixtune-room.
+}
+
+rule MetadataFollowsMpd {
+    when: MpdCurrentSongChanges(source)
+    requires: source.fifo_output_enabled
+    ensures: SendspinServerSendsMetadata(source, CurrentSong(source))
+}
+
+------------------------------------------------------------
+-- Rules: acoustic alignment (M14)
+------------------------------------------------------------
+
+rule ApplyFocus {
+    when: ApplyFocus(source)
+    let members = DerivedGroup(source).members - source.suspended
+    let f = if source.focus_pinned and source.focus in members then source.focus else SourceListeningRoom(source)
+    let travel = (r) => if source.acoustics[f][r] != null then source.acoustics[f][r] else source.acoustics[f][f] ?? 0
+    let a = max(for r in members: travel(r))
+    ensures:
+        source.focus = f
+        for r in members:
+            SendspinServerSetsDelay(source, r, r.output_delay + (a - travel(r)))
+
+    @guidance
+        -- SourceListeningRoom is the source room when its intent is own,
+        -- otherwise the first follower by name. Each delay is clamped to
+        -- 0 to config.max_output_delay. A player that does not list
+        -- set_output_delay in supported_commands keeps its declared
+        -- outputDelay and the status shows it as unaligned.
+}
+
+rule FocusRequested {
+    when: CoordinatorReceives(source, focus, room, pinned)
+    ensures:
+        source.focus = Room{name: room}
+        source.focus_pinned = pinned
+        ApplyFocus(source)
+        Reply(done)
+        RoomStatusChanged(room: source)
+}
+
+-- Calibration, by ear first, in the spirit of AirPlay's sync test: the
+-- listener stands in the focus room, the source plays a click track to
+-- the focus room and ONE other room, and the listener moves a slider
+-- until the two clicks merge into one. The slider changes that room's
+-- travel time live. When it sounds right, the page shows the number to
+-- declare as acoustics.<focus>.<room>. Nothing is saved on the Pi.
+rule CalibrationAdjusts {
+    when: CoordinatorReceives(source, calibrate, focus, room, travel)
+    ensures:
+        CalibrationRun.created(focus: focus, room: room, travel: travel, started: now)
+        SourcePlaysClicks(source)
+        TemporaryAcoustics(source, focus, room) = travel
+        ApplyFocus(source)
+        Reply(done)
+
+    @guidance
+        -- The click track is a 1 kHz tone burst of 5 ms every 750 ms,
+        -- generated by the server in place of MPD's audio, with MPD
+        -- paused for the run. Rooms other than the two are held but
+        -- silent. Leaving calibration drops every temporary value and
+        -- reapplies the declared ones, so the declaration stays the only
+        -- source of these numbers. Wired rooms first: their buffers are
+        -- smallest and they settle fastest.
+}
+
+------------------------------------------------------------
+-- Rules: reconciliation (M3)
+------------------------------------------------------------
+
+rule FollowerReconciles {
+    when: every config.reconcile_interval for room: Room where intent = following and path != interrupted
+    let s = room.source
+    ensures:
+        if not Reachable(s):
+            if room.source_unreachable_since = null:
+                room.source_unreachable_since = now
+        else:
+            room.source_unreachable_since = null
+            if s.status.moved_to != null:
+                room.source = Room{name: s.status.moved_to}
+                CoordinatorReceives(room.source, hold, room.name)
+            else if room.name not in s.status.audience:
+                -- The source rebooted, or dropped the player.
+                CoordinatorReceives(s, hold, room.name)
+        RoomStatusChanged(room: room)
+}
+
+rule ListenerOrphaned {
+    when: room: Room.source_unreachable_since + config.orphan_timeout <= now
+    requires: room.intent = following
+    ensures:
+        room.source_unreachable_since = null
+        room.intent = own
+        room.source = null
+        room.mpd_playing = false
+        if (room.audience + room.suspended).count > 0:
+            SendspinServerHolds(room, room)
+            room.held_by = room
+            room.path = own_server
+        else:
+            room.held_by = null
+            room.alsa_output_enabled = true
+            room.path = direct
+        RoomStatusChanged(room: room)
+
+    @guidance
+        -- Reachable means the source's coordinator answers status. The
+        -- room returns to its own queue, paused.
+}
+
+------------------------------------------------------------
+-- Rules: interruptions (M16; changes nixtune.allium's arbitration)
+------------------------------------------------------------
+
+-- nixtune.allium's AirplayAcquiresOutput and AirplayReleasesOutput hold
+-- unchanged when multiroom is off. When it is on, shairport-sync's
+-- before-play and after-play hooks call interruption_starts(airplay)
+-- and interruption_ends(airplay), and the player's start and stop hooks
+-- call them with foreign_sendspin when the server_id they carry is a
+-- declared interrupter. A start hook carrying a peer room's server_id
+-- is a group join, not an interruption.
+
+rule InterruptionStarts {
+    when: CoordinatorReceives(room, interruption_starts, by, server_key)
+    requires: room.path != interrupted
+    ensures:
+        room.resumption = Resumption{
+            intent: room.intent,
+            source: room.source,
+            mpd_was_playing: room.mpd_playing and (room.audience + room.suspended).count = 0
+        }
+        if room.intent = following:
+            CoordinatorReceives(room.source, suspend, room.name)
+            if by != foreign_sendspin:
+                ReleaseOwnPlayerAt(room.source, room)
+        if room.intent = own and (room.audience + room.suspended).count > 0:
+            -- The group keeps playing; only this room's speaker changes.
+            if by != foreign_sendspin:
+                ReleaseOwnPlayer(room)
+        if room.intent = own and (room.audience + room.suspended).count = 0:
+            if room.mpd_playing:
+                room.mpd_playing = false
+            room.alsa_output_enabled = false
+        room.held_by = null
+        room.interrupted_by = by
+        room.path = interrupted
+        Reply(done)
+        RoomStatusChanged(room: room)
+
+    @guidance
+        -- For a foreign Sendspin server, the player has already been
+        -- taken by the interrupter (Sendspin's multiple-server rule), so
+        -- the coordinator only records it and frees the DAC from MPD if
+        -- MPD had it. For AirPlay, the coordinator releases the player
+        -- so shairport-sync can open the card. Reply as soon as the DAC
+        -- is free (HooksAnswerFast); the suspend to the source is sent
+        -- after the reply.
+}
+
+rule InterruptionEnds {
+    when: CoordinatorReceives(room, interruption_ends, by)
+    requires: room.interrupted_by = by
+    let r = room.resumption
+    ensures:
+        room.interrupted_by = null
+        room.resumption = null
+        room.intent = r.intent
+        room.source = r.source
+        if r.intent = following:
+            room.path = peer_server
+            CoordinatorReceives(r.source, hold, room.name)
+        else if (room.audience + room.suspended).count > 0:
+            SendspinServerHolds(room, room)
+            room.held_by = room
+            room.path = if r.intent = own then own_server else off
+        else:
+            room.alsa_output_enabled = true
+            room.path = direct
+            if r.mpd_was_playing:
+                room.mpd_playing = true
+        Reply(done)
+        RoomStatusChanged(room: room)
+
+    @guidance
+        -- The room is put back exactly as it was: following the same
+        -- source, or feeding the same audience, or playing alone where
+        -- it paused. If the source it followed went away in the meantime,
+        -- reconciliation and orphan_timeout take it from there. This
+        -- deliberately goes further than Sendspin's own rule for a
+        -- player that becomes unavailable (move it to a solo group, do
+        -- not rejoin it automatically): the rejoin is an explicit hold
+        -- request from the room's own coordinator, which the spec allows.
+}
+
+------------------------------------------------------------
+-- Rules: handoff (M9)
+------------------------------------------------------------
+
+rule BringRequested {
+    when: PageBrings(origin, destination)
+    let s = if origin.intent = following then origin.source else origin
+    ensures:
+        HandoffRun.created(kind: bring, origin: origin, destination: destination, source: s, started: now)
+        CoordinatorReceives(destination, follow, s.name)
+        when PlayerAvailableAt(s, destination):
+            CoordinatorReceives(origin, silence)
+
+    @guidance
+        -- The page sends the last two requests only after the source's
+        -- status lists the destination in its audience, so the music is
+        -- playing in the destination before it stops in the origin. A
+        -- pinned focus stays pinned; if the pinned room goes silent it is
+        -- no longer a member and ApplyFocus falls back to the default
+        -- until it listens again. If that does not happen within
+        -- config.player_ready_timeout the origin keeps playing and the
+        -- page says why.
+}
+
+rule MoveRequested {
+    when: CoordinatorReceives(destination, move_from, source)
+    let s = Room{name: source}
+    ensures:
+        if s.status.library_id != destination.library_id:
+            Reply(refused, library_differs)
+        else if s.status.intent = following:
+            Reply(refused, source_is_following)
+        else:
+            let session = s.hand_over(destination.name)
+            LoadSession(destination, session)
+            destination.intent = own
+            destination.source = null
+            for f in session.audience:
+                SendspinServerHolds(destination, f)
+            destination.focus = session.focus
+            destination.focus_pinned = session.focus_pinned
+            ApplyFocus(destination)
+            Reply(done)
+            HandoffRun.created(kind: move, origin: s, destination: destination, source: s, started: now)
+
+    @guidance
+        -- hand_over on the old source reads its queue, current song,
+        -- elapsed time, play state, modes, audience and focus, pauses
+        -- its MPD,
+        -- sets moved_to = destination, and returns the session. The
+        -- destination loads the queue in one command list, seeks to the
+        -- elapsed time plus the time the hand-over took, and plays, then
+        -- its server holds every player of the old audience, which
+        -- displaces the old source by Sendspin's multiple-server rule.
+        -- Each follower adopts the destination as its source on its next
+        -- reconcile, from moved_to. The old source returns to own and
+        -- paused through AudienceGoneForGood, and clears moved_to then.
+        -- Gap budget: config.move_gap_budget.
+}
+
+rule LoadSession {
+    when: LoadSession(room, session)
+    ensures:
+        room.mpd_playing = session.state = playing
+
+    @guidance
+        -- command_list_begin: clear, add each URI, repeat, random,
+        -- single, consume, seek <current> <elapsed>, play if playing;
+        -- command_list_end. URIs are portable between rooms because every
+        -- room mounts the same export at the same music_directory, which
+        -- libraryId checks.
+}
+
+------------------------------------------------------------
+-- Rules: the shared library and playlists (M12, M13)
+------------------------------------------------------------
+
+rule WriterPublishesDatabase {
+    when: ScanCompletes(room)
+    requires: room.library_writer
+    ensures:
+        PublishedDatabase.created(writer: room, path: room.library_published, version: now, library_id: room.library_id)
+
+    @guidance
+        -- After nixtune.allium's ScanCompletes: copy MPD's database to
+        -- <published>.tmp beside the published file, with the export
+        -- stamp, then rename over it. A rename within one directory on
+        -- one NFS server is atomic, so a reader never copies half a
+        -- database.
+}
+
+rule ReaderAdoptsDatabase {
+    when: every config.database_poll for room: Room where not library_writer
+    let p = PublishedDatabase.latest
+    requires: p.version > room.database_version
+    requires: p.library_id = room.library_id
+    requires: not room.mpd_playing
+    requires: (room.audience + room.suspended).count = 0 and room.intent = own and room.path = direct
+    ensures:
+        room.database_version = p.version
+        MpdRestarts(room)
+
+    @guidance
+        -- MPD loads its database only at start and has no reload
+        -- command, so adoption is copy then restart, and waits until the
+        -- room is idle. restore_paused brings the queue back. A reader
+        -- never runs `update`: its rescan timer is off and the page's
+        -- rescan control is hidden (capabilities libraryWriter false).
+        -- The art cache stays per room.
+}
+
+-- Saved playlists need no rule of their own: every room's MPD has
+-- playlist_directory = multiroom.playlists.path on the NAS. The page
+-- lists playlists again whenever the Saved pane opens, because another
+-- room's save raises no idle event here.
+
+------------------------------------------------------------
+-- Rules: the page
+------------------------------------------------------------
+
+rule PageDrawsRooms {
+    when: RoomsPanelOpened(client)
+    ensures:
+        for p in client.served_by.peers:
+            PageSubscribes(p, status)
+
+    @guidance
+        -- One websocket per peer coordinator while the panel is open;
+        -- each pushes a status line whenever RoomStatusChanged fires, so
+        -- the panel redraws from pushes, the way the page redraws from
+        -- MPD's idle events. A peer that does not answer is drawn as
+        -- unreachable, never guessed.
+}
+
+rule PageControlsSource {
+    when: TransportPressed(client, command)
+    let r = client.served_by
+    let target = if r.intent = following then r.source else r
+    ensures: MpdReceives(target, command)
+
+    @guidance
+        -- The page opens an MPD websocket to the source's /ws and shows
+        -- that queue while its room is following. Library browsing stays
+        -- on its own room's MPD (the database is the same everywhere,
+        -- M12) and adds go to the source by URI.
+}
+
+rule PageSetsGroupVolume {
+    when: GroupVolumeMoved(client, step)
+    let g = DerivedGroup(client.served_by)
+    ensures:
+        for m in g.members:
+            VolumeHelperReceives(m, step)
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant OneThingOnTheDac {
+    -- Extends nixtune.allium's SingleOutputOwner.
+    for r in Rooms:
+        (if r.alsa_output_enabled and r.mpd_playing then 1 else 0)
+        + (if r.path in {own_server, peer_server} then 1 else 0)
+        + (if r.path = interrupted then 1 else 0) <= 1
+}
+
+invariant AloneIsBitPerfect {
+    -- M4, allowing one audience_grace for the switch.
+    for r in Rooms:
+        (r.intent = own and (r.audience + r.suspended).count = 0 and r.audience_empty_since = null)
+            implies r.path in {direct, interrupted}
+}
+
+invariant SourceRoomHearsItsOwnServer {
+    for r in Rooms:
+        (r.intent = own and (r.audience + r.suspended).count > 0) implies r.path in {own_server, interrupted}
+}
+
+invariant OneGroupPerSpeaker {
+    -- Sendspin: a player holds at most one admitted playback connection.
+    for r in Rooms:
+        Count(s in Rooms where r in s.audience or (s = r and r.held_by = r)) <= 1
+}
+
+invariant InterruptionsAlwaysEnd {
+    -- Every room interrupted is either still interrupted by a running
+    -- source, or has been restored.
+    for r in Rooms where path = interrupted:
+        InterrupterActive(r, r.interrupted_by)
+}
+
+invariant FocusRoomWaitsLongest {
+    -- M14: within a group, the focus room's added acoustic delay is the
+    -- largest, and every added delay is non-negative.
+    for g in Groups:
+        for m in g.members:
+            AddedDelay(g.focus) >= AddedDelay(m) and AddedDelay(m) >= 0
+}
+
+invariant DeclaredOnly {
+    -- M7, M15. Every Sendspin connection that reaches playback is
+    -- between a declared server key and a declared player key, keyed by
+    -- a provisioned PSK.
+    for c in SendspinConnections where playback:
+        c.server_key in DeclaredServerKeys and c.player_key in DeclaredPlayerKeys and c.psk_category = long_term
+}
+
+invariant VolumeIsPerRoom {
+    -- M6.
+    for r in Rooms:
+        OutputDevice{host: r}.written_by in {helper, airplay}
+}
+
+invariant NoStoredGroups {
+    -- M2.
+    not Exists(GroupRecord)
+}
+
+invariant OneLibraryWriter {
+    Count(r in Rooms where library_writer) = 1
+}
+
+invariant MultiroomOffChangesNothing {
+    for r in Rooms where not multiroom.enable:
+        Closure(r) = Closure(r with multiroom removed)
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor Host {
+    identified_by: Client where role = host
+}
+
+actor PeerRoom {
+    identified_by: Room
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- On the host page, beside Queue and Library. Guests do not group
+-- rooms; a guest page in a following room queues to the source.
+surface RoomsPanel {
+    facing host: Host
+
+    exposes:
+        for p in host.served_by.peers:
+            p.status.intent
+            p.status.source
+            p.status.audience
+            p.status.suspended
+            p.status.path
+            p.status.interrupted_by
+            p.status.focus
+            p.reachable
+
+    provides:
+        Follow(room: host.served_by, target: Room)
+        Leave(room: host.served_by)
+        Bring(origin: Room, destination: host.served_by)
+        Move(source: Room, destination: host.served_by)
+        Silence(room: Room)
+        PinFocus(room: Room)
+        UnpinFocus()
+        GroupVolume(step: Integer)
+        Calibrate(focus: host.served_by, room: Room, travel: Duration)
+
+    @guidance
+        -- One row per room, followers drawn under their source so groups
+        -- read as lists, the focus room marked. "Play here" on another
+        -- room's row is Bring; "Take over" is Move. Two-press confirm for
+        -- Move and Silence, as nixtune-page.allium does for deletes. An
+        -- interrupted room shows what interrupted it and what it will
+        -- return to. Calibration is a separate pane: pick the other
+        -- room, move the slider until the clicks merge, read off the
+        -- number to declare.
+}
+
+surface RoomProtocol {
+    facing peer: PeerRoom
+
+    provides:
+        status()
+        follow(target: String)
+        own()
+        silence()
+        hold(room: String)
+        suspend(room: String)
+        move_from(source: String)
+        hand_over(to: String)
+        focus(room: String, pinned: Boolean)
+        calibrate(focus: String, room: String, travel: Duration)
+
+    contracts:
+        Coordinator
+}
+
+------------------------------------------------------------
+-- Publishing (M17)
+------------------------------------------------------------
+
+-- packages.<sys>.nixtune-room for x86_64-linux and aarch64-linux, both
+-- static musl binaries built by haskell.nix, the aarch64 one cross-built
+-- on x86_64 so no builder needs an ARM machine. checks.<sys> gains
+-- nixtune-room's test suite and MultiroomRehearsal. CI pushes both
+-- packages to the binary cache named in the flake's nixConfig. The
+-- README says nixtune speaks the Sendspin protocol, in plain text,
+-- which the Open Home Foundation's trademark terms allow without
+-- permission; no part of nixtune is named after Sendspin.
+
+------------------------------------------------------------
+-- Verification
+------------------------------------------------------------
+
+-- MultiroomRehearsal: a NixOS VM test with three nodes (kitchen, lab,
+-- living-room), each with the snd-dummy kernel module as its card, MPD playing
+-- a generated tone, nixtune-room, and the pinned, patched sendspin-cli
+-- player, with test keys generated by `nixtune-room keys` at build time.
+-- No audio is listened to; the test asserts on the coordinators' status
+-- lines, the units each node runs, MPD's outputs and the delays each
+-- player reports. Planned cases:
+--   follow: the source switches to own_server, the follower to
+--     peer_server; leave: after audience_grace both are direct again;
+--   a source follows a third room: its own audience stays with it, its
+--     speaker goes to the third room;
+--   pause in a group: every player is cleared and MPD's elapsed moves
+--     back by the unheard audio;
+--   focus: with declared acoustics, each player's output_delay matches
+--     M14 for each focus; pinning moves it and nothing else does;
+--   the source's VM stops: followers keep their intent, it starts again,
+--     they are held again; stopped past orphan_timeout, they return to
+--     own and paused;
+--   bring: the origin goes silent only after the destination is in the
+--     audience;
+--   move: the session's URIs, position and modes arrive intact, the old
+--     audience is held by the destination, and moved_to clears;
+--   interruption in a follower (a stub calling interruption_starts):
+--     it is suspended, the source keeps its path, and when it ends the
+--     room is held again;
+--   interruption in a source room: the group plays on; when it ends
+--     the room hears its own server again;
+--   interruption in a lone room: MPD pauses and resumes as today;
+--   a test foreign server with a declared key interrupts and the room
+--     returns; one without a declared key is refused in the handshake;
+--   a player whose provisioned key does not match its declaration does
+--     not start;
+--   the writer publishes, a reader adopts only while idle;
+--   a room with multiroom off builds the same closure as today.
+-- Runs under `nix flake check` beside checks.rehearsal. A conformance
+-- run of nixtune-room against aiosendspin's reference client and against
+-- sendspin-rs's player example belongs here too, so the server is
+-- checked against implementations nixtune did not write. Sync accuracy
+-- and acoustic alignment are not measurable in a VM; they are measured
+-- on the real rooms, by calibration.
+
+------------------------------------------------------------
+-- Deferred
+------------------------------------------------------------
+
+deferred Sendspin.core               -- see: github.com/Sendspin/spec README.md, connection.md, messaging.md
+deferred Sendspin.pairing            -- see: github.com/Sendspin/spec pairing.md
+deferred Sendspin.player_v1          -- see: github.com/Sendspin/spec roles/player/v1.md
+deferred Sendspin.metadata_v1        -- see: github.com/Sendspin/spec roles/metadata/v1.md
+deferred Sendspin.controller_v1      -- remotes and Home Assistant devices driving a group
+deferred Sendspin.visualizer_v1      -- the party and lights direction
+deferred Multiroom.native_player     -- a player that replaces sendspin-cli behind SendspinPlayer
+deferred Multiroom.speaker_only      -- Sendspin devices with no MPD (ESPHome, browsers) as group members
+deferred Multiroom.native_rate       -- per-track formats, which needs MPD to signal format changes
+deferred Multiroom.mic_calibration   -- acoustics measured by a microphone instead of by ear
+deferred Multiroom.focus_follows_listener -- focus moved by page touch or presence instead of pinning
+deferred Sendspin.code_pairing       -- CPace pairing for devices without provisioned keys
+deferred Multiroom.renderer_to_group -- AirPlay or Bluetooth audio played to a whole group
+deferred Nixtune.player              -- see: nixtune.allium
+deferred Nixtune.page                -- see: nixtune-page.allium
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "1. The group stream format: 44100:24:2 (drafted) or 48000:24:2."
+open question "2. Whether a MOVE should first BRING the destination into the group and only then transfer, so the gap falls in a moment of the user's choosing."
+open question "3. Whether the NAS gets a second share for the published database and playlists, or they live as folders inside the music export."
+open question "4. Whether a room's intent should survive its own reboot (M8 drafts no)."
+open question "5. When the microphone calibration comes (deferred Multiroom.mic_calibration): a USB microphone on one room, or a phone's microphone through the page, which needs the page served over HTTPS because browsers allow getUserMedia only in a secure context."
