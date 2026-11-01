@@ -1,0 +1,174 @@
+diff --git a/sendspin/audio_devices.py b/sendspin/audio_devices.py
+index eb1bf94..d6f4c4c 100644
+--- a/sendspin/audio_devices.py
++++ b/sendspin/audio_devices.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import logging
+ import subprocess
+ import sys
+@@ -352,3 +353,51 @@ def _try_alsa_device(name: str) -> AudioDevice | None:
+         is_default=False,
+         alsa_device_name=name,
+     )
++
++
++def rescan_audio_devices() -> None:
++    """Make PortAudio build its device list again."""
++    sounddevice._terminate()
++    sounddevice._initialize()
++
++
++# PortAudio's paDeviceUnavailable, which its ALSA host reports for a device
++# another program has open (EBUSY).
++_PA_DEVICE_UNAVAILABLE = -9985
++
++
++def _held_elsewhere(device: AudioDevice) -> bool:
++    """Whether opening the device fails because another program has it open."""
++    try:
++        sounddevice.check_output_settings(device=device.device_id)
++    except sounddevice.PortAudioError as err:
++        return len(err.args) > 1 and err.args[1] == _PA_DEVICE_UNAVAILABLE
++    except ValueError:
++        return False
++    return False
++
++
++async def wait_for_audio_device(device_arg: str | None, interval: float = 2.0) -> AudioDevice:
++    """Resolve the device, waiting for it while another program holds it.
++
++    PortAudio leaves out a device it cannot open while it builds its device
++    list, and a listed device that another program has open (a music player
++    on the same DAC) cannot be opened or have its formats checked. Rather
++    than exit, the daemon waits, and asks PortAudio for the list again
++    before each try. Only the first wait is logged.
++    """
++    waiting_logged = False
++    while True:
++        try:
++            device = resolve_audio_device(device_arg)
++        except ValueError as err:
++            reason = str(err)
++        else:
++            if not _held_elsewhere(device):
++                return device
++            reason = f"Audio device '{device.name}' is in use by another program."
++        if not waiting_logged:
++            logger.warning("%s Waiting for it to become available.", reason)
++            waiting_logged = True
++        await asyncio.sleep(interval)
++        rescan_audio_devices()
+diff --git a/sendspin/cli.py b/sendspin/cli.py
+index e5fd56b..3c412a4 100644
+--- a/sendspin/cli.py
++++ b/sendspin/cli.py
+@@ -839,7 +839,7 @@ def main() -> int:
+ 
+ async def _run_client_mode(args: argparse.Namespace) -> int:
+     """Run the client in TUI or daemon mode."""
+-    from sendspin.audio_devices import resolve_audio_device
++    from sendspin.audio_devices import resolve_audio_device, wait_for_audio_device
+ 
+     # Handle deprecated --headless flag early so all downstream logic
+     # can simply check args.command == "daemon".
+@@ -929,7 +929,12 @@ async def _run_client_mode(args: argparse.Namespace) -> int:
+         )
+         LOGGER.info("Unpaired access %s", "enabled" if args.unpaired_access else "disabled")
+ 
+-    audio_device = resolve_audio_device(args.audio_device)
++    if is_daemon:
++        # A daemon outlives the program holding its device; see
++        # wait_for_audio_device.
++        audio_device = await wait_for_audio_device(args.audio_device)
++    else:
++        audio_device = resolve_audio_device(args.audio_device)
+ 
+     volume_controller: VolumeController | None = None
+     if args.hook_set_volume:
+diff --git a/tests/test_audio_devices.py b/tests/test_audio_devices.py
+index 7db483c..39c17e9 100644
+--- a/tests/test_audio_devices.py
++++ b/tests/test_audio_devices.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ from unittest.mock import patch
+ 
+ import sounddevice
+@@ -157,3 +158,70 @@ def test_detect_supported_audio_formats_falls_back_for_alsa_only_device():
+         formats = detect_supported_audio_formats(_alsa_only_device())
+ 
+     assert formats, "expected safe-default formats for an unprobeable device"
++
++
++def _nixtune_device() -> AudioDevice:
++    return AudioDevice(
++        index=10, name="nixtune", output_channels=2, sample_rate=44100.0, is_default=False
++    )
++
++
++def test_wait_for_audio_device_rescans_until_the_device_is_listed():
++    """A device another program holds may be missing from the list until it is let go."""
++    device = _nixtune_device()
++    answers: list[AudioDevice | None] = [None, None, device]
++    rescans: list[bool] = []
++
++    def resolve(_arg: str | None) -> AudioDevice:
++        answer = answers.pop(0)
++        if answer is None:
++            raise ValueError("Audio device 'nixtune' not found.")
++        return answer
++
++    with (
++        patch.object(_mod, "resolve_audio_device", side_effect=resolve),
++        patch.object(_mod, "rescan_audio_devices", side_effect=lambda: rescans.append(True)),
++        patch.object(sounddevice, "check_output_settings"),
++    ):
++        result = asyncio.run(_mod.wait_for_audio_device("nixtune", interval=0))
++
++    assert result is device
++    assert rescans == [True, True]
++
++
++def test_wait_for_audio_device_waits_while_a_listed_device_is_busy():
++    """A listed device that another program has open is waited for too."""
++    device = _nixtune_device()
++    busy = [True, False]
++    rescans: list[bool] = []
++
++    def check(**_: object) -> None:
++        if busy.pop(0):
++            raise sounddevice.PortAudioError("Device unavailable", -9985)
++
++    with (
++        patch.object(_mod, "resolve_audio_device", return_value=device),
++        patch.object(_mod, "rescan_audio_devices", side_effect=lambda: rescans.append(True)),
++        patch.object(sounddevice, "check_output_settings", side_effect=check),
++    ):
++        result = asyncio.run(_mod.wait_for_audio_device("nixtune", interval=0))
++
++    assert result is device
++    assert rescans == [True]
++
++
++def test_wait_for_audio_device_does_not_wait_for_other_errors():
++    """Only a device held elsewhere is waited for; other open errors are left to the caller."""
++    device = _nixtune_device()
++
++    with (
++        patch.object(_mod, "resolve_audio_device", return_value=device),
++        patch.object(
++            sounddevice,
++            "check_output_settings",
++            side_effect=sounddevice.PortAudioError("Invalid sample rate", -9997),
++        ),
++    ):
++        result = asyncio.run(_mod.wait_for_audio_device("nixtune", interval=0))
++
++    assert result is device

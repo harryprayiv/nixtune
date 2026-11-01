@@ -32,10 +32,26 @@ _pyFinal: pyPrev: {
       tag = "9.1.0";
       hash = "sha256-cEISCLSmu5IgvlJ6Dsuc2rk04OL5+Ic0pErApnoT93c=";
     };
-    # KnownIssue player_start_hook_does_not_wait: the daemon runs its
-    # start hook in the background, so the player could open the DAC
-    # while MPD still holds it. With this patch, audio is held back until
-    # the hook returns. To be offered upstream as an option.
-    patches = (old.patches or [ ]) ++ [ ./hook-start-waits.patch ];
+    # Three patches, each to be offered upstream on its own:
+    #
+    # hook-start-waits: the daemon runs its start hook in the background,
+    # so the player could open the DAC while MPD still holds it. Audio is
+    # held back until the hook returns.
+    #
+    # stop-hook-after-release: the stop hook ran as stream/end arrived,
+    # before the player had closed the device on its audio threads. It now
+    # runs once the device is released, so nixtune's coordinator can wait
+    # for it before giving the DAC to MPD.
+    #
+    # daemon-waits-for-device: a daemon started while MPD played on the
+    # DAC exited, because PortAudio leaves a device it cannot open out of
+    # its list, and a listed one that is busy cannot have its formats
+    # checked. The daemon now waits while the device is held elsewhere and
+    # asks PortAudio for the list again every two seconds.
+    patches = (old.patches or [ ]) ++ [
+      ./hook-start-waits.patch
+      ./stop-hook-after-release.patch
+      ./daemon-waits-for-device.patch
+    ];
   });
 }

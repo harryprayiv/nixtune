@@ -6,9 +6,14 @@
 # What it proves: the module brings up both services on both rooms; the
 # coordinators talk through nginx at /room; the lab's server holds the
 # kitchen's player and its own, with credentials provisioned from the
-# secret files; PCM reaches both players; and leaving puts both rooms back
-# on the direct path. What it cannot prove: sync between the two outputs,
-# which needs the real rooms and a microphone (calibration).
+# secret files; PCM reaches both players and plays for a minute without
+# an underflow or a dropped chunk; leaving puts both rooms back on the
+# direct path, each coordinator waiting for its player to report the DAC
+# closed; and a player started while something else holds the DAC waits
+# for it instead of exiting. snd-aloop gets one substream per device, as a
+# DAC has, so a held device is really busy. What it cannot prove: sync
+# between the two outputs, which needs the real rooms and a microphone
+# (calibration).
 #
 # Run: nix build .#checks.x86_64-linux.multiroom (needs KVM).
 {
@@ -39,6 +44,7 @@ let
     {
       imports = [ self.nixosModules.default ];
       boot.kernelModules = [ "snd-aloop" ];
+      boot.extraModprobeConfig = "options snd-aloop pcm_substreams=1";
       virtualisation.memorySize = 1536;
 
       environment.etc =
@@ -132,11 +138,39 @@ pkgs.testers.runNixOSTest {
         played_pcm(lab)
         lab.succeed("mpc status | grep -q '^\\[playing\\]'")
 
+    with subtest("the group plays for a minute without an underflow or a dropped chunk"):
+        lab.sleep(duration=timedelta(seconds=60))
+        lab.succeed("mpc status | grep -q '^\\[playing\\]'")
+        lab.fail("journalctl -u nixtune-room.service | grep -E 'chunk was dropped|buffer_capacity reached'")
+        for machine in (kitchen, lab):
+            machine.fail("journalctl -u nixtune-player.service | grep 'Audio underflow detected'")
+            reanchors = machine.succeed("journalctl -u nixtune-player.service | grep -c 'scheduling reanchor' || true")
+            print(f"{machine.name}: {reanchors.strip()} re-anchors in a minute")
+
     with subtest("the kitchen goes back to its own queue, and both rooms to the direct path"):
         kitchen.succeed("nixtune-room ctl own")
         kitchen.wait_until_succeeds("nixtune-room ctl status | grep -q 'path=direct'")
         # The lab keeps its server path for the audience grace period.
         lab.wait_until_succeeds("nixtune-room ctl status | grep -q 'path=direct'", timeout=timedelta(seconds=30))
         lab.succeed("mpc status | grep -q '^\\[playing\\]'")
+
+    with subtest("each coordinator heard its player close the DAC before giving it back"):
+        for machine in (kitchen, lab):
+            machine.fail("journalctl -u nixtune-room.service | grep 'did not report the DAC closed'")
+
+    with subtest("a player started while something else holds the DAC waits for it"):
+        kitchen.succeed(
+            "systemd-run --unit=hold-dac ${pkgs.alsa-utils}/bin/aplay -q -D hw:CARD=Loopback,DEV=0 -f S16_LE -r 44100 -c 2 /dev/zero"
+        )
+        kitchen.wait_until_succeeds("systemctl is-active hold-dac.service")
+        kitchen.succeed("systemctl restart nixtune-player.service")
+        kitchen.wait_until_succeeds(
+            "journalctl -u nixtune-player.service | grep -q 'Waiting for it to become available'",
+            timeout=timedelta(seconds=30),
+        )
+        kitchen.wait_for_closed_port(8928)
+        kitchen.succeed("systemctl is-active nixtune-player.service")
+        kitchen.succeed("systemctl stop hold-dac.service")
+        kitchen.wait_for_open_port(8928, timeout=timedelta(seconds=30))
   '';
 }

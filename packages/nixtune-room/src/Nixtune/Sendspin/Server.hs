@@ -199,12 +199,10 @@ ended env pc = do
       else post env (PlayerGone (pcRoom pc))
 
 -- | End the stream and close the connection, and return only once the
--- connection has ended, or after two seconds. The caller's next action
--- usually opens the DAC (MPD's ALSA output, or AirPlay), and the player
--- closes its output on its own worker thread after stream/end, with no
--- acknowledgement in the protocol; waiting for the close and a quarter
--- of a second more is what keeps the two from colliding (KnownIssue
--- player_closes_output_without_acknowledgement).
+-- connection has ended, or after two seconds. That the player has also
+-- closed the DAC is known only on the player's own machine, from its
+-- stop hook; the coordinator there waits for that before it gives the
+-- DAC to anything else (awaitPlayerClosed in Nixtune.Room.Daemon).
 release :: Env -> RoomName -> IO ()
 release env r = do
   waitFor <- atomically $ do
@@ -221,10 +219,9 @@ release env r = do
               writeTQueue (pcControl pc) (OutJson True (const streamEnd))
             writeTQueue (pcControl pc) OutClose
             writeTVar (pcState pc) st {csReleased = True, csStreaming = False}
-            pure (Just (pc, csStreaming st))
-  forM_ waitFor $ \(pc, wasStreaming) -> do
+            pure (Just pc)
+  forM_ waitFor $ \pc ->
     void (timeout 2000000 (atomically (readTMVar (pcEnded pc))))
-    when wasStreaming (threadDelay 250000)
 
 events :: Env -> Events
 events env =

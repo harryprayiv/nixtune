@@ -26,6 +26,7 @@ import Control.Monad (forever, void, when)
 import Data.ByteString.Char8 qualified as Char8
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
@@ -64,6 +65,11 @@ data Daemon = Daemon
   , server :: SendspinServer
   , say :: Text -> IO ()
   -- ^ Where log lines go: stderr under systemd, nowhere in the tests.
+  , playerOutput :: TVar Bool
+  -- ^ Whether this room's player may have the DAC open, as its hooks
+  -- report it: True from the start hook, which runs before the player
+  -- opens the device, until the stop hook, which runs once it has closed
+  -- it.
   }
 
 monotonicNow :: IO Instant
@@ -97,6 +103,7 @@ start logTo cfg makeServer = do
       <*> pure conn
       <*> makeServer (atomically . writeTQueue q)
       <*> pure logTo
+      <*> newTVarIO False
   setOutput d (alsaOutput (mpd cfg)) True
   setOutput d (fifoOutput (mpd cfg)) False
   playing <- mpdPlaying d
@@ -204,9 +211,9 @@ runAction d = \case
   EnableFifo -> setOutput d (fifoOutput (mpd (config d))) True
   DisableFifo -> setOutput d (fifoOutput (mpd (config d))) False
   HoldOwnPlayer -> serverHoldOwn (server d)
-  ReleaseOwnPlayer -> serverReleaseOwn (server d)
-  AskRelease r -> askNow d r (ReqRelease (self' d))
-  AskSuspend r -> askNow d r (ReqSuspend (self' d))
+  ReleaseOwnPlayer -> serverReleaseOwn (server d) >> awaitPlayerClosed d
+  AskRelease r -> askNow d r (ReqRelease (self' d)) >> awaitPlayerClosed d
+  AskSuspend r -> askNow d r (ReqSuspend (self' d)) >> awaitPlayerClosed d
   AskHold r -> void . forkIO $ do
     answer <- case peerOf (config d) r of
       Nothing -> pure (Left UnknownRoom)
@@ -218,6 +225,20 @@ runAction d = \case
             say d (roomNameText r <> " did not answer " <> renderRequest (ReqHold (self' d)) <> ": " <> Peer.describePeerError e)
             pure (Left SourceUnreachable)
     postEvent d (HoldAnswered r answer)
+
+-- | Wait until this room's player has closed the DAC. Every action that
+-- lets the player go is followed by one that gives the DAC to something
+-- else (MPD's ALSA output, or an interrupter once its hook is answered),
+-- and the player closes the device on its own after the server lets it
+-- go, with nothing in the protocol to say when it has. Its stop hook
+-- does say so (packages/sendspin's stop-hook-after-release patch). A
+-- player that died without reporting is given three seconds.
+awaitPlayerClosed :: Daemon -> IO ()
+awaitPlayerClosed d = do
+  closed <- timeout 3000000 . atomically $ readTVar (playerOutput d) >>= check . not
+  when (isNothing closed) $ do
+    say d "the player did not report the DAC closed within 3 seconds; going on"
+    atomically (writeTVar (playerOutput d) False)
 
 runEffect :: Daemon -> Effect -> IO ()
 runEffect d = \case
@@ -250,6 +271,7 @@ handleLine :: Daemon -> (Text -> IO ()) -> (Int -> IO ()) -> Text -> IO ()
 handleLine d send onSubscribe line = case parseCommand line of
   Left e -> send ("error " <> e)
   Right CmdStatus -> send . renderStatus =<< currentStatus d
+  Right (CmdPlayerOutput _) -> send "error player-output is for the control socket"
   Right CmdSubscribe -> do
     n <- atomically $ do
       n <- fresh d
@@ -306,9 +328,12 @@ controlServer d = do
       line <- readControlLine c
       done <- newEmptyTMVarIO
       let send t = safeSend (\x -> SocketBS.sendAll c (encodeUtf8 x <> "\n")) t >> atomically (void (tryPutTMVar done ()))
-      if line == "subscribe"
-        then send "error subscribe is for websocket clients"
-        else handleLine d send (\_ -> pure ()) line
+      case parseCommand line of
+        Right CmdSubscribe -> send "error subscribe is for websocket clients"
+        Right (CmdPlayerOutput open) -> do
+          atomically (writeTVar (playerOutput d) open)
+          send "ok"
+        _ -> handleLine d send (\_ -> pure ()) line
       -- A request's reply may come from the coordinator thread. A follow
       -- is answered when its source answers the hold, so every request is
       -- answered within the hold timeout; this one is a second guard.

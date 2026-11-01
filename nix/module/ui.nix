@@ -114,12 +114,19 @@ in
       recommendedProxySettings = true;
       virtualHosts.nixtune = {
         default = true;
+        # Both families, as nginx's own default: a peer room or a phone
+        # that resolves this host to its IPv6 address first is answered
+        # there rather than refused.
         listen = [
           {
             addr = "0.0.0.0";
             port = cfg.ui.port;
           }
-        ];
+        ]
+        ++ lib.optional config.networking.enableIPv6 {
+          addr = "[::]";
+          port = cfg.ui.port;
+        };
         inherit root;
         locations = {
           # Every path that is not a file is the page; the page reads the

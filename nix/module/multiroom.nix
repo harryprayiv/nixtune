@@ -144,19 +144,23 @@ let
   ctl = "${lib.getExe mr.package} ctl --socket ${controlSocket}";
 
   # The player's hooks carry the server_id. A declared room's server is a
-  # peer the coordinator itself asked for, so there is nothing to do; any
-  # other server is an interrupter. With unpaired access off and only the
-  # declared rooms in the player's pairing store, no other server can get
-  # this far yet; the interrupters option (stage 5) is what lets one.
+  # peer the coordinator itself asked for: the hook only tells the
+  # coordinator the player is about to open the DAC (start) or has closed
+  # it (stop, run once the device is released, by the
+  # stop-hook-after-release patch), which the coordinator waits for before
+  # it gives the DAC to MPD or an interrupter. Any other server is an
+  # interrupter. With unpaired access off and only the declared rooms in
+  # the player's pairing store, no other server can get this far yet; the
+  # interrupters option (stage 5) is what lets one.
   declaredServers = lib.concatStringsSep " " (lib.mapAttrsToList (_: p: p.serverKey) mr.peers);
   playerHook =
-    event:
+    event: output:
     pkgs.writeShellApplication {
       name = "nixtune-player-${event}";
       text = ''
         for known in ${declaredServers}; do
           if [ "''${SENDSPIN_SERVER_ID:-}" = "$known" ]; then
-            exit 0
+            exec ${ctl} player-output ${output}
           fi
         done
         exec ${ctl} interruption-${event} foreign-sendspin
@@ -423,10 +427,10 @@ in
           "network-online.target"
         ];
         wants = [ "network-online.target" ];
-        # PortAudio leaves out a card it cannot open while listing devices,
-        # so the player cannot start while MPD plays on the DAC (KnownIssue
-        # player_starts_only_with_dac_free). It keeps retrying instead of
-        # hitting systemd's start limit.
+        # A player that keeps failing is retried for as long as it fails: a
+        # room without its player still plays alone, and nothing else
+        # restarts it. A DAC that MPD holds is not a failure: the player
+        # waits for it (the daemon-waits-for-device patch).
         startLimitIntervalSec = 0;
         environment.HOME = playerState;
         serviceConfig = {
@@ -435,6 +439,10 @@ in
             # the player's own store never drifts from the declaration.
             "${lib.getExe mr.package} provision-player --config ${roomJson} --state-dir ${playerState}"
             "${pkgs.coreutils}/bin/ln -sfn ${playerAsoundrc} ${playerState}/.asoundrc"
+            # A player that starts has the DAC closed, whatever its last
+            # run reported before it died. "-": a coordinator that is not
+            # up yet starts with that belief anyway.
+            "-${ctl} player-output closed"
           ];
           ExecStart = lib.concatStringsSep " " [
             "${mr.playerPackage}/bin/sendspin daemon"
@@ -449,8 +457,8 @@ in
             "--hardware-volume false"
             "--unpaired-access false"
             "--disable-mpris"
-            "--hook-start ${lib.getExe (playerHook "starts")}"
-            "--hook-stop ${lib.getExe (playerHook "ends")}"
+            "--hook-start ${lib.getExe (playerHook "starts" "opening")}"
+            "--hook-stop ${lib.getExe (playerHook "ends" "closed")}"
           ];
           User = "nixtune-player";
           Group = "nixtune-room";

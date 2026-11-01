@@ -5,7 +5,7 @@
 module DaemonSpec (spec) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Monad (void)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
@@ -161,6 +161,21 @@ spec = describe "two daemons" $ do
       askRoom h kitchen (ReqFollow lab) `shouldReturn` Right (Right ())
       k <- eventually kd ((== "peer-server") . wsPath)
       wsSource k `shouldBe` Just lab
+  it "gives the DAC back to MPD only once the player reports it closed" $
+    withHome $ \h kd _ -> do
+      let path = dirOf h </> ("control-" <> show (Map.findWithDefault 0 kitchen (ports h)) <> ".sock")
+          dacEnables = length . filter (== "enableoutput 0") <$> mpdLog (kitchenMpd h)
+      controlRequest path "player-output opening" `shouldReturn` "ok"
+      askRoom h kitchen (ReqFollow lab) `shouldReturn` Right (Right ())
+      _ <- eventually kd ((== "peer-server") . wsPath)
+      before' <- dacEnables
+      withAsync (askRoom h kitchen ReqOwn) $ \leaving -> do
+        threadDelay 500000
+        dacEnables `shouldReturn` before'
+        controlRequest path "player-output closed" `shouldReturn` "ok"
+        wait leaving `shouldReturn` Right (Right ())
+      after' <- settled dacEnables (== before' + 1)
+      after' `shouldBe` before' + 1
   it "refuses to follow a room that is not running, and stays as it was" $
     withHome $ \h kd _ -> do
       askRoom h kitchen (ReqFollow livingRoom) `shouldReturn` Right (Left SourceUnreachable)

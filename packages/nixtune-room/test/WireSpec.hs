@@ -46,11 +46,14 @@ spec = describe "line protocol" $ do
       parseReply (renderReply x) === Right (x :: Either Refusal ())
   it "reads back every status it writes" $
     forAll genStatus $ \s -> parseStatus (renderStatus s) === Right s
+  it "reads back the player's output reports" $
+    forAll arbitrary $ \b -> parseCommand (renderCommand (CmdPlayerOutput b)) === Right (CmdPlayerOutput b)
   it "rejects what is not a command" $ do
     parseCommand "follow" `shouldSatisfy` either (const True) (const False)
     parseCommand "follow Lab" `shouldSatisfy` either (const True) (const False)
     parseCommand "interruption-starts bluetooth" `shouldSatisfy` either (const True) (const False)
     parseCommand "rm -rf /" `shouldSatisfy` either (const True) (const False)
+    parseCommand "player-output open" `shouldSatisfy` either (const True) (const False)
   it "writes the status line the spec shows" $
     renderStatus (WireStatus lab "own" Nothing (Set.fromList [kitchen]) mempty Nothing "own-server" Nothing (Just lab))
       `shouldBe` "status room=lab intent=own source=- audience=kitchen suspended=- moved-to=- path=own-server interrupted-by=- focus=lab"

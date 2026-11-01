@@ -66,8 +66,12 @@
 -- coordinator, and MultiroomRehearsal's first cut (nix/tests), all
 -- evaluated but not yet built or run. Stage 5 is what M19 defers (FLAC,
 -- metadata@v1, client-initiated connections, JumpClears), the
--- interrupters option, the shared library and playlists, and the
--- release order (KnownIssue release_does_not_wait_for_player).
+-- interrupters option, and the shared library and playlists. Stage 4's
+-- first rehearsal runs, the same day, also moved two items forward: the
+-- release order (KnownIssue release_does_not_wait_for_player), through
+-- the player's stop hook, and a player that waits for a busy DAC
+-- (KnownIssue player_starts_only_with_dac_free), both by patches to
+-- sendspin-cli.
 -- The open questions at the end are the next round. One room exists:
 -- the kitchen (the Pi, host nixtune).
 --
@@ -350,8 +354,10 @@
 --       boot, and players run with unpaired access off. sendspin-cli has
 --       no option for provisioned credentials, so nixtune provides the
 --       layer (rule PlayerCredentialsProvisioned) and carries a patch
---       where sendspin-cli's behaviour is wrong for this (KnownIssue
---       player_start_hook_does_not_wait), offered upstream.
+--       for each place sendspin-cli's behaviour is wrong for this
+--       (KnownIssues player_start_hook_does_not_wait,
+--       release_does_not_wait_for_player and
+--       player_starts_only_with_dac_free), each offered upstream.
 --   M16. Interruptions return the room to where it was. AirPlay starting,
 --       a declared foreign Sendspin server taking the player (an
 --       announcement, say), or any later renderer suspends the room's
@@ -411,11 +417,12 @@
 --       Not planned: code-based pairing (CPace), which only devices
 --       without provisioned keys need; the controller, artwork,
 --       visualizer and colour roles until the features that use them.
---       sendspin-cli is what plays, with nixtune's patch (KnownIssue
---       player_start_hook_does_not_wait) and nixtune's provisioning
---       layer (rule PlayerCredentialsProvisioned) around it. Neither is
---       large: the patch awaits one hook, and the layer writes two JSON
---       files from sops.
+--       sendspin-cli is what plays, with nixtune's three patches and
+--       nixtune's provisioning layer (rule PlayerCredentialsProvisioned)
+--       around it. None is large: the patches hold audio until the start
+--       hook returns, run the stop hook once the device is closed, and
+--       wait for a device another program holds; the layer writes two
+--       JSON files from sops.
 --       Build order: the server and coordinator first, developed
 --       against MultiroomRehearsal (three VMs with sendspin-cli
 --       players), which needs no second Pi; then the kitchen plus one
@@ -735,7 +742,10 @@ contract SendspinPlayer {
 
     @invariant AlwaysListening
         -- Runs whenever multiroom is enabled, on port 8928, so a peer
-        -- can hold it and an interrupter can reach it at any time.
+        -- can hold it and an interrupter can reach it at any time, except
+        -- after a start while another program held the DAC: it listens
+        -- only once it has found its device (KnownIssue
+        -- player_starts_only_with_dac_free).
 
     @invariant PairedServersOnly
         -- Unpaired access off. It admits only servers for which it
@@ -743,11 +753,16 @@ contract SendspinPlayer {
         -- servers and the declared interrupters.
 
     @invariant OpensDacOnlyWhenFreed
-        -- On stream/start it runs its start hook, which asks the room's
-        -- coordinator to free the DAC, and opens the output only after
-        -- the hook returns. On stream/end it closes the output and runs
-        -- its stop hook. Both hooks carry the server_id, which is how the
-        -- coordinator tells a peer from an interrupter.
+        -- On stream/start it runs its start hook, which tells the room's
+        -- coordinator it is about to open the DAC (or, for an
+        -- interrupter, asks it to free the DAC), and opens the output
+        -- only after the hook returns. On stream/end, or when the server
+        -- goes, it closes the output and then runs its stop hook, which
+        -- tells the coordinator the DAC is closed. Both hooks carry the
+        -- server_id of the server whose stream it is, which is how the
+        -- coordinator tells a peer from an interrupter. A player started
+        -- while another program holds the DAC waits for it.
+
 
     @invariant NoVolumeOfItsOwn
         -- Software volume fixed at 100; hardware volume off.
@@ -780,6 +795,7 @@ contract Coordinator {
     focus: (room: String, pinned: Boolean) -> Outcome
     interruption_starts: (by: Interrupter, server_key: String?) -> Outcome
     interruption_ends: (by: Interrupter) -> Outcome
+    player_output: (opening: Boolean) -> Outcome
     calibrate: (focus: String, room: String, travel: Duration) -> Outcome
 
     @invariant SingleWriter
@@ -798,6 +814,16 @@ contract Coordinator {
         -- interruption_starts returns as soon as the DAC is free, so
         -- an AirPlay or Sendspin stream is never held up by a peer call.
 
+    @invariant DacGivenBackOnlyWhenClosed
+        -- Every step that lets the room's player go (ReleaseOwnPlayer,
+        -- a release or a suspend asked of a source) is followed by one
+        -- that gives the DAC to MPD or an interrupter, and the
+        -- coordinator takes that step only once the player has reported
+        -- the DAC closed, or three seconds after asking, for a player
+        -- that died without reporting. The report is the control socket
+        -- line "player-output closed"; "player-output opening" comes
+        -- from the start hook. Pages cannot send either.
+
     @guidance
         -- A line protocol, one request per line, one reply per line, plus
         -- pushed status lines (nixtune-room's Nixtune.Room.Wire):
@@ -809,6 +835,8 @@ contract Coordinator {
         --                        audience=a,b suspended=.. moved-to=..
         --                        path=.. interrupted-by=.. focus=..
         --   subscribe         -> a status line now, then one per change
+        --   player-output opening | player-output closed
+        --                     -> ok (the player's hooks, control socket only)
         -- with "-" for an empty value and <by> one of airplay, upnp,
         -- foreign-sendspin. Served by nixtune-room itself as a websocket
         -- on 127.0.0.1:8605 behind nginx /room, the same reach as the
@@ -968,8 +996,8 @@ default KnownIssue player_start_hook_does_not_wait = {
 default KnownIssue release_does_not_wait_for_player = {
     name: "a room re-enables MPD's ALSA output before its player has closed the DAC",
     status: open,
-    effect: "rule OwnRequested says to wait for the player's stop hook before enabling the ALSA output; stage 2's coordinator enables it as soon as the source answers the release, while the player closes the device in its own thread after stream/end arrives. If MPD opens the card in between, the open fails busy and MPD retries the output only after about ten seconds",
-    closes_when: "the player's stop hook reports the release to the coordinator (a new player-released request on the control socket) and the plan enables the ALSA output only after it, with a timeout; the rehearsal on snd-aloop and the real rooms show no busy opens"
+    effect: "rule OwnRequested says to wait for the player's stop hook before enabling the ALSA output; stage 2's coordinator enabled it as soon as the source answered the release, and sendspin-cli ran the stop hook as stream/end arrived, before its audio threads had closed the device. If MPD opens the card in between, the open fails busy and MPD retries the output only after about ten seconds. Addressed 2026-11-01: packages/sendspin/stop-hook-after-release.patch runs the stop hook once the device is closed, naming the server whose stream it was even after that server has gone; the hook sends player-output closed; the coordinator waits for it after every release (invariant DacGivenBackOnlyWhenClosed)",
+    closes_when: "MultiroomRehearsal passes its subtest that no coordinator gave up waiting for its player, and the real rooms show no busy opens"
 }
 
 default KnownIssue player_does_not_report_commanded_delay = {
@@ -982,8 +1010,8 @@ default KnownIssue player_does_not_report_commanded_delay = {
 default KnownIssue player_starts_only_with_dac_free = {
     name: "the player cannot start while MPD holds the DAC",
     status: open,
-    effect: "PortAudio opens each device while listing them and leaves out one it cannot open, so a player that starts while MPD plays straight to the DAC does not find its device and exits. At boot MPD starts paused, so the player starts; a player restarted during playback retries every two seconds (no start limit) until MPD pauses or the room groups. When the room groups, the source's server keeps trying to connect to it for up to the player-ready timeout",
-    closes_when: "sendspin-cli opens its configured ALSA device without needing it listed, or the native player; the rehearsal cannot show it because its MPD plays to a null output"
+    effect: "a player started while MPD played straight to the DAC exited: PortAudio leaves a device it cannot open out of its list, and a listed device that is busy cannot have its formats checked. Addressed 2026-11-01: packages/sendspin/daemon-waits-for-device.patch makes the daemon wait while the device is held elsewhere, asking PortAudio for the list again every two seconds; it does not listen meanwhile, so when the room groups, the source's server keeps trying to connect to it for up to the player-ready timeout",
+    closes_when: "MultiroomRehearsal passes its subtest that holds the DAC with aplay (snd-aloop with one substream per device, as a DAC has) while the player restarts, and the real rooms show the same; an interrupter needs the player listening while MPD plays, so the interrupters option (stage 5) needs the player to open its device only when a stream starts"
 }
 
 default KnownIssue shared_playlist_races = {

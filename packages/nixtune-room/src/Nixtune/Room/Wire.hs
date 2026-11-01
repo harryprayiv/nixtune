@@ -43,6 +43,9 @@ data Command
   = CmdRequest Request
   | CmdStatus
   | CmdSubscribe
+  | -- | From this room's player, on the control socket only: True when it
+    -- is about to open the DAC, False once it has closed it.
+    CmdPlayerOutput Bool
   deriving stock (Eq, Show)
 
 -- | A room's status as it travels: what pages draw and what a follower's
@@ -94,6 +97,8 @@ parseCommand line = case Text.words line of
   ["pin", r] -> req . ReqPin =<< room r
   ["interruption-starts", w] -> req . ReqInterruptionStarts =<< interrupter w
   ["interruption-ends", w] -> req . ReqInterruptionEnds =<< interrupter w
+  ["player-output", "opening"] -> Right (CmdPlayerOutput True)
+  ["player-output", "closed"] -> Right (CmdPlayerOutput False)
   _ -> Left ("unknown command: " <> Text.take 80 line)
   where
     req = Right . CmdRequest
@@ -118,6 +123,8 @@ renderCommand = \case
   CmdRequest r -> renderRequest r
   CmdStatus -> "status"
   CmdSubscribe -> "subscribe"
+  CmdPlayerOutput True -> "player-output opening"
+  CmdPlayerOutput False -> "player-output closed"
 
 renderReply :: Either Refusal () -> Text
 renderReply = \case

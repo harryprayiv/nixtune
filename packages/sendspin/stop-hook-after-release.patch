@@ -1,0 +1,447 @@
+diff --git a/sendspin/audio.py b/sendspin/audio.py
+index 5bf1a63..f551aa9 100644
+--- a/sendspin/audio.py
++++ b/sendspin/audio.py
+@@ -350,7 +350,14 @@ class AudioPlayer:
+         if self._closed:
+             return
+         self.clear()
+-        self._close_stream()
++        closing = self._close_stream()
++        # Wait for the close, so the device is released when this returns:
++        # a stop hook run after it may hand the device to another program.
++        if closing is not None:
++            try:
++                closing.result(timeout=2.0)
++            except TimeoutError:
++                logger.warning("Closing the audio stream took more than two seconds")
+ 
+     def clear(self) -> None:
+         """Drop all queued audio chunks."""
+@@ -1291,12 +1298,13 @@ class AudioPlayer:
+                 self._queued_duration_us / 1_000_000,
+             )
+ 
+-    def _close_stream(self) -> None:
+-        """Close the audio output stream."""
++    def _close_stream(self) -> concurrent.futures.Future[None] | None:
++        """Close the audio output stream; the future is done once it is closed."""
+         stream = self._stream
+         self._stream = None
+-        if stream is not None:
+-            self._stream_executor.submit(self._call_stream, stream.stop, stream.close)
++        if stream is None:
++            return None
++        return self._stream_executor.submit(self._call_stream, stream.stop, stream.close)
+ 
+     @staticmethod
+     def _call_stream(
+diff --git a/sendspin/audio_connector.py b/sendspin/audio_connector.py
+index 48308ab..67fed5c 100644
+--- a/sendspin/audio_connector.py
++++ b/sendspin/audio_connector.py
+@@ -3,12 +3,13 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import contextlib
+ import logging
+ import queue
+ import threading
+ import time
+ from collections.abc import Callable
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from typing import TYPE_CHECKING, cast
+ 
+ from aiosendspin.models.core import StreamStartMessage
+@@ -63,7 +64,12 @@ class _StopWorkItem:
+ 
+ @dataclass(slots=True)
+ class _CloseStreamWorkItem:
+-    """Close the audio stream and release the audio device on stream end."""
++    """Close the audio stream and release the audio device on stream end.
++
++    ``released`` is set once the device is released.
++    """
++
++    released: threading.Event = field(default_factory=threading.Event)
+ 
+ 
+ type _AudioWorkItem = (
+@@ -131,9 +137,18 @@ class _AudioSyncWorker:
+         """Clear queued audio on worker."""
+         self._enqueue(_ClearWorkItem())
+ 
+-    def close_stream(self) -> None:
+-        """Clear queued audio and close the stream to release the audio device."""
+-        self._enqueue(_CloseStreamWorkItem())
++    def close_stream(self) -> threading.Event:
++        """Clear queued audio and close the stream to release the audio device.
++
++        The returned event is set once the device is released.
++        """
++        item = _CloseStreamWorkItem()
++        if self._queue is None:
++            # No worker thread, so no open stream.
++            item.released.set()
++        else:
++            self._enqueue(item)
++        return item.released
+ 
+     def notify_delay_change(self, delta_us: int) -> None:
+         """Notify the worker that static delay changed."""
+@@ -221,6 +236,7 @@ class _AudioSyncWorker:
+ 
+             if item_type is _CloseStreamWorkItem:
+                 player.close_stream()
++                cast(_CloseStreamWorkItem, item).released.set()
+                 current_format = None  # force set_format() when next track begins
+                 continue
+ 
+@@ -256,10 +272,12 @@ class _AudioSyncWorker:
+                     drain_type = type(drain_item)
+                     if drain_type is _StopWorkItem:
+                         player.stop()
++                        _release_pending(queue_obj)
+                         return
+                     if drain_type is _ClearWorkItem or drain_type is _CloseStreamWorkItem:
+                         if drain_type is _CloseStreamWorkItem:
+                             player.close_stream()
++                            cast(_CloseStreamWorkItem, drain_item).released.set()
+                             close_requested = True
+                         else:
+                             player.clear()
+@@ -327,6 +345,24 @@ class _AudioSyncWorker:
+             player.submit(chunk_item.server_timestamp_us, payload)
+ 
+         player.stop()
++        _release_pending(queue_obj)
++
++
++def _release_pending(queue_obj: queue.Queue[_AudioWorkItem]) -> None:
++    """After the player has stopped, which closes its stream, report every
++    close still queued as done."""
++    while True:
++        try:
++            item = queue_obj.get_nowait()
++        except queue.Empty:
++            return
++        if type(item) is _CloseStreamWorkItem:
++            cast(_CloseStreamWorkItem, item).released.set()
++
++
++# How long "stop" waits for the device to be released before it is
++# reported anyway.
++_RELEASE_TIMEOUT_S = 2.5
+ 
+ 
+ class AudioStreamHandler:
+@@ -381,6 +417,7 @@ class AudioStreamHandler:
+         self._volume_controller: VolumeController | None = volume_controller
+         self._chunks_dropping = False
+         self._output_gate: asyncio.Task[None] | None = None
++        self._reported: asyncio.Task[None] | None = None
+ 
+     @property
+     def volume(self) -> int:
+@@ -569,8 +606,12 @@ class AudioStreamHandler:
+ 
+         if not self._stream_active:
+             self._stream_active = True
+-            if self._on_event:
+-                self._on_event("start")
++            self._report("start")
++            pending = self._reported
++            if pending is not None and not pending.done():
++                # A stop is still waiting for the device to be released:
++                # hold audio back until this start, and its hook, have run.
++                self._output_gate = pending
+ 
+     def _on_stream_end(self, roles: list[str] | None) -> None:
+         """Handle stream end by closing the audio stream to release the audio device."""
+@@ -578,13 +619,46 @@ class AudioStreamHandler:
+             return
+ 
+         worker = self._audio_worker
++        released = None
+         if worker is not None and worker.is_running():
+-            worker.close_stream()
++            released = worker.close_stream()
+ 
+         if self._stream_active:
+             self._stream_active = False
+-            if self._on_event:
+-                self._on_event("stop")
++            self._report("stop", released)
++
++    def _report(self, event: str, released: threading.Event | None = None) -> None:
++        """Run the event callback once ``released`` is set and every earlier report has run.
++
++        "stop" is reported only once the audio device is released, so a stop
++        hook can hand the device to another program. Reports keep their order:
++        a start that follows a stop still waiting is reported after it.
++        """
++        on_event = self._on_event
++        if on_event is None:
++            return
++        previous = self._reported
++        if released is None and (previous is None or previous.done()):
++            on_event(event)
++            return
++
++        async def report() -> None:
++            if previous is not None:
++                with contextlib.suppress(Exception):
++                    await previous
++            if released is not None:
++                done = await asyncio.get_running_loop().run_in_executor(
++                    None, released.wait, _RELEASE_TIMEOUT_S
++                )
++                if not done:
++                    logger.warning(
++                        "Audio device not released within %.1f s; reporting %s anyway",
++                        _RELEASE_TIMEOUT_S,
++                        event,
++                    )
++            on_event(event)
++
++        self._reported = create_task(report())
+ 
+     def _on_stream_clear(self, roles: list[str] | None) -> None:
+         """Handle stream clear by clearing audio queue (e.g., for seek operations)."""
+@@ -597,15 +671,18 @@ class AudioStreamHandler:
+ 
+     async def handle_disconnect(self) -> None:
+         """Reset connection-scoped audio state after a disconnect."""
+-        if self._stream_active:
+-            self._stream_active = False
+-            if self._on_event:
+-                self._on_event("stop")
++        was_active = self._stream_active
++        self._stream_active = False
+ 
++        # Stopping the worker closes its stream; "stop" is reported after,
++        # once the device is released.
+         if self._audio_worker is not None:
+             await self._audio_worker.stop()
+             self._audio_worker = None
+ 
++        if was_active:
++            self._report("stop")
++
+         self._current_format = None
+         self.audio_player = None
+ 
+diff --git a/sendspin/daemon/daemon.py b/sendspin/daemon/daemon.py
+index 91723eb..4a0dd2c 100644
+--- a/sendspin/daemon/daemon.py
++++ b/sendspin/daemon/daemon.py
+@@ -24,6 +24,7 @@ from sendspin.settings import ClientSettings
+ from sendspin.utils import create_task, get_device_info
+ 
+ if TYPE_CHECKING:
++    from aiosendspin.client import ServerInfo
+     from aiosendspin.noise import ClientPairingStore, Identity
+ 
+     from sendspin.volume_controller import VolumeController
+@@ -76,6 +77,9 @@ class SendspinDaemon:
+         self._output_delay_ms: float = 0.0
+         self._server_url: str | None = None
+         self._admission_timeout_logged: bool = False
++        # The server whose stream started last: its stop hook names it even
++        # when the stop is reported after that server has disconnected.
++        self._stream_server: ServerInfo | None = None
+ 
+     def _create_client(self) -> SendspinClient:
+         """Create a new SendspinClient instance."""
+@@ -419,10 +423,16 @@ class SendspinDaemon:
+ 
+     def _on_stream_event(self, event: str) -> None:
+         """Handle stream lifecycle events by running hooks."""
++        current = self._client.server_info if self._client else None
++        if event == "start":
++            self._stream_server = current
++            server_info = current
++        else:
++            server_info = self._stream_server or current
++            self._stream_server = None
+         hook = self._args.hook_start if event == "start" else self._args.hook_stop
+         if not hook:
+             return
+-        server_info = self._client.server_info if self._client else None
+         task = create_task(
+             run_hook(
+                 hook,
+diff --git a/tests/daemon/test_daemon.py b/tests/daemon/test_daemon.py
+index 04ab5be..0f50736 100644
+--- a/tests/daemon/test_daemon.py
++++ b/tests/daemon/test_daemon.py
+@@ -202,3 +202,33 @@ def test_last_playback_server_is_seeded_from_settings(
+         return await store.get_last_playback_server_id()
+ 
+     assert asyncio.run(run()) == expected
++
++
++def test_stop_hook_names_the_server_whose_stream_it_was(tmp_path: Path, monkeypatch) -> None:
++    """A stop reported after the server disconnected still carries its server_id."""
++    import sendspin.daemon.daemon as daemon_module
++
++    calls: list[dict[str, object]] = []
++
++    async def record(hook: str, **kwargs: object) -> None:
++        calls.append({"hook": hook, **kwargs})
++
++    monkeypatch.setattr(daemon_module, "run_hook", record)
++    daemon = _make_daemon(tmp_path, settings_volume=25, settings_muted=False)
++    daemon._args.hook_start = "start-hook"
++    daemon._args.hook_stop = "stop-hook"
++    client = SimpleNamespace(server_info=SimpleNamespace(server_id="lab-server", name="lab"))
++    daemon._client = client  # type: ignore[assignment]
++
++    async def run() -> None:
++        daemon._on_stream_event("start")
++        client.server_info = None  # the server has disconnected
++        daemon._on_stream_event("stop")
++        await asyncio.sleep(0)
++
++    asyncio.run(run())
++
++    assert [(c["hook"], c["server_id"]) for c in calls] == [
++        ("start-hook", "lab-server"),
++        ("stop-hook", "lab-server"),
++    ]
+diff --git a/tests/test_audio_connector.py b/tests/test_audio_connector.py
+index c785e67..4276962 100644
+--- a/tests/test_audio_connector.py
++++ b/tests/test_audio_connector.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import threading
++import time
+ from types import SimpleNamespace
+ 
+ import sendspin.audio_connector as audio_connector
+@@ -322,3 +324,120 @@ def test_audio_waits_for_the_start_hook(monkeypatch) -> None:
+         assert _FakeWorker.instances[-1].submitted == [(2, b"after", fmt)]
+ 
+     asyncio.run(exercise())
++
++
++class _ReleasingWorker(_FakeWorker):
++    """A worker whose stream closes only when the test says so."""
++
++    def __init__(self, **kwargs: object) -> None:
++        super().__init__(**kwargs)  # type: ignore[arg-type]
++        self.released = threading.Event()
++
++    def close_stream(self) -> threading.Event:  # type: ignore[override]
++        self.stream_closed = True
++        return self.released
++
++
++def _started_handler(events: list[str]) -> AudioStreamHandler:
++    handler = AudioStreamHandler(
++        audio_device=SimpleNamespace(index=0, name="Fake Device"),
++        volume=100,
++        muted=False,
++        on_event=events.append,
++    )
++    handler.attach_client(_FakeClient())
++    handler._on_stream_start(
++        SimpleNamespace(payload=SimpleNamespace(player=SimpleNamespace(), visualizer=None))
++    )
++    return handler
++
++
++def test_stop_is_reported_once_the_device_is_released(monkeypatch) -> None:
++    """A stop hook may hand the device to another program, so it runs after the close."""
++    monkeypatch.setattr(audio_connector, "_AudioSyncWorker", _ReleasingWorker)
++    _FakeWorker.instances.clear()
++
++    async def exercise() -> None:
++        events: list[str] = []
++        handler = _started_handler(events)
++        worker = _FakeWorker.instances[-1]
++        assert isinstance(worker, _ReleasingWorker)
++        assert events == ["start"]
++
++        handler._on_stream_end(None)
++        await asyncio.sleep(0.05)
++        assert events == ["start"], "stop reported before the device was released"
++
++        worker.released.set()
++        assert handler._reported is not None
++        await handler._reported
++        assert events == ["start", "stop"]
++
++    asyncio.run(exercise())
++
++
++def test_a_start_after_a_pending_stop_is_reported_after_it(monkeypatch) -> None:
++    """Events keep their order, and audio waits for the start to be reported."""
++    monkeypatch.setattr(audio_connector, "_AudioSyncWorker", _ReleasingWorker)
++    _FakeWorker.instances.clear()
++
++    async def exercise() -> None:
++        events: list[str] = []
++        handler = _started_handler(events)
++        worker = _FakeWorker.instances[-1]
++        assert isinstance(worker, _ReleasingWorker)
++
++        handler._on_stream_end(None)
++        handler._on_stream_start(
++            SimpleNamespace(payload=SimpleNamespace(player=SimpleNamespace(), visualizer=None))
++        )
++        fmt = _make_format()
++        handler._on_audio_chunk(1, b"early", fmt, 0)
++        assert worker.submitted == []
++        assert events == ["start"]
++
++        worker.released.set()
++        assert handler._reported is not None
++        await handler._reported
++        assert events == ["start", "stop", "start"]
++        handler._on_audio_chunk(2, b"after", fmt, 0)
++        assert worker.submitted == [(2, b"after", fmt)]
++
++    asyncio.run(exercise())
++
++
++def test_the_worker_reports_the_stream_closed(monkeypatch) -> None:
++    """The real worker sets the event only after the player has closed its stream."""
++    closed: list[bool] = []
++
++    class _Player:
++        def __init__(self, *args: object, **kwargs: object) -> None:
++            pass
++
++        def set_volume(self, volume: int, *, muted: bool) -> None:
++            pass
++
++        def close_stream(self) -> None:
++            time.sleep(0.05)
++            closed.append(True)
++
++        def stop(self) -> None:
++            pass
++
++    monkeypatch.setattr(audio_connector, "AudioPlayer", _Player)
++
++    async def exercise() -> None:
++        worker = audio_connector._AudioSyncWorker(
++            audio_device=SimpleNamespace(index=0, name="Fake Device"),
++            use_software_volume=True,
++            volume=100,
++            muted=False,
++        )
++        client = _FakeClient()
++        worker.start(client.compute_play_time, client.compute_server_time)
++        released = worker.close_stream()
++        assert released.wait(2.0)
++        assert closed == [True]
++        await worker.stop()
++
++    asyncio.run(exercise())
