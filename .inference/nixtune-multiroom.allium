@@ -60,9 +60,14 @@
 -- Stage 3, the same day: the Sendspin server (M19): Noise KKpsk2 on
 -- crypton, the core messages, the time responder, player@v1 with PCM,
 -- send-ahead across a group, set_output_delay, stream start, clear and
--- end, and the fifo reader. Stage 4 is the NixOS module, haskell.nix
--- and MultiroomRehearsal; stage 5 is what M19 defers (FLAC,
--- metadata@v1, client-initiated connections, JumpClears).
+-- end, and the fifo reader. Stage 4, the same day: packages/nixtune-room
+-- (nixpkgs' Haskell set, open question 6), packages/sendspin (M20), the
+-- module (nix/module/multiroom.nix), the AirPlay hooks through the
+-- coordinator, and MultiroomRehearsal's first cut (nix/tests), all
+-- evaluated but not yet built or run. Stage 5 is what M19 defers (FLAC,
+-- metadata@v1, client-initiated connections, JumpClears), the
+-- interrupters option, the shared library and playlists, and the
+-- release order (KnownIssue release_does_not_wait_for_player).
 -- The open questions at the end are the next round. One room exists:
 -- the kitchen (the Pi, host nixtune).
 --
@@ -429,45 +434,89 @@
 --       8927 for client-initiated connections (no nixtune player uses
 --       one), and JumpClears (a seek in a group plays out the send-ahead
 --       before the new position).
+--   M20. The Sendspin Python packages follow upstream's release tags,
+--       newer than nixpkgs, from packages/sendspin/python-overrides.nix:
+--       aiosendspin 10.2.2 and sendspin-cli 9.1.0 as of 2026-11-01, the
+--       releases stage 3 was tested against (aiosendspin's own suite,
+--       2994 tests, and sendspin-cli's, 169 with nixtune's patch, pass
+--       on them). Sendspin has no stable branch: releases are tags cut
+--       from main, often several a week. A bump changes version, tag and
+--       hash in that one file and is deployed only after the rehearsal
+--       passes. The player is built from a Python set of its own, so a
+--       host's other Python packages keep nixpkgs' versions; the flake's
+--       overlays.sendspin applies the same file to every Python set for
+--       a machine that wants these versions outside nixtune.
 --
 -- ============================================================================
--- MODULE OPTIONS (planned; services.nixtune.multiroom.*)
+-- MODULE OPTIONS (services.nixtune.multiroom.*, nix/module/multiroom.nix)
 -- ============================================================================
 --
 --   enable          false. Off contributes nothing (nixtune.allium
 --                   decision 2).
---   package         this flake's packages.<system>.nixtune-room.
+--   package         packages/nixtune-room built with the host's pkgs
+--                   (open question 6 is whether this becomes M17's
+--                   cached static binary).
+--   playerPackage   packages/sendspin: sendspin-cli at the release M20
+--                   names, with nixtune's patch.
 --   room            this room's name, strMatching "[a-z][a-z0-9-]*".
 --                   Defaults to networking.hostName.
---   peers           attrset by room name of { host; serverKey;
+--   peers           attrset by room name of { host; port; serverKey;
 --                   playerKey; outputDelay; }, every room in the home,
---                   this one included, identical on every room. The keys
---                   are base64url Curve25519 public keys, which are the
---                   Sendspin server_id and client_id. outputDelay is in
---                   milliseconds, 0 to 5000.
+--                   this one included, identical on every room. port is
+--                   the room's page port (80), where nginx proxies /room.
+--                   The keys are base64url Curve25519 public keys, which
+--                   are the Sendspin server_id and client_id. outputDelay
+--                   is in milliseconds, 0 to 5000.
 --   acoustics       attrset of attrsets, acoustics.<focus>.<room> =
 --                   milliseconds of travel from <room>'s speakers to the
 --                   listening spot in <focus>. Rooms that cannot be heard
 --                   from <focus> are left out. Found by calibration
 --                   (rule CalibrationAdjusts) and then declared.
---   secrets         sops paths: serverPrivateKey, playerPrivateKey,
---                   and psks.<serverRoom>.<playerRoom> for every pair
---                   this room takes part in, both directions.
---   interrupters    attrset by name of { serverKey; } for foreign
---                   Sendspin servers allowed to interrupt this room's
---                   player, with their PSKs under secrets.psks.<name>.
---                   Empty by default.
+--   secrets         runtime paths, each to a file holding one base64url
+--                   value: serverKeyFile and serverPskFiles.<playerRoom>
+--                   (readable by nixtune-room), playerKeyFile and
+--                   playerPskFiles.<serverRoom> (readable by
+--                   nixtune-player), one PSK file per room in peers on
+--                   each side. How the files get there is the consumer's
+--                   business, as with the wifi passphrase; the fleet maps
+--                   its sops secrets onto them.
+--   playerCard      the ALSA card id the player opens; output.card by
+--                   default. A rehearsal VM points it at snd-aloop's
+--                   "Loopback". playerCardDevice is its PCM number, 0.
+--                   The module writes the player's ~/.asoundrc with one
+--                   PCM, nixtune, of type hw on that card, and runs the
+--                   player with --audio-device nixtune: sendspin-cli
+--                   finds devices among PortAudio's list by name prefix,
+--                   and PortAudio lists the user's .asoundrc PCMs but not
+--                   a bare hw:CARD=... name (found in the rehearsal run,
+--                   2026-11-01).
+--   timing          audienceGrace, orphanTimeout, playerReadyTimeout,
+--                   maxSuspension, reconcileInterval, peerTimeout, in
+--                   milliseconds, defaulting to config below.
+--   interrupters    stage 5: attrset by name of { serverKey; } for
+--                   foreign Sendspin servers allowed to interrupt this
+--                   room's player, with their PSKs beside the peers'.
 --   streamFormat    "44100:24:2". MPD resamples to it in group mode only.
 --                   44.1 kHz because most of the library is 44.1 kHz and
 --                   is then not resampled; 24 bits so 16-bit files pass
 --                   through unchanged. Streamed as PCM (M19).
---   library.writer  the room that scans and publishes the database.
---   library.published  path on the NAS mount for the published database.
---   playlists.path  path on the NAS mount for the shared playlist
---                   directory.
---   wifiPowerSave   false. Turned off on the wireless interface when
---                   multiroom is enabled; a radio that sleeps between
---                   packets stalls a live stream.
+--   library.writer  stage 5: the room that scans and publishes the
+--                   database.
+--   library.published  stage 5: path on the NAS mount for the published
+--                   database.
+--   playlists.path  stage 5: path on the NAS mount for the shared
+--                   playlist directory.
+-- Wifi power save needs no option: the base module turns it off whenever
+-- a wifi SSID is declared.
+--
+-- The module adds MPD's fifo output (enabled "no"), tmpfiles rules for
+-- /run/nixtune-room and the fifo, the nixtune-room and
+-- nixtune-player units, nginx's /room location, port 8928 in the
+-- firewall, and the nixtune-room group that MPD (for the fifo), the
+-- player and shairport-sync (for the control socket) are in. With
+-- multiroom on, the AirPlay hooks call interruption_starts and
+-- interruption_ends, and fall back to pausing MPD themselves when the
+-- coordinator does not answer.
 --
 -- `nixtune-room keys --rooms kitchen,lab,living-room --out DIR` (run on
 -- winsmuth) writes DIR/<room>.yaml for every room, mode 0600 and never
@@ -661,10 +710,15 @@ contract SendspinServer {
         -- stm for the shared state, and the MPD protocol spoken directly
         -- over the loopback socket. Chunks of 20 ms; the spec bounds them
         -- at 15 to 150 ms. MPD's output: type "fifo", name "multiroom",
-        -- path /run/nixtune/room/fifo, format <streamFormat>, disabled
-        -- at boot. nixtune-room creates the fifo if it is missing and
-        -- holds it open read-write, so MPD never finds it without a
-        -- reader and never removes it. MPD's 24-bit format is 24 bits in
+        -- path /run/nixtune-room/fifo, format <streamFormat>, disabled
+        -- at boot. MPD sets up its fifo output when it starts, enabled
+        -- or not, and fails when the fifo's directory is missing; it
+        -- starts before nixtune-room, so systemd-tmpfiles makes
+        -- /run/nixtune-room and the fifo at boot (found in the first
+        -- rehearsal run, 2026-11-01). A fifo MPD finds already there, it
+        -- never removes. nixtune-room holds it open read-write, so MPD
+        -- never finds it without a reader, and makes it only if it is
+        -- missing. MPD's 24-bit format is 24 bits in
         -- 32-bit containers; the server packs it to 3 bytes for PCM.
         -- Each player has a sending thread with two queues, control
         -- before audio, so server/command and group/update go ahead of
@@ -699,8 +753,8 @@ contract SendspinPlayer {
         -- Software volume fixed at 100; hardware volume off.
 
     @guidance
-        -- To start with: sendspin-cli's `sendspin daemon` from nixpkgs
-        -- (python3Packages.sendspin) pinned to a tested version, with
+        -- To start with: sendspin-cli's `sendspin daemon` at the release
+        -- M20 names (packages/sendspin), with
         -- --name <room>, --audio-device <output.device>, --port 8928,
         -- --audio-format pcm:<streamFormat>, --hardware-volume false,
         -- --unpaired-access false, --output-delay-ms <outputDelay>,
@@ -908,7 +962,14 @@ default KnownIssue player_start_hook_does_not_wait = {
     name: "sendspin-cli runs its start hook without waiting for it",
     status: open,
     effect: "daemon.py starts hook_start as a background task (create_task), so the player can open the DAC while MPD still holds it; the open fails and the interruption or the group join has no sound in that room",
-    closes_when: "nixtune's sendspin-cli carries a patch that awaits hook_start before opening the output stream, offered upstream as an option; or the native player"
+    closes_when: "upstream sendspin-cli waits for hook_start before opening the output, or offers an option for it; until then nixtune carries packages/sendspin/hook-start-waits.patch (2026-11-01), which drops audio chunks until the hook returns, since the device opens on the first chunk; sendspin-cli's suite passes with it, plus a test that fails without it"
+}
+
+default KnownIssue release_does_not_wait_for_player = {
+    name: "a room re-enables MPD's ALSA output before its player has closed the DAC",
+    status: open,
+    effect: "rule OwnRequested says to wait for the player's stop hook before enabling the ALSA output; stage 2's coordinator enables it as soon as the source answers the release, while the player closes the device in its own thread after stream/end arrives. If MPD opens the card in between, the open fails busy and MPD retries the output only after about ten seconds",
+    closes_when: "the player's stop hook reports the release to the coordinator (a new player-released request on the control socket) and the plan enables the ALSA output only after it, with a timeout; the rehearsal on snd-aloop and the real rooms show no busy opens"
 }
 
 default KnownIssue player_does_not_report_commanded_delay = {
@@ -916,6 +977,13 @@ default KnownIssue player_does_not_report_commanded_delay = {
     status: open,
     effect: "the spec requires a client/state whenever output_delay_ms changes, including through server/command; aiosendspin 0.0.0 (the library sendspin-cli is built on) changes the delay and sends nothing, so a server that trusts reports alone keeps the old send-ahead and the player's buffer shrinks by the delay. nixtune's server counts a delay as applied once it queues the command (found in stage 3's end-to-end run against aiosendspin's client)",
     closes_when: "aiosendspin sends client/state after applying a delay command (offered upstream); the server's handling stays correct either way"
+}
+
+default KnownIssue player_starts_only_with_dac_free = {
+    name: "the player cannot start while MPD holds the DAC",
+    status: open,
+    effect: "PortAudio opens each device while listing them and leaves out one it cannot open, so a player that starts while MPD plays straight to the DAC does not find its device and exits. At boot MPD starts paused, so the player starts; a player restarted during playback retries every two seconds (no start limit) until MPD pauses or the room groups. When the room groups, the source's server keeps trying to connect to it for up to the player-ready timeout",
+    closes_when: "sendspin-cli opens its configured ALSA device without needing it listed, or the native player; the rehearsal cannot show it because its MPD plays to a null output"
 }
 
 default KnownIssue shared_playlist_races = {
@@ -936,7 +1004,7 @@ default KnownIssue renderer_hooks_pause_group = {
     name: "the AirPlay hooks pause MPD unconditionally",
     status: open,
     effect: "an AirPlay stream starting in a source room would pause the whole group",
-    closes_when: "the hooks call interruption_starts and interruption_ends when multiroom is enabled, and the rehearsal covers it"
+    closes_when: "the hooks call interruption_starts and interruption_ends when multiroom is enabled (done in stage 4's airplay.nix), and the rehearsal covers it (not yet: the rehearsal VMs have no AirPlay sender)"
 }
 
 default KnownIssue binary_cache_needed = {
@@ -1134,6 +1202,13 @@ rule HoldRequested {
         -- client/state with available true, up to
         -- config.player_ready_timeout; after that it is refused
         -- player_not_ready and the server disconnects.
+        -- Until the player accepts the connection, the server tries again
+        -- every half second while the hold stands: the player may be
+        -- between restarts (player_starts_only_with_dac_free) when the
+        -- follower has just freed its DAC. Each try goes through every
+        -- address the host's name resolves to, in order, because a name
+        -- can resolve to IPv6 first while the player and nginx listen on
+        -- IPv4 only; peer calls connect the same way.
 }
 
 -- The order is fixed: MPD cannot release the DAC while its ALSA output
@@ -1831,3 +1906,4 @@ open question "2. Whether a MOVE should first BRING the destination into the gro
 open question "3. Whether the NAS gets a second share for the published database and playlists, or they live as folders inside the music export."
 open question "4. Whether a room's intent should survive its own reboot (M8 drafts no)."
 open question "5. When the microphone calibration comes (deferred Multiroom.mic_calibration): a USB microphone on one room, or a phone's microphone through the page, which needs the page served over HTTPS because browsers allow getUserMedia only in a secure context."
+open question "6. Whether nixtune-room stays on nixpkgs' Haskell set (stage 4) or moves to M17's static musl binary from haskell.nix. nixpkgs already carries every dependency for aarch64-linux in cache.nixos.org, so a Pi builds only nixtune-room itself, in minutes, and the attic can hold that one result; haskell.nix adds an input, a second GHC and its own cache, and pays off only for adopters off NixOS or without a builder."

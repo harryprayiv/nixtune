@@ -33,7 +33,9 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.Clock (getMonotonicTimeNSec)
+import Network.Socket (Socket)
 import Network.WebSockets qualified as WS
+import Nixtune.Net (websocketOver)
 import Nixtune.Room.Name (RoomName, roomNameText)
 import Nixtune.Sendspin.Audio (Outstanding, StreamFormat, admit, choosePcm, noOutstanding)
 import Nixtune.Sendspin.Message
@@ -78,6 +80,8 @@ data PlayerConn = PlayerConn
   , pcControl :: TQueue Out
   , pcAudio :: TBQueue Out
   , pcState :: TVar ConnState
+  , pcEnded :: TMVar ()
+  -- ^ Filled when the connection has ended, for whoever waits on it.
   }
 
 newPlayerConn :: Int -> RoomName -> Bool -> IO PlayerConn
@@ -88,6 +92,7 @@ newPlayerConn n r own =
     -- than that misses chunks rather than holding up the others.
     <*> newTBQueueIO 50
     <*> newTVarIO (ConnState Nothing 0 False False Nothing False False)
+    <*> newEmptyTMVarIO
 
 data Events = Events
   { evLog :: Text -> IO ()
@@ -97,10 +102,12 @@ data Events = Events
   -- ^ A client/state arrived: available, and the player object if any.
   }
 
--- | Runs until the connection ends; throws when the websocket fails.
-runPlayer :: Events -> Text -> StreamFormat -> Text -> Int -> Text -> Credentials -> PlayerConn -> IO ()
-runPlayer ev serverName fmt host port path cr pc =
-  WS.runClient (Text.unpack host) port (Text.unpack path) $ \conn -> do
+-- | Runs over a socket already connected to the player's host until the
+-- connection ends; throws when the websocket fails. It does not close the
+-- socket.
+runPlayer :: Events -> Text -> StreamFormat -> Socket -> Text -> Int -> Text -> Credentials -> PlayerConn -> IO ()
+runPlayer ev serverName fmt sock host port path cr pc =
+  websocketOver sock host port path $ \conn -> do
     r <- timeout 30000000 (bringUp conn)
     case r of
       Nothing -> say "no answer within 30 seconds during the handshake"

@@ -1,0 +1,104 @@
+diff --git a/sendspin/audio_connector.py b/sendspin/audio_connector.py
+index c7eabac..48308ab 100644
+--- a/sendspin/audio_connector.py
++++ b/sendspin/audio_connector.py
+@@ -380,6 +380,7 @@ class AudioStreamHandler:
+ 
+         self._volume_controller: VolumeController | None = volume_controller
+         self._chunks_dropping = False
++        self._output_gate: asyncio.Task[None] | None = None
+ 
+     @property
+     def volume(self) -> int:
+@@ -511,6 +512,16 @@ class AudioStreamHandler:
+         if worker is not None and worker.is_running():
+             worker.clear()
+ 
++    def hold_output_until(self, task: asyncio.Task[None]) -> None:
++        """Drop audio chunks until ``task`` is done.
++
++        The worker opens the audio device on the first chunk it receives, so
++        holding chunks back keeps the device closed while the start hook runs,
++        for a hook that has to free the device first. Chunks dropped here are
++        audio whose time has passed by the time the hook returns.
++        """
++        self._output_gate = task
++
+     def _on_audio_chunk(
+         self,
+         server_timestamp_us: int,
+@@ -519,6 +530,11 @@ class AudioStreamHandler:
+         send_ahead_us: int,
+     ) -> None:
+         """Handle incoming audio chunks by enqueueing them to the sync worker."""
++        gate = self._output_gate
++        if gate is not None:
++            if not gate.done():
++                return
++            self._output_gate = None
+         worker = self._audio_worker
+         if worker is None or not worker.is_running():
+             if not self._chunks_dropping:
+diff --git a/sendspin/daemon/daemon.py b/sendspin/daemon/daemon.py
+index 2a8c891..91723eb 100644
+--- a/sendspin/daemon/daemon.py
++++ b/sendspin/daemon/daemon.py
+@@ -423,7 +423,7 @@ class SendspinDaemon:
+         if not hook:
+             return
+         server_info = self._client.server_info if self._client else None
+-        create_task(
++        task = create_task(
+             run_hook(
+                 hook,
+                 event=event,
+@@ -434,3 +434,7 @@ class SendspinDaemon:
+                 client_name=self._args.client_name,
+             )
+         )
++        if event == "start" and self._audio_handler is not None:
++            # The start hook frees the audio device (nixtune's pauses MPD and
++            # disables its ALSA output); open the device only once it returns.
++            self._audio_handler.hold_output_until(task)
+diff --git a/tests/test_audio_connector.py b/tests/test_audio_connector.py
+index e69b66c..c785e67 100644
+--- a/tests/test_audio_connector.py
++++ b/tests/test_audio_connector.py
+@@ -288,3 +288,37 @@ def test_stream_end_closes_stream_not_just_clears(monkeypatch) -> None:
+ 
+     assert worker.stream_closed, "_on_stream_end must call close_stream(), not just clear()"
+     assert not worker.cleared, "_on_stream_end must not call clear() separately"
++
++
++def test_audio_waits_for_the_start_hook(monkeypatch) -> None:
++    """No chunk reaches the worker, which opens the device, until the hook is done."""
++    monkeypatch.setattr(audio_connector, "_AudioSyncWorker", _FakeWorker)
++    _FakeWorker.instances.clear()
++
++    async def exercise() -> None:
++        handler = AudioStreamHandler(
++            audio_device=SimpleNamespace(index=0, name="Fake Device"),
++            volume=100,
++            muted=False,
++        )
++        handler.attach_client(_FakeClient())
++        handler._on_stream_start(
++            SimpleNamespace(payload=SimpleNamespace(player=SimpleNamespace(), visualizer=None))
++        )
++        hook_done = asyncio.Event()
++
++        async def hook() -> None:
++            await hook_done.wait()
++
++        task = asyncio.create_task(hook())
++        handler.hold_output_until(task)
++        fmt = _make_format()
++        handler._on_audio_chunk(1, b"early", fmt, 0)
++        assert _FakeWorker.instances[-1].submitted == []
++
++        hook_done.set()
++        await task
++        handler._on_audio_chunk(2, b"after", fmt, 0)
++        assert _FakeWorker.instances[-1].submitted == [(2, b"after", fmt)]
++
++    asyncio.run(exercise())

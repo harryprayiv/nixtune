@@ -16,7 +16,7 @@ where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
-import Control.Exception (bracket, evaluate)
+import Control.Exception (bracket, evaluate, finally)
 import Control.Monad (filterM, forM_, forever, unless, void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
@@ -30,15 +30,17 @@ import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8Lenient)
+import Network.Socket qualified as Socket
 import Nixtune.Mpd.Client qualified as Mpd
 import Nixtune.Mpd.Protocol (Response (..))
+import Nixtune.Net (connectHost)
 import Nixtune.Room.Clock (Millis (..))
 import Nixtune.Room.Config
 import Nixtune.Room.Coordinator (Event (..))
 import Nixtune.Room.Keys (decodeBase64Url)
 import Nixtune.Room.Name (RoomName, roomNameText)
 import Nixtune.Room.Server (SendspinServer (..))
-import Nixtune.Room.Sync (catchSync, describe)
+import Nixtune.Room.Sync (catchSync, describe, trySync)
 import Nixtune.Sendspin.Audio
 import Nixtune.Sendspin.Connection
 import Nixtune.Sendspin.Message
@@ -151,14 +153,42 @@ hold env own r = do
         atomically (modifyTVar' (conns env) (Map.insert r conn))
         void . forkIO $ do
           let ss = sendspin (cfg env)
-          runPlayer (events env) (name env) (fmt env) (peerHost p) (playerPort ss) (playerPath ss) cr conn
-            `catchSync` \e -> say env (roomNameText r <> "'s player: " <> Text.pack (describe e))
+          connected <- connectWhileHeld env conn (peerHost p) (playerPort ss)
+          forM_ connected $ \s ->
+            (runPlayer (events env) (name env) (fmt env) s (peerHost p) (playerPort ss) (playerPath ss) cr conn `finally` Socket.close s)
+              `catchSync` \e -> say env (roomNameText r <> "'s player: " <> Text.pack (describe e))
           ended env conn
+
+-- | Connect to a held player, trying again every half second while
+-- nothing listens there yet and the hold stands. A player listens only
+-- once it has opened its device (KnownIssue
+-- player_starts_only_with_dac_free), which can be after the hold: a
+-- follower frees its DAC as it asks, and its player may be between
+-- restarts then. A hold that never connects is ended by the coordinator
+-- at the player-ready timeout, which releases it. Only the first failure
+-- is logged.
+connectWhileHeld :: Env -> PlayerConn -> Text -> Int -> IO (Maybe Socket.Socket)
+connectWhileHeld env pc host port = go True
+  where
+    go firstTry = do
+      released <- csReleased <$> readTVarIO (pcState pc)
+      if released
+        then pure Nothing
+        else do
+          r <- trySync (connectHost host port)
+          case r of
+            Right s -> pure (Just s)
+            Left e -> do
+              when firstTry $
+                say env (roomNameText (pcRoom pc) <> "'s player: " <> Text.pack (describe e) <> "; trying again while it is held")
+              threadDelay 500000
+              go False
 
 ended :: Env -> PlayerConn -> IO ()
 ended env pc = do
   st <- atomically $ do
     modifyTVar' (conns env) (Map.update (\q -> if pcId q == pcId pc then Nothing else Just q) (pcRoom pc))
+    void (tryPutTMVar (pcEnded pc) ())
     readTVar (pcState pc)
   unless (csReleased st) $
     if pcOwn pc
@@ -168,17 +198,33 @@ ended env pc = do
         unless still (hold env True (pcRoom pc))
       else post env (PlayerGone (pcRoom pc))
 
+-- | End the stream and close the connection, and return only once the
+-- connection has ended, or after two seconds. The caller's next action
+-- usually opens the DAC (MPD's ALSA output, or AirPlay), and the player
+-- closes its output on its own worker thread after stream/end, with no
+-- acknowledgement in the protocol; waiting for the close and a quarter
+-- of a second more is what keeps the two from colliding (KnownIssue
+-- player_closes_output_without_acknowledgement).
 release :: Env -> RoomName -> IO ()
-release env r = atomically $ do
-  m <- readTVar (conns env)
-  forM_ (Map.lookup r m) $ \pc -> do
-    st <- readTVar (pcState pc)
-    unless (csReleased st) $ do
-      when (csStreaming st) $ do
-        void (flushTBQueue (pcAudio pc))
-        writeTQueue (pcControl pc) (OutJson True (const streamEnd))
-      writeTQueue (pcControl pc) OutClose
-      writeTVar (pcState pc) st {csReleased = True, csStreaming = False}
+release env r = do
+  waitFor <- atomically $ do
+    m <- readTVar (conns env)
+    case Map.lookup r m of
+      Nothing -> pure Nothing
+      Just pc -> do
+        st <- readTVar (pcState pc)
+        if csReleased st
+          then pure Nothing
+          else do
+            when (csStreaming st) $ do
+              void (flushTBQueue (pcAudio pc))
+              writeTQueue (pcControl pc) (OutJson True (const streamEnd))
+            writeTQueue (pcControl pc) OutClose
+            writeTVar (pcState pc) st {csReleased = True, csStreaming = False}
+            pure (Just (pc, csStreaming st))
+  forM_ waitFor $ \(pc, wasStreaming) -> do
+    void (timeout 2000000 (atomically (readTMVar (pcEnded pc))))
+    when wasStreaming (threadDelay 250000)
 
 events :: Env -> Events
 events env =

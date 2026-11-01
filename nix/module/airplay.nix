@@ -9,6 +9,15 @@
 #
 # The marker lives in shairport-sync's own RuntimeDirectory, which the unit
 # owns, so no extra tmpfiles rule and nothing survives a reboot.
+#
+# With multiroom on, pausing MPD is the coordinator's job, because AirPlay
+# in a source room must not pause the whole group (KnownIssue
+# renderer_hooks_pause_group). The hooks tell the coordinator the
+# interruption starts and ends, and it pauses and resumes MPD when the room
+# is alone, as here. When the coordinator does not answer, the first hook
+# falls back to pausing MPD itself, and the marker it leaves makes the
+# second hook resume MPD itself, so a coordinator that is down never
+# leaves AirPlay without the DAC.
 {
   config,
   lib,
@@ -20,24 +29,41 @@ let
   out = cfg.output;
   mpc = "${lib.getExe pkgs.mpc} --host 127.0.0.1 --port ${toString cfg.mpd.port}";
   mark = "/run/shairport-sync/nixtune-paused-mpd";
+  multiroom = cfg.multiroom.enable;
+  ctl = "${lib.getExe cfg.multiroom.package} ctl --socket /run/nixtune-room/control.sock";
+
+  pauseMpd = ''
+    if ${mpc} status | grep -q '^\[playing\]'; then
+      touch ${mark}
+      ${mpc} pause
+    fi
+  '';
 
   beforePlay = pkgs.writeShellApplication {
     name = "nixtune-airplay-before-play";
     runtimeInputs = [ pkgs.gnugrep ];
-    text = ''
-      if ${mpc} status | grep -q '^\[playing\]'; then
-        touch ${mark}
-        ${mpc} pause
-      fi
-    '';
+    text =
+      if multiroom then
+        ''
+          if ! ${ctl} interruption-starts airplay; then
+            ${pauseMpd}
+          fi
+        ''
+      else
+        pauseMpd;
   };
+
+  resumeMpd = ''
+    rm -f ${mark}
+    ${lib.optionalString cfg.arbitration.resumeAfterRenderer "${mpc} play"}
+  '';
 
   afterPlay = pkgs.writeShellApplication {
     name = "nixtune-airplay-after-play";
     text = ''
       if [ -e ${mark} ]; then
-        rm -f ${mark}
-        ${lib.optionalString cfg.arbitration.resumeAfterRenderer "${mpc} play"}
+        ${resumeMpd}
+      ${lib.optionalString multiroom "else ${ctl} interruption-ends airplay"}
       fi
     '';
   };
@@ -50,6 +76,9 @@ in
         message = "services.nixtune.renderers.airplay needs a sound card; services.nixtune.hardware.profile is \"${cfg.hardware.profile}\".";
       }
     ];
+
+    # The hooks reach the coordinator's control socket.
+    users.users.${config.services.shairport-sync.user}.extraGroups = lib.mkIf multiroom [ "nixtune-room" ];
 
     services.shairport-sync = {
       enable = true;

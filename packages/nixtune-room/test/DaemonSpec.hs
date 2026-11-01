@@ -7,6 +7,7 @@ module DaemonSpec (spec) where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Monad (void)
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -39,13 +40,13 @@ freePort = do
   Socket.close s
   pure p
 
--- | A Sendspin server whose players report available a moment after they
--- are held, and gone when released.
-fakeServer :: (Event -> IO ()) -> IO SendspinServer
-fakeServer post =
+-- | A Sendspin server whose players report available the given number of
+-- microseconds after they are held, and gone when released.
+fakeServer :: Int -> (Event -> IO ()) -> IO SendspinServer
+fakeServer delay post =
   pure
     SendspinServer
-      { serverHold = \r -> void . forkIO $ threadDelay 50000 >> post (PlayerAvailable r)
+      { serverHold = \r -> void . forkIO $ threadDelay delay >> post (PlayerAvailable r)
       , serverRelease = post . PlayerGone
       , serverHoldOwn = pure ()
       , serverReleaseOwn = pure ()
@@ -58,6 +59,7 @@ data Home = Home
   , labMpd :: FakeMpd
   , ports :: Map.Map RoomName Int
   , dirOf :: FilePath
+  , peerMs :: Int64
   }
 
 configFor :: Home -> RoomName -> FakeMpd -> RoomConfig
@@ -68,7 +70,7 @@ configFor h r m =
         Map.fromList
           [(p, PeerConfig "127.0.0.1" port "/" (Millis 0) "-" "-") | (p, port) <- Map.toList (ports h)]
     , acousticsMs = Map.empty
-    , timing = Timing 300 2000 2000 10000 100 2000
+    , timing = Timing 300 2000 2000 10000 100 (peerMs h)
     , listen = Listen "127.0.0.1" (Map.findWithDefault 0 r (ports h)) (dirOf h </> ("control-" <> show (Map.findWithDefault 0 r (ports h)) <> ".sock"))
     , mpd = MpdConfig "127.0.0.1" (fakePort m) "dac" "multiroom"
     , secrets = Secrets "" "" Map.empty Map.empty
@@ -79,17 +81,22 @@ quiet :: Text -> IO ()
 quiet _ = pure ()
 
 withHome :: (Home -> Daemon.Daemon -> Daemon.Daemon -> IO a) -> IO a
-withHome act = withTempDir "nixtune-room" $ \dir -> do
+withHome = withHomeOf 50000 2000
+
+-- | Two daemons whose players report available after the given delay in
+-- microseconds, with the given peer timeout in milliseconds.
+withHomeOf :: Int -> Int64 -> (Home -> Daemon.Daemon -> Daemon.Daemon -> IO a) -> IO a
+withHomeOf delay timeoutMs act = withTempDir "nixtune-room" $ \dir -> do
   km <- startFakeMpd True
   lm <- startFakeMpd True
   kp <- freePort
   lp <- freePort
   lv <- freePort
-  let h = Home km lm (Map.fromList [(kitchen, kp), (lab, lp), (livingRoom, lv)]) dir
+  let h = Home km lm (Map.fromList [(kitchen, kp), (lab, lp), (livingRoom, lv)]) dir timeoutMs
   -- The daemons' log goes nowhere: a refused or unanswered request is
   -- logged, and hspec's report is the output that matters here.
-  kd <- Daemon.start quiet (configFor h kitchen km) fakeServer
-  ld <- Daemon.start quiet (configFor h lab lm) fakeServer
+  kd <- Daemon.start quiet (configFor h kitchen km) (fakeServer delay)
+  ld <- Daemon.start quiet (configFor h lab lm) (fakeServer delay)
   withAsync (Daemon.run kd) $ \_ -> withAsync (Daemon.run ld) $ \_ -> do
     threadDelay 200000
     act h kd ld
@@ -149,6 +156,11 @@ spec = describe "two daemons" $ do
       -- the last switch to land.
       os <- settled (mpdOutputs (labMpd h)) (== Map.fromList [(0, ("dac", True)), (1, ("multiroom", False))])
       os `shouldBe` Map.fromList [(0, ("dac", True)), (1, ("multiroom", False))]
+  it "waits for a player slower than one peer call, up to the player-ready timeout" $
+    withHomeOf 1000000 500 $ \h kd _ -> do
+      askRoom h kitchen (ReqFollow lab) `shouldReturn` Right (Right ())
+      k <- eventually kd ((== "peer-server") . wsPath)
+      wsSource k `shouldBe` Just lab
   it "refuses to follow a room that is not running, and stays as it was" $
     withHome $ \h kd _ -> do
       askRoom h kitchen (ReqFollow livingRoom) `shouldReturn` Right (Left SourceUnreachable)

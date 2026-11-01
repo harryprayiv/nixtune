@@ -34,6 +34,7 @@ library
   exposed-modules:
     Nixtune.Mpd.Client
     Nixtune.Mpd.Protocol
+    Nixtune.Net
     Nixtune.Room.Clock
     Nixtune.Room.Config
     Nixtune.Room.Coordinator
@@ -105,6 +106,7 @@ test-suite nixtune-room-test
     Generators
     KeysSpec
     MpdSpec
+    NetSpec
     NoiseSpec
     OutputsSpec
     SendspinSpec

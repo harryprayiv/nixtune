@@ -5,6 +5,7 @@ import DaemonSpec qualified
 import FocusSpec qualified
 import KeysSpec qualified
 import MpdSpec qualified
+import NetSpec qualified
 import NoiseSpec qualified
 import OutputsSpec qualified
 import SendspinSpec qualified
@@ -25,4 +26,5 @@ main = hspec $ do
   describe "Noise" NoiseSpec.spec
   describe "Stream" StreamSpec.spec
   describe "Sync" SyncSpec.spec
+  describe "Net" NetSpec.spec
   describe "Daemon" DaemonSpec.spec

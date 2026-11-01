@@ -10,10 +10,13 @@ module Nixtune.Room.Peer
   )
 where
 
+import Control.Exception (bracket)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Network.Socket qualified as Socket
 import Network.WebSockets qualified as WS
+import Nixtune.Net (connectHost, websocketOver)
 import Nixtune.Room.Config (PeerConfig (..))
 import Nixtune.Room.Protocol (Refusal, Request)
 import Nixtune.Room.Sync (describe, trySync)
@@ -36,11 +39,12 @@ exchange :: Int64 -> PeerConfig -> Text -> IO (Either PeerError Text)
 exchange timeoutMs p line = do
   r <-
     timeout (fromIntegral timeoutMs * 1000) . trySync $
-      WS.runClient (Text.unpack (peerHost p)) (peerPort p) (Text.unpack (peerPath p)) $ \conn -> do
-        WS.sendTextData conn line
-        answer <- WS.receiveData conn
-        WS.sendClose conn ("done" :: Text)
-        pure answer
+      bracket (connectHost (peerHost p) (peerPort p)) Socket.close $ \s ->
+        websocketOver s (peerHost p) (peerPort p) (peerPath p) $ \conn -> do
+          WS.sendTextData conn line
+          answer <- WS.receiveData conn
+          WS.sendClose conn ("done" :: Text)
+          pure answer
   pure $ case r of
     Nothing -> Left TimedOut
     Just (Left e) -> Left (Unreachable (Text.pack (describe e)))

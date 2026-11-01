@@ -22,6 +22,9 @@
 #   youtube.nix    fetching a YouTube track into the library and queueing it
 #   airplay.nix    shairport-sync and the arbitration hooks
 #   upnp.nix       upmpdcli
+#   multiroom.nix  services.nixtune.multiroom: the coordinator, the room's
+#                  Sendspin server and player. It declares its own
+#                  options, being one subsystem that nothing here reads.
 #
 # The module knows nothing about where its inputs come from. The wifi
 # passphrase is a path to an environment file; how that file gets onto the
@@ -80,6 +83,7 @@ in
     ./youtube.nix
     ./airplay.nix
     ./upnp.nix
+    ./multiroom.nix
   ];
 
   options.services.nixtune = {
@@ -348,7 +352,12 @@ in
     arbitration.resumeAfterRenderer = mkOption {
       type = types.bool;
       default = true;
-      description = "Resume MPD when a renderer that paused it stops streaming.";
+      description = ''
+        Resume MPD when a renderer that paused it stops streaming. With
+        multiroom on, AirPlay's pause and resume go through the
+        coordinator, which resumes what it paused; this then applies only
+        when the coordinator did not answer and the hook paused MPD itself.
+      '';
     };
 
     renderers = {

@@ -36,30 +36,73 @@
       # The module on a QEMU-shaped host with no sound card: what
       # `nix flake check` evaluates, and the fastest proof that a change to
       # the module still produces a system.
-      rehearsal = lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [
-          self.nixosModules.default
-          {
-            networking.hostName = "nixtune-rehearsal";
-            services.nixtune = {
-              enable = true;
-              hardware.profile = "none";
-              radio.stations = [
-                {
-                  name = "GBH 89.7";
-                  url = "https://wgbh-live.streamguys1.com/wgbh";
-                }
-              ];
+      rehearsalHost =
+        extra:
+        lib.nixosSystem {
+          system = "x86_64-linux";
+          modules = [
+            self.nixosModules.default
+            {
+              networking.hostName = "nixtune-rehearsal";
+              services.nixtune = {
+                enable = true;
+                hardware.profile = "none";
+                radio.stations = [
+                  {
+                    name = "GBH 89.7";
+                    url = "https://wgbh-live.streamguys1.com/wgbh";
+                  }
+                ];
+              };
+              fileSystems."/" = {
+                device = "/dev/disk/by-label/nixos";
+                fsType = "ext4";
+              };
+              boot.loader.grub.enable = false;
+              system.stateVersion = "26.11";
+            }
+            extra
+          ];
+        };
+
+      rehearsal = rehearsalHost { };
+
+      # The same host as one room of two, with the player on snd-aloop in
+      # place of a DAC. The keys are the public halves of throwaway keys,
+      # and the secret paths point nowhere: this proves the module
+      # evaluates and the system builds, not that it plays. Playing is
+      # checks.x86_64-linux.multiroom's job.
+      rehearsalMultiroom = rehearsalHost {
+        boot.kernelModules = [ "snd-aloop" ];
+        services.nixtune.multiroom = {
+          enable = true;
+          room = "kitchen";
+          playerCard = "Loopback";
+          peers = {
+            kitchen = {
+              host = "kitchen.lan";
+              serverKey = "9YUjVwCmeg8NExXJcztTEaXxmyqJgmVgpAPLWrv9x2w";
+              playerKey = "ixON7xY4JKTOlSbgZ8X3SdhOMmadP4LIF8Hn8F9QMnk";
             };
-            fileSystems."/" = {
-              device = "/dev/disk/by-label/nixos";
-              fsType = "ext4";
+            lab = {
+              host = "lab.lan";
+              serverKey = "jMXT3iiJvwqfy-_zA6nU2IBw3gipHjUMu_gAPDzjfy4";
+              playerKey = "W0_isw8jmaRm9KZCzju4zAYm5qfBTdGFUFns4jrwwxY";
             };
-            boot.loader.grub.enable = false;
-            system.stateVersion = "26.11";
-          }
-        ];
+          };
+          secrets = {
+            serverKeyFile = "/run/secrets/nixtune-room/server-key";
+            playerKeyFile = "/run/secrets/nixtune-room/player-key";
+            serverPskFiles = {
+              kitchen = "/run/secrets/nixtune-room/server-psk/kitchen";
+              lab = "/run/secrets/nixtune-room/server-psk/lab";
+            };
+            playerPskFiles = {
+              kitchen = "/run/secrets/nixtune-room/player-psk/kitchen";
+              lab = "/run/secrets/nixtune-room/player-psk/lab";
+            };
+          };
+        };
       };
     in
     {
@@ -71,12 +114,42 @@
 
       packages = forAllSystems (pkgs: {
         nixtune-web = pkgs.callPackage ./packages/nixtune-web { };
+        nixtune-room = pkgs.callPackage ./packages/nixtune-room { };
+        sendspin = pkgs.callPackage ./packages/sendspin { };
         upmpdcli = pkgs.callPackage ./packages/upmpdcli.nix { };
       });
 
-      checks = lib.recursiveUpdate (forAllSystems (pkgs: {
-        nixtune-web = self.packages.${pkgs.stdenv.hostPlatform.system}.nixtune-web;
-      })) { x86_64-linux.rehearsal = rehearsal.config.system.build.toplevel; };
+      # The Sendspin Python packages at the releases nixtune tracks, in
+      # every Python package set of a host that applies it. The module does
+      # not need it: packages/sendspin builds the player from its own set.
+      # It is for a machine that wants the same aiosendspin and sendspin
+      # outside nixtune, such as a workstation running `sendspin` by hand
+      # against a room.
+      overlays.sendspin = final: prev: {
+        pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+          (import ./packages/sendspin/python-overrides.nix { inherit (final) fetchFromGitHub; })
+        ];
+      };
+
+      checks = lib.recursiveUpdate (forAllSystems (
+        pkgs:
+        let
+          own = self.packages.${pkgs.stdenv.hostPlatform.system};
+        in
+        {
+          inherit (own) nixtune-web nixtune-room sendspin;
+        }
+      )) {
+        x86_64-linux = {
+          rehearsal = rehearsal.config.system.build.toplevel;
+          rehearsal-multiroom = rehearsalMultiroom.config.system.build.toplevel;
+          # MultiroomRehearsal: two rooms in VMs. Needs KVM.
+          multiroom = import ./nix/tests/multiroom.nix {
+            inherit self;
+            pkgs = nixpkgs.legacyPackages.x86_64-linux;
+          };
+        };
+      };
 
       # default is what `direnv` (use flake .) and `nix develop` give: the
       # same purs and esbuild the build uses, spago for the lock, nixfmt for
@@ -86,10 +159,10 @@
       # (stdenv.isDarwin); it is theirs, and it does not reach any consumer
       # of the module.
       #
-      # room is for packages/nixtune-room until haskell.nix builds it: GHC
-      # and cabal, plus the C libraries its Hackage dependencies link
-      # against. websockets depends on the Haskell zlib package, which needs
-      # libz and finds it through pkg-config; mkShell puts both where cabal
+      # room is for working on packages/nixtune-room with cabal: GHC and
+      # cabal, plus the C libraries its Hackage dependencies link against.
+      # websockets depends on the Haskell zlib package, which needs libz
+      # and finds it through pkg-config; mkShell puts both where cabal
       # looks, which a bare `nix shell` does not.
       devShells = forAllSystems (
         pkgs:

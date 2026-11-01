@@ -178,6 +178,13 @@ self' = room . config
 peerTimeout :: Daemon -> Integer
 peerTimeout = fromIntegral . peerTimeoutMs . timing . config
 
+-- | How long a hold can take to be answered. The source answers once its
+-- server reports the player available (rule HoldRequested), which can
+-- take up to the player-ready timeout, and the call itself takes up to
+-- the peer timeout.
+holdTimeout :: Daemon -> Integer
+holdTimeout d = peerTimeout d + fromIntegral (playerReadyTimeoutMs (timing (config d)))
+
 -- | Ask a peer and wait. Used for release and suspend, which the next
 -- action in the plan depends on and which a peer answers at once.
 askNow :: Daemon -> RoomName -> Request -> IO ()
@@ -204,10 +211,12 @@ runAction d = \case
     answer <- case peerOf (config d) r of
       Nothing -> pure (Left UnknownRoom)
       Just p -> do
-        result <- Peer.ask (fromIntegral (peerTimeout d)) p (ReqHold (self' d))
-        pure $ case result of
-          Right a -> a
-          Left _ -> Left SourceUnreachable
+        result <- Peer.ask (fromIntegral (holdTimeout d)) p (ReqHold (self' d))
+        case result of
+          Right a -> pure a
+          Left e -> do
+            say d (roomNameText r <> " did not answer " <> renderRequest (ReqHold (self' d)) <> ": " <> Peer.describePeerError e)
+            pure (Left SourceUnreachable)
     postEvent d (HoldAnswered r answer)
 
 runEffect :: Daemon -> Effect -> IO ()
@@ -300,10 +309,10 @@ controlServer d = do
       if line == "subscribe"
         then send "error subscribe is for websocket clients"
         else handleLine d send (\_ -> pure ()) line
-      -- A request's reply may come from the coordinator thread. Every
-      -- request is answered within the peer timeout or the player-ready
-      -- deadline, so this wait ends; the timeout is a second guard.
-      void . timeout ((fromIntegral (peerTimeout d) + 5000) * 1000) . atomically $ takeTMVar done
+      -- A request's reply may come from the coordinator thread. A follow
+      -- is answered when its source answers the hold, so every request is
+      -- answered within the hold timeout; this one is a second guard.
+      void . timeout ((fromIntegral (holdTimeout d) + 5000) * 1000) . atomically $ takeTMVar done
     readControlLine c = go mempty
       where
         go acc = do
