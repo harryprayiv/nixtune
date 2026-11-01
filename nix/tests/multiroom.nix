@@ -86,13 +86,22 @@ pkgs.testers.runNixOSTest {
   nodes = lib.genAttrs rooms room;
 
   testScript = ''
+    from datetime import timedelta
+
     def status(machine):
         return machine.succeed("nixtune-room ctl status")
 
+    # sendspin-cli logs the format when the stream starts, before any
+    # audio arrives, and "Stream STARTED" once it has buffered chunks and
+    # begun playing them; the second is the proof that PCM arrived.
     def played_pcm(machine):
         machine.wait_until_succeeds(
             "journalctl -u nixtune-player.service | grep -q 'Audio format: pcm 44100Hz/24-bit/2ch'",
-            timeout=60,
+            timeout=timedelta(seconds=60),
+        )
+        machine.wait_until_succeeds(
+            "journalctl -u nixtune-player.service | grep -q 'Stream STARTED'",
+            timeout=timedelta(seconds=30),
         )
 
     start_all()
@@ -127,7 +136,7 @@ pkgs.testers.runNixOSTest {
         kitchen.succeed("nixtune-room ctl own")
         kitchen.wait_until_succeeds("nixtune-room ctl status | grep -q 'path=direct'")
         # The lab keeps its server path for the audience grace period.
-        lab.wait_until_succeeds("nixtune-room ctl status | grep -q 'path=direct'", timeout=30)
+        lab.wait_until_succeeds("nixtune-room ctl status | grep -q 'path=direct'", timeout=timedelta(seconds=30))
         lab.succeed("mpc status | grep -q '^\\[playing\\]'")
   '';
 }
