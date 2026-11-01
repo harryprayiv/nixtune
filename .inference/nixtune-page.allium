@@ -16,8 +16,16 @@
 -- ClientSetsVolume, StatusPushedToSessions, surfaces GuestPage and
 -- HostPage, value BrowseColumn) are superseded by this file. Where the
 -- two disagree about the page, this file holds. Where this file and the
--- code disagree, the code was read on 2026-10-31 at 1ad560b and this
--- file records the intended change.
+-- code disagree, this file records the intended change, and section
+-- IMPLEMENTATION STATUS below says which decisions are built.
+--
+-- REVISIONS. Written against 1ad560b on 2026-10-31. Revised the same
+-- evening against the `youtube` branch, which the fleet input now
+-- points at and which adds, on top of 1ad560b: the regex OR and search
+-- filtering of P7 and P9, Clear in place of Stop (P25), lists sized from
+-- one row pitch (P26), saved playlists on the Queue view (P27, which
+-- supersedes P12), the YouTube field (P28) and the pinned YouTube row
+-- (P29).
 --
 -- FACTS THIS SPEC IS WRITTEN AGAINST, checked 2026-10-31:
 --   - nixpkgs 6510408d builds mpd 0.24.15 with features = null, which
@@ -47,10 +55,18 @@
 --     `sort` the order is database order, which is directory then file
 --     name, each ICU collated.
 --   - max_output_buffer_size is 32768 KB (mpd.maxOutputBuffer).
---   - database.nix disables every playlist plugin, and `load` goes
---     through the same registry, so a stored playlist can be saved and
---     not loaded until m3u and extm3u are re-enabled (nixtune.allium
---     KnownIssue stored_playlists_unloadable). P12 depends on that.
+--   - `load`, `listplaylist` and `listplaylistinfo` go through MPD's
+--     playlist plugin registry (playlist_open_any, src/playlist/Print.cxx
+--     in 0.24.5); `save`, `playlistadd`, `playlistmove`, `playlistdelete`,
+--     `rename`, `rm` and `listplaylists` work on the file directly. On the
+--     youtube branch database.nix turns m3u and extm3u back on and keeps
+--     the other seven off, so stored playlists load (nixtune.allium
+--     KnownIssue stored_playlists_unloadable, closed). The library's own
+--     .m3u files are indexed as a consequence; `lsinfo` reports them as
+--     playlist: lines and the folder view leaves them out.
+--   - `save NAME [create|append|replace]` is in 0.24; create is the
+--     default and fails on an existing name. A playlist name is refused
+--     when empty or containing "/", CR or LF (spl_valid_name).
 --   - Halogen renders the whole page on every state update. A reply
 --     collected through component state renders once per line. Since
 --     1ad560b the partial tail and the reply being collected live in
@@ -174,15 +190,10 @@
 --       (playlistlength), which is how a deletion at the end is seen.
 --       A whole-queue `playlistinfo` is never sent again.
 --
---   P12. SAVED PLAYLISTS ARE THEIR OWN VIEW. Host only. Blocked on
---       KnownIssue stored_playlists_unloadable: until m3u and extm3u
---       are back on, Load and Append fail with an ACK and the view
---       offers Save and the listings only. Lists the saved
---       playlists (`listplaylists`), shows one's contents windowed
---       (`listplaylistinfo NAME START:END`), loads one into the queue
---       (`load`), appends one (`load` without clear), saves the queue as
---       one (`save`), renames and removes. "Add to saved playlist" on a
---       row writes with `playlistadd`.
+--   P12. SUPERSEDED by P27 (2026-10-31): saved playlists are a pane of
+--       the Queue view, not their own view. "Add to saved playlist" on a
+--       library row (P13, `playlistadd` / `searchaddpl`) is still the
+--       intended way to add one track or a selection, and is not built.
 --
 --   P13. ROW ACTIONS. On the host page a track row, an album row or the
 --       whole current selection offers: Add to end, Play next, Replace
@@ -243,7 +254,12 @@
 --
 --   P20. ONE TRANSPORT BAR, PRESENT ON EVERY HOST VIEW, as decision 18
 --       of nixtune.allium and as the code already does. The queue stays
---       a separate view at every width.
+--       a separate view at every width. The bar is two rows: the
+--       position (elapsed, seek bar, duration; "live" and not seekable
+--       for a stream) directly above the transport and volume, so the
+--       position is never separated from the controls it belongs with.
+--       A guest has no bar; the guest's Now playing card keeps a plain
+--       progress line.
 --
 -- Recorded from the code at 1ad560b:
 --
@@ -286,6 +302,112 @@
 --       count has turned out to be zero, and corrected the wrong query to
 --       zero before 1ad560b. With P7's single query this reduces to one
 --       query, and the rule still holds for the no-pcre fallback.
+--
+-- Decisions taken 2026-10-31 evening, while building:
+--
+--   P25. CLEAR REPLACES STOP. There is no Stop control: pause does what
+--       a person means by it, and the bar has pause. In its place, Clear
+--       queue, on Now playing beside the four playback modes and at the
+--       head of the Queue pane. MPD has no undo for `clear`, so it takes
+--       two presses: the first arms the button and says so, a second
+--       within config.clear_confirm sends `clear`, and the arming lapses
+--       otherwise. Each press is numbered, so a lapse timer from an
+--       earlier press never disarms a later one.
+--
+--   P26. EVERY LIST IS SIZED FROM ONE NUMBER. A list's row pitch is a
+--       constant in the page (config.row_height for tag columns,
+--       config.track_row_height for the track list), and the page hands
+--       it to the stylesheet as the custom property --row on that list,
+--       so a row is drawn exactly as tall as the slice arithmetic counts
+--       it. Nothing else about a list's height is a fixed figure: the
+--       columns and the track list share the Library view's height by
+--       flex proportion (columns 60, track list 40, each with a minimum),
+--       every column fills the height it is given, and the page measures
+--       each list's real height on resize and when a view opens. The
+--       letter rail draws as many letters as fit at config.rail_pitch:
+--       all 27 when they fit, otherwise #, every n-th letter from A, and
+--       always Z, with a letter that is not drawn reached from the drawn
+--       letter before it. The rail's type is sized from the column's
+--       container height. After the page sets a scroll position it reads
+--       back the one the browser actually used, because near the end of a
+--       list the browser clamps it.
+--
+--   P27. SAVED PLAYLISTS ARE A PANE OF THE QUEUE VIEW. Host only. The
+--       host's Queue view has a two-way switch: Queue and Playlists.
+--         Queue      the YouTube field (P28), a "save the queue as" field,
+--                    Clear queue (P25) and the queue.
+--         Playlists  MPD's stored playlists by name (`listplaylists`),
+--                    each with Play (`clear`, `load NAME`, `play`, then
+--                    back to the Queue pane), Add (`load NAME`, which
+--                    appends) and Delete (`rm NAME`). A name opens it.
+--         One open   the playlist's rows, a rename field (`rename OLD
+--                    NEW`), Add to queue, Play, Delete, and Append the
+--                    queue (`save NAME append`), which is how tracks reach
+--                    an existing playlist until P13's row action exists.
+--                    Rows reorder with the queue's drag handle and arrow
+--                    keys (`playlistmove NAME FROM TO`) and go with
+--                    `playlistdelete NAME POS`.
+--       Saving under a new name is `save NAME`. Saving under a name that
+--       is already saved arms the button as Replace, and a second press
+--       within config.clear_confirm sends `save NAME replace`; Delete is
+--       two presses the same way. A name is trimmed and refused when
+--       empty or containing "/" before anything is sent. MPD is the
+--       truth (P2): no playlist command changes anything on screen; every
+--       one of them raises the stored_playlist idle event, and the answer
+--       to that asks again for the list and for the open playlist's rows.
+--       Two pages open on the same playlist stay in step that way. A
+--       playlist deleted from elsewhere while open says so in place of
+--       its rows. The library's own playlist files are not offered
+--       anywhere (FACTS).
+--
+--   P28. A YOUTUBE LINK ON THE QUEUE PANE. Host only, and only when
+--       caps.youtube_path is non-null (services.nixtune.youtube in
+--       nixtune.allium). One field, one request at a time from a page:
+--       the page sends `get <url>` to the helper's websocket and shows
+--       the replies (contract YoutubeHelper) as one line under the field.
+--       The field keeps the link while the request runs and empties once
+--       anything from it is queued. The tracks reach the queue the way
+--       every change does, through MPD's playlist idle event; the page
+--       never adds them itself. Closing the page does not cancel a
+--       request: the helper finishes it and the tracks still arrive. A
+--       dropped socket frees the field, says so, and is opened again
+--       after config.reconnect_after.
+--
+--   P29. THE YOUTUBE ROW IS PINNED. Every download is tagged with album
+--       artist caps.youtube_artist ("YouTube" unless the host says
+--       otherwise). In the album artist column that one value is moved to
+--       the head of the list, before every other artist, and given the
+--       empty sort key, which sorts before everything, so the letter rail
+--       files it under # and every section after it is unchanged. The
+--       pin is applied when a column's values arrive and never written to
+--       the cache (P18), so the cache holds the library's own order and a
+--       host rebuilt with a different youtube.artist pins the right row
+--       from a warm cache. A file retagged with a real album artist
+--       leaves that row.
+--
+-- IMPLEMENTATION STATUS on the youtube branch, 2026-10-31:
+--
+--   BUILT      P2, P5, P6, P7 (with the regex probe), P8, P9, P17, P18,
+--              P19 (empty), P20, P21, P22, P23, P24, P25, P26, P27, P28,
+--              P29.
+--   PARTIAL    P3: the tag columns and the track list are drawn a slice
+--              at a time; the queue, the folder listing, an open saved
+--              playlist and the radio list are drawn whole.
+--              P4: two reads are unbounded by a window today: the queue
+--              (`playlistinfo` whole, on opening the Queue view and on
+--              every playlist idle event) and an open saved playlist
+--              (`listplaylistinfo NAME` whole). Both are a few hundred
+--              rows at this household's sizes. nixtune.allium KnownIssue
+--              page_lists_unwindowed.
+--   NOT BUILT  P10 (the track list is two-line rows in database order,
+--              with no headers and no sort), P11 (the windowed queue),
+--              P13 (play next, replace and play, add to saved playlist;
+--              rows offer add to end, and the bulk controls add or play
+--              the picks or the filter), P14 (keyboard transport), P15
+--              (the guest's Library is the host's browser without the
+--              host-only controls, not a drill-down), P16 (vetoes are
+--              still a comma-separated name list written by
+--              read-modify-write).
 
 ------------------------------------------------------------
 -- Given
@@ -337,11 +459,19 @@ value Capabilities {
     websocket_path: String
     volume_path: String?
     art_path: String?
+    youtube_path: String?        -- the helper's websocket, or null (P28)
+    youtube_artist: String?      -- the album artist to pin, or null (P29)
     max_volume: Integer
     public_url: String
     host_path: String
     party: Boolean
     vetoes: Integer
+}
+
+-- One playlist saved on the player, from `listplaylists`.
+value SavedPlaylist {
+    name: String
+    modified: String
 }
 
 value Station {
@@ -534,6 +664,11 @@ contract ReplyBounds {
         -- listplaylists                       number of saved playlists
         -- playlistlength N                    two lines
         -- listplaylistinfo N A:B              <= track_page rows
+        -- listplaylistinfo N                  SENT TODAY, whole: one saved
+        --                                     playlist, a few hundred rows
+        --                                     here (IMPLEMENTATION STATUS)
+        -- playlistinfo                        SENT TODAY, whole: the queue
+        --                                     (IMPLEMENTATION STATUS)
         -- sticker find song "" nixtune.vetoes sorted, windowed to
         --                                     sticker_window
         -- sticker find song "" nixtune.added_by
@@ -541,14 +676,49 @@ contract ReplyBounds {
         --                                     P17 and open question
         -- add, addid, findadd, delete, deleteid, move, clear, play,
         -- pause, previous, next, seekcur, random, repeat, single,
-        -- consume, crossfade, load, save, rm, rename, playlistadd,
-        -- sticker set, sticker inc, sticker delete, update, setvol
-        -- (only with no helper)                acknowledgement only
+        -- consume, crossfade, load, save [create|append|replace], rm,
+        -- rename, playlistadd, playlistmove, playlistdelete, sticker set,
+        -- sticker inc, sticker delete, update, setvol (only with no
+        -- helper)                              acknowledgement only
         --
         -- A whole-library `list` has no window in MPD 0.24. The three
         -- that are sent are bounded by the library's distinct values,
         -- fit in 32768 KB with a wide margin at this library's size, and
         -- are sent at most once per db_update because of the cache.
+}
+
+-- The YouTube helper as the page meets it (P28). nixtune.allium's
+-- YoutubeFetcher is the other side.
+contract YoutubeHelper {
+    request: (url: String) -> Stream<Reply>
+
+    @invariant OneLineEachWay
+        -- The page sends one line, "get <url>". The helper answers, for
+        -- each video in turn:
+        --   fetching <id> <i>/<n>   video i of n is being fetched
+        --   added <uri>             it is in the queue
+        --   skip <id> <reason>      it is not, and why
+        -- then "done <added>/<n>". A playlist link first says
+        -- "playlist <n>". A request that queues nothing at all ends with
+        -- "err <reason>" instead. A video link is a request of one.
+
+    @invariant FramedByLines
+        -- websocat frames by read; a message may hold several lines.
+        -- Each line is read on its own.
+
+    @invariant OneRequestPerPage
+        -- The field is busy from the send until done or err, and a
+        -- second link is not sent meanwhile. The helper serialises
+        -- requests from every page anyway.
+
+    @invariant NotACancel
+        -- Closing the socket does not stop a request in progress.
+
+    @guidance
+        -- The note under the field: "Downloading" for one, "Downloading
+        -- i of n" for a playlist, "Queued: <file>", "Skipped i of n:
+        -- <reason>", "Queued a of n from the playlist", "Not queued:
+        -- <reason>".
 }
 
 -- Native code the page carries. Empty today.
@@ -570,7 +740,13 @@ contract ForeignBudget {
 
 enum Role { host | guest }
 
-enum View { now_playing | queue | library | playlists | radio | qr }
+enum View { now_playing | queue | library | radio | qr }
+
+-- What the host's Queue view shows (P27).
+enum QueuePane { queue | saved | editing }
+
+-- An irreversible action waiting for its second press (P25, P27).
+enum Armed { clear_queue | replace_playlist | delete_playlist }
 
 enum LibraryMode { tags | folders }
 
@@ -609,6 +785,10 @@ entity Page {
     queue: QueueList with page = this
     folders: FolderList with page = this
     playlists: PlaylistView with page = this
+    youtube: YoutubeForm with page = this
+    armed: Armed?
+    armed_target: String?
+    armed_press: Integer
     drafts: Draft with page = this
 
     invariant OneLinkPerConn {
@@ -670,8 +850,9 @@ entity Request {
     kind: status | current | stats | column | track_count | track_page
           | queue_window | queue_changes | folder | stickers_added
           | stickers_vetoes | playlist_list | playlist_window
-          | playlist_length
+          | playlist_length | playlist_songs
           | regex_probe | fire
+    name: String?
     axis: Axis?
     gen: Integer?
     from: Integer?
@@ -680,7 +861,8 @@ entity Request {
 -- An input in progress (P2).
 entity Draft {
     page: Page
-    kind: volume | seek | volume_text | row_drag
+    kind: volume | seek | volume_text | row_drag | playlist_name
+          | playlist_rename | youtube_link
     value: String
 }
 
@@ -770,14 +952,40 @@ value FolderEntry {
     song: Song?
 }
 
+-- The host's saved playlists (P27). The rows of an open playlist are
+-- held whole today; a windowed source is the intended one.
 entity PlaylistView {
     page: Page
-    names: List<String>
+    pane: QueuePane
+    saved: List<SavedPlaylist>
     open: String?
+    rows: List<Song>
+    note: String?
+    source: RowSource = held
+
+    invariant OpenIffEditing {
+        (pane = editing) = (open != null)
+    }
+
+    invariant RowsBelongToTheOpenPlaylist {
+        -- A reply for a playlist that is no longer open is dropped, and
+        -- opening a playlist empties the rows first.
+        true
+    }
+}
+
+-- The YouTube field (P28).
+entity YoutubeForm {
+    page: Page
+    ready: Boolean
+    busy: Boolean
+    at: Integer
     total: Integer
-    held: HeldRun
-    gen: Integer
-    vp: Viewport
+    note: String?
+
+    invariant BusyNeedsALink {
+        busy implies ready
+    }
 }
 
 ------------------------------------------------------------
@@ -786,7 +994,10 @@ entity PlaylistView {
 
 config {
     row_height: Number = 40.0           -- tag columns, folder rows
-    track_row_height: Number = 40.0     -- the table is one line a row
+    track_row_height: Number = 58.0     -- two-line rows today; 40 once
+                                        -- P10's one-line table exists
+    rail_pitch: Number = 15.0           -- the least height a rail letter gets
+    clear_confirm: Duration = 3.seconds -- P25 and P27's second press
     queue_row_height: Number = 58.0     -- two lines: title, then line
     overscan: Integer = 8
     track_page: Integer = 200
@@ -827,6 +1038,8 @@ rule PageStarts {
         LinkOpened(conn: lib)
         if caps.volume_path != null:
             VolumeLinkOpened()
+        if caps.youtube_path != null:
+            YoutubeLinkOpened()
 
     @guidance
         -- capabilities.json failing to load is the one error with no
@@ -929,8 +1142,8 @@ rule IdleReports {
             StickersRequested()
         if "database" in subsystems or "update" in subsystems:
             Sent(cmd, Request{kind: stats})
-        if "stored_playlist" in subsystems and page.view = playlists:
-            Sent(cmd, Request{kind: playlist_list})
+        if "stored_playlist" in subsystems and page.view = queue and page.role = host:
+            PlaylistsRefreshed()
         Sent(idle, "idle " + config.idle_subsystems)
 
     @guidance
@@ -1028,6 +1241,10 @@ rule ColumnValuesArrive {
         -- stays at the top; when the list did not change nothing moves.
         -- A reply whose gen is not the column's current gen is
         -- discarded.
+        -- P29: in the album_artist column, the value equal to
+        -- caps.youtube_artist, when present, is then moved to the head
+        -- with sort_key "". CacheWritten stores the values from before
+        -- that move.
 }
 
 rule ValueChosen {
@@ -1338,6 +1555,7 @@ rule StickersRequested {
 rule HostReorders {
     when: RowDropped(from, to)
     requires: page.role = host
+    requires: page.playlists.open = null
     requires: from != to
     ensures: Sent(cmd, "move " + from + " " + to)
 
@@ -1404,31 +1622,224 @@ rule AddedToPlaylist {
             Sent(cmd, "searchaddpl " + Quote(name) + " " + Quote(TargetFilter(target)))
 }
 
--- Saved playlists ------------------------------------------------------------
+-- Saved playlists (P27) ------------------------------------------------------
 
-rule PlaylistsOpened {
-    when: Open(playlists)
+rule PlaylistsRefreshed {
+    when: PlaylistsRefreshed()
     requires: page.role = host
     ensures:
-        page.view = playlists
         Sent(cmd, Request{kind: playlist_list}, "listplaylists")
-}
-
-rule PlaylistOpened {
-    when: OpenPlaylist(name)
-    ensures:
-        page.playlists.open = name
-        page.playlists.gen = page.playlists.gen + 1
-        page.playlists.held = { from: 0, rows: [] }
-        Sent(cmd, Request{kind: playlist_window, gen: page.playlists.gen, from: 0},
-             "listplaylistinfo " + Quote(name) + " 0:" + config.track_page)
-        Sent(cmd, Request{kind: playlist_length, gen: page.playlists.gen}, "playlistlength " + Quote(name))
+        if page.playlists.open != null:
+            Sent(cmd, Request{kind: playlist_songs, name: page.playlists.open},
+                 "listplaylistinfo " + Quote(page.playlists.open))
 
     @guidance
-        -- The total comes from `playlistlength NAME`, sent beside the
-        -- first window, so the scrollbar is the real length at once.
-        -- Load, Append, Save queue as, Rename and Delete send `load`
-        -- (after `clear` for Load), `load`, `save`, `rename`, `rm`.
+        -- Sent when the Queue view opens on the host page, when the pane
+        -- changes, and on every stored_playlist idle event. The intended
+        -- form of the second command is windowed, `listplaylistinfo N A:B`
+        -- beside `playlistlength N` (ReplyBounds); today it is whole
+        -- (IMPLEMENTATION STATUS).
+}
+
+rule PaneSwitched {
+    when: SetPane(pane, name)
+    requires: page.role = host
+    ensures:
+        page.playlists.pane = pane
+        page.playlists.open = if pane = editing: name else: null
+        if pane = editing and name != previous(page.playlists.open):
+            page.playlists.rows = []
+            Draft{kind: playlist_rename, value: name}
+        page.armed = null
+        page.playlists.note = null
+        PlaylistsRefreshed()
+}
+
+rule SavedListArrives {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = playlist_list
+    ensures:
+        page.playlists.saved = OrderedByName(ParseSaved(lines))
+
+    @guidance
+        -- "playlist: NAME" lines, each followed by "Last-Modified:".
+        -- Ordered with localeCompare, as the tag columns are.
+}
+
+rule PlaylistSongsArrive {
+    when: ReplyArrived(request, lines)
+    requires: request.kind = playlist_songs
+    requires: request.name = page.playlists.open
+    ensures:
+        page.playlists.rows = ParseSongs(lines)
+
+    @guidance
+        -- An ACK (a playlist deleted elsewhere) is quiet: no banner. The
+        -- editor says the playlist is not on the player any more when
+        -- the saved list no longer names it.
+}
+
+rule QueueSaved {
+    when: SaveQueue(name_text)
+    requires: page.role = host
+    let name = Trim(name_text)
+    requires: ValidPlaylistName(name)
+    requires: page.status.playlist_length > 0
+    ensures:
+        if not page.playlists.saved.any(p => p.name = name):
+            Sent(cmd, "save " + Quote(name))
+        else if page.armed = replace_playlist and page.armed_target = name:
+            Sent(cmd, "save " + Quote(name) + " replace")
+            page.armed = null
+        else:
+            Armed(replace_playlist, name)
+
+    @guidance
+        -- ValidPlaylistName: not empty, no "/". An invalid name or an
+        -- empty queue is said in the note and nothing is sent.
+}
+
+rule PlaylistPlayed {
+    when: PlayPlaylist(name)
+    requires: page.role = host
+    ensures:
+        Sent(cmd, "clear")
+        Sent(cmd, "load " + Quote(name))
+        Sent(cmd, "play")
+        page.playlists.pane = queue
+        page.playlists.open = null
+}
+
+rule PlaylistAppended {
+    when: AddPlaylist(name)
+    requires: page.role = host
+    ensures: Sent(cmd, "load " + Quote(name))
+}
+
+rule QueueAppendedToPlaylist {
+    when: AppendQueueTo(name)
+    requires: page.role = host
+    requires: page.status.playlist_length > 0
+    ensures: Sent(cmd, "save " + Quote(name) + " append")
+}
+
+rule PlaylistDeleted {
+    when: DeletePlaylist(name)
+    requires: page.role = host
+    ensures:
+        if page.armed = delete_playlist and page.armed_target = name:
+            Sent(cmd, "rm " + Quote(name))
+            page.armed = null
+            if page.playlists.open = name:
+                page.playlists.pane = saved
+                page.playlists.open = null
+        else:
+            Armed(delete_playlist, name)
+}
+
+rule PlaylistRenamed {
+    when: RenamePlaylist(new_text)
+    requires: page.role = host
+    let old = page.playlists.open
+    let new = Trim(new_text)
+    requires: old != null and new != old
+    requires: ValidPlaylistName(new)
+    requires: not page.playlists.saved.any(p => p.name = new)
+    ensures:
+        Sent(cmd, "rename " + Quote(old) + " " + Quote(new))
+        page.playlists.open = new
+}
+
+rule PlaylistRowRemoved {
+    when: PlaylistRowRemove(pos)
+    requires: page.playlists.open != null
+    ensures: Sent(cmd, "playlistdelete " + Quote(page.playlists.open) + " " + pos)
+}
+
+rule PlaylistRowMoved {
+    when: RowDropped(from, to)
+    requires: page.playlists.open != null
+    requires: from != to
+    ensures: Sent(cmd, "playlistmove " + Quote(page.playlists.open) + " " + from + " " + to)
+
+    @guidance
+        -- The open playlist's rows carry the queue's row refs and drag
+        -- handlers; only one of the two lists is ever on the page, so a
+        -- drop goes to `playlistmove` while a playlist is open and to
+        -- `move` otherwise (rule HostReorders). The grip's arrow keys
+        -- send the same command one position at a time.
+}
+
+-- Two presses (P25, P27) -----------------------------------------------------
+
+rule Armed {
+    when: Armed(what, target)
+    ensures:
+        page.armed = what
+        page.armed_target = target
+        page.armed_press = page.armed_press + 1
+        let press = page.armed_press
+        after config.clear_confirm:
+            if page.armed_press = press: page.armed = null
+}
+
+rule QueueCleared {
+    when: ClearQueue()
+    requires: page.role = host
+    requires: page.status.playlist_length > 0
+    ensures:
+        if page.armed = clear_queue:
+            Sent(cmd, "clear")
+            page.armed = null
+        else:
+            Armed(clear_queue, null)
+}
+
+-- YouTube (P28) ---------------------------------------------------------------
+
+rule YoutubeLinkSent {
+    when: YoutubeSubmit(url_text)
+    requires: page.role = host
+    requires: caps.youtube_path != null
+    let url = Trim(url_text)
+    requires: url != "" and not page.youtube.busy
+    ensures:
+        if page.youtube.ready:
+            YoutubeHelper.request(url)
+            page.youtube.busy = true
+            page.youtube.at = 0
+            page.youtube.total = 0
+        else:
+            page.youtube.note = "The player's YouTube helper is not reachable."
+}
+
+rule YoutubeReplied {
+    when: YoutubeLine(line)
+    ensures:
+        page.youtube.note = NoteFor(line, page.youtube)
+        if KindOf(line) = playlist:
+            page.youtube.total = CountOf(line)
+        if KindOf(line) = fetching:
+            page.youtube.at = StepOf(line)
+            page.youtube.total = TotalOf(line)
+        if KindOf(line) in {done, err}:
+            page.youtube.busy = false
+        if KindOf(line) = done and AddedOf(line) > 0:
+            YoutubeFieldEmptied()
+
+    @guidance
+        -- "added" and "skip" change only the note. The queue itself is
+        -- read back through the playlist idle event (P2).
+}
+
+rule YoutubeLinkLost {
+    when: YoutubeSocketClosed()
+    ensures:
+        page.youtube.ready = false
+        if page.youtube.busy:
+            page.youtube.busy = false
+            page.youtube.note = "The connection to the helper dropped. The player carries on, so the tracks still arrive in the queue."
+        after config.reconnect_after: YoutubeLinkOpened()
 }
 
 -- Folders --------------------------------------------------------------------
@@ -1564,7 +1975,28 @@ invariant GuestOffersAppendOnly {
     for s in Pages where role = guest:
         not Offered(s, any of {"delete", "deleteid", "clear", "move",
                                "previous", "next", "pause", "setvol",
-                               "addid +0", "load", "save", "rm"})
+                               "addid +0", "load", "save", "rm",
+                               "rename", "playlistmove", "playlistdelete",
+                               "youtube"})
+}
+
+invariant IrreversibleTakesTwoPresses {
+    -- P25, P27. `clear`, `save NAME replace` and `rm NAME` are sent only
+    -- by a second press within clear_confirm of the first.
+    for c in CommandsThePageSends where c in {"clear", "save replace", "rm"}:
+        PrecededByArmedPress(c, within: config.clear_confirm)
+}
+
+invariant PlaylistChangesComeFromMpd {
+    -- P2, P27. page.playlists.saved and page.playlists.rows change only
+    -- in SavedListArrives and PlaylistSongsArrive.
+    true
+}
+
+invariant PinnedRowFiledUnderHash {
+    -- P29.
+    for v in library.columns[album_artist].values where v.display = caps.youtube_artist:
+        v.sort_key = "" and IndexOf(v) = 0
 }
 
 invariant TransportAlwaysReachable {
@@ -1619,6 +2051,7 @@ surface HostPage {
         page.library
         page.folders
         page.playlists
+        page.youtube when caps.youtube_path != null
         caps.stations
         caps.public_url
         caps.modules
@@ -1636,7 +2069,16 @@ surface HostPage {
         HeaderClicked(key)
         RowAction(action, target)
         PlaylistPicked(target, name)
-        OpenPlaylist(name)
+        SetPane(pane, name)
+        SaveQueue(name)
+        PlayPlaylist(name)
+        AddPlaylist(name)
+        AppendQueueTo(name)
+        DeletePlaylist(name)
+        RenamePlaylist(name)
+        PlaylistRowRemove(pos)
+        ClearQueue()
+        YoutubeSubmit(url) when caps.youtube_path != null
         Browse(path)
         RowDropped(from, to)
         VolumeTarget(level)
@@ -1655,7 +2097,10 @@ surface HostPage {
         -- and the page changes them.
 
     @guidance
-        -- Views: Now playing, Queue, Library, Playlists, Radio, QR.
+        -- Views: Now playing, Queue, Library, Radio, QR. Queue has the
+        -- Queue | Playlists switch (P27); the Queue pane carries, top to
+        -- bottom, the switch with Clear queue, the YouTube field (P28),
+        -- the save-as field and the queue.
         -- Library, at desktop width (above phone_breakpoint):
         --   one row: search box, Tags/Folders switch, Genre toggle,
         --            Rescan
@@ -1721,7 +2166,8 @@ deferred MpdProtocol.filters        -- see: doc/protocol.rst, "Filters", MPD 0.2
 deferred MpdProtocol.list           -- see: doc/protocol.rst, `list`, `group`
 deferred MpdProtocol.queue          -- see: `playlistinfo`, `plchanges`, `addid`, `findadd ... position`
 deferred MpdProtocol.stickers       -- see: `sticker inc`, `sticker find ... sort window`
-deferred MpdProtocol.storedPlaylists -- see: `listplaylists`, `listplaylistinfo`, `playlistadd`, `searchaddpl`
+deferred MpdProtocol.storedPlaylists -- see: `listplaylists`, `listplaylistinfo`, `save` modes, `playlistmove`, `playlistdelete`, `rename`, `rm`, `playlistadd`, `searchaddpl`
+deferred Nixtune.youtubeFetcher     -- see: nixtune.allium contract YoutubeFetcher
 deferred Mpd.tagFallback            -- see: src/tag/Fallback.hxx
 deferred Mpd.uniqueTagOrder         -- see: src/db/UniqueTags.cxx, src/util/RecursiveMap.hxx
 deferred Browser.localeCompare      -- see: Data.String.localeCompare, ECMA-402
@@ -1737,3 +2183,5 @@ open question "Whether `=~` against AlbumArtist applies MPD's fallback to Artist
 open question "Whether ten thousand album artists and the whole album list, with their sort keys, fit in localStorage beside everything else the origin stores. If a write throws, the page already carries on without the cache; whether that is acceptable or calls for IndexedDB (the one candidate in ForeignBudget) depends on how often it happens."
 open question "Year order uses Date. If this library's Date tags are mostly full release dates of reissues, OriginalDate would order a discography better and needs its own fallback in the page, since MPD has none from OriginalDate to Date."
 open question "Whether the guest's `play` from the stopped state is welcome at 2 a.m. (carried from nixtune.allium)."
+open question "How long saved playlists get in practice. The open playlist is read whole today; past a thousand or so rows the editor wants the windowed read in ReplyBounds, `listplaylistinfo N A:B` beside `playlistlength N`, and dragging within a windowed list needs the same window-edge handling as P11's queue."
+open question "Whether the YouTube field should also accept a link from the guest page. Today it is host only (P28); a guest-side field would make every guest able to make the player download, which is decision 8's trust model applied to the NAS's disk."

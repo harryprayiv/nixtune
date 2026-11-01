@@ -16,15 +16,23 @@
 -- page rule and surface earlier revisions of this file carried.
 --
 -- STATE OF THE WORLD, 2026-10-31, read from github:harryprayiv/nixtune
--- at 1ad560b. Where this file and the code disagreed, the code was taken
--- as the truth and this file was changed to match it, except where a
--- disagreement is a defect, which is then a KnownIssue below.
+-- at 1ad560b, and revised the same evening for the `youtube` branch,
+-- which the fleet input now points at (github:harryprayiv/nixtune/
+-- youtube). That branch adds, on top of 1ad560b: nix/module/youtube.nix
+-- (decision 27), m3u and extm3u back on in database.nix (decision 29),
+-- the page's playlists, YouTube field, pinned YouTube row, Clear in place
+-- of Stop and proportional list sizing (nixtune-page.allium P25 to P29),
+-- and a README rewritten to describe the flake as it is. Where this file
+-- and the code disagreed, the code was taken as the truth and this file
+-- was changed to match it, except where a disagreement is a defect,
+-- which is then a KnownIssue below.
 --
 --   Repositories:
 --     ~/git/nixtune             the public flake, PUSHED to
 --                               github:harryprayiv/nixtune.
 --                               nix/module/{default,hardware,mpd,library,
---                               database,volume,art,ui,airplay,upnp}.nix,
+--                               database,volume,art,ui,youtube,airplay,
+--                               upnp}.nix,
 --                               packages/upmpdcli.nix,
 --                               packages/nixtune-web/, LICENSE (AGPLv3),
 --                               .github/workflows/check.yml,
@@ -35,8 +43,9 @@
 --                               purescript-overlay for editing the lock;
 --                               consumers never evaluate it.
 --     ~/neoblade-config         the fleet. Input `nixtune` =
---                               github:harryprayiv/nixtune, nixpkgs
---                               following. The input is a GITHUB input,
+--                               github:harryprayiv/nixtune/youtube (the
+--                               branch, until it is merged to main),
+--                               nixpkgs following. The input is a GITHUB input,
 --                               so a change in the working tree is
 --                               invisible to the fleet until it is
 --                               pushed and `nix flake update nixtune
@@ -63,8 +72,9 @@
 --     devShells.<sys>.default, formatter.<sys> (nixfmt)
 --   for <sys> in x86_64-linux and aarch64-linux. There is no Pi SD image
 --   output, no example host, no overlay and no pi5-sd module in this
---   flake; the README says there are (KnownIssue readme_stale). The Pi's
---   boot path and image come from the fleet.
+--   flake, and the README rewritten on the youtube branch says so
+--   (KnownIssue readme_stale, closed). The Pi's boot path and image come
+--   from the fleet.
 --
 --   The library, measured 2026-10-30 and 2026-10-31: about 75.8k songs,
 --   roughly 55k MP3 and 18.5k FLAC, a quarter lossless. No cover files
@@ -89,6 +99,11 @@
 --     - /srv/music mounts from the Synology; the rescan timer runs two
 --       minutes after boot and daily.
 --     - Wifi: secrets/nixtune.yaml holds user-password and wifi-psk.
+--     - YouTube (youtube branch, 2026-10-31): nixtune-youtube.socket and
+--       nixtune-youtube-ws active; /srv/nixtune-youtube mounts
+--       192.168.8.110:/volume2/music/Music/_youtube read-write over
+--       NFSv4.1, sec=sys; a single video and a playlist fetched, written
+--       to the NAS and queued.
 --
 --   Lessons that cost a night, written down so they are not paid twice:
 --     - nixpkgs' online first-boot resize of the ext4 root corrupted
@@ -126,6 +141,22 @@
 --       fires `change`. A typed value is committed on Enter and on blur.
 --     - e2fsprogs and parted are not on winsmuth; every tool outside
 --       coreutils and util-linux is invoked through `nix shell`.
+--     - An option that is declared and never set contributes nothing,
+--       silently: the first YouTube deploy built the branch with
+--       youtube.enable unset, so no user, unit or capability existed and
+--       the page looked unchanged. `nix eval .#nixosConfigurations.
+--       nixtune.config.services.nixtune.youtube.path` says which it is
+--       before a deploy.
+--     - The Synology's NFS export with no uid mapping checks the client's
+--       uid against the folder, and its POSIX mode bits do not show its
+--       ACLs (the same as /volume2/git in the fleet, homelab.nas.gitUid).
+--       `_youtube` reported 1034:100 drwxr-xr-x. The helper's dynamic
+--       system uid (990) was refused; giving users.users.nixtune-youtube
+--       the uid 1034 was not enough on its own; editing the folder's
+--       permissions in DSM made writes work. hosts/nixtune.nix keeps
+--       uid = 1034. NixOS does not change the uid of an account that
+--       already exists ("not applying UID change"): stop the units and
+--       `userdel` the account before the deploy that changes it.
 --
 -- Design decisions that shape this spec:
 --
@@ -170,9 +201,10 @@
 --      /volume2/music/Music. The first scan runs for days in the
 --      background; the page shows a quiet indicator until updating_db
 --      clears, and everything already scanned is browsable meanwhile.
---      database.nix disables all nine playlist plugins so only audio is
---      indexed. That also stops stored playlists from being LOADED
---      (KnownIssue stored_playlists_unloadable).
+--      database.nix disabled all nine playlist plugins so only audio was
+--      indexed, which also stopped stored playlists from being LOADED.
+--      Revised by decision 29: m3u and extm3u are back on, the other
+--      seven stay off.
 --  13. THE QR IS BUILT BY NIX: qrencode renders ui.publicUrl to qr.svg
 --      in the closure. No QR library in the bundle.
 --
@@ -219,23 +251,27 @@
 --      cannot traverse), niced to 19 with idle IO and idle CPU
 --      scheduling, with no network.
 --
---  16. THE PAGE IS SEVERAL MODULES, NOT ONE. Now Types, Browse, Tags,
---      Cache, Caps, Mpd, Net, Nick, Art, Reorder, Volume, Page, Ui and
---      Main. The "none over about 300 lines" goal no longer holds: Page
---      is 782 lines, Tags 571, Main 525, Browse 468 and Types 401 at
---      1ad560b. Page is the one that will next be hard to hand over
---      whole; its views (now playing, queue, library, radio, QR) split
---      along the lines it already has.
+--  16. THE PAGE IS SEVERAL MODULES, NOT ONE. On the youtube branch:
+--      Types, Browse, Tags, Filter, Cache, Caps, Mpd, Net, Nick, Art,
+--      Reorder, Volume, Player, Library, Page, Playlists, PlaylistView,
+--      Youtube, Ui and Main, 5026 lines in all. The "none over about 300
+--      lines" goal does not hold: Main is 616 lines, Browse 595, Tags
+--      558, Types 502, Library 464 and Mpd 404. Page, which was 782 at
+--      1ad560b, split along its views into Page (357), Library and
+--      Player, and each new feature arrived as a behaviour module and a
+--      view module (Playlists and PlaylistView, Youtube).
 --
 --  17. ONE ATTRIBUTION QUERY, NOT ONE PER ENTRY. `sticker find song ""
 --      nixtune.added_by` returns every attribution in one command, and
 --      the page subscribes to MPD's `sticker` idle subsystem. Its growth
 --      over time is an open question in nixtune-page.allium.
 --
---  18. ONE TRANSPORT BAR. BUILT. Previous, play/pause, next, mute, the
---      level slider on every host view; the typed level field and the
+--  18. ONE TRANSPORT BAR. BUILT. The position row (elapsed, seek bar,
+--      duration) directly above previous, play/pause, next, mute and the
+--      level slider, on every host view; the typed level field and the
 --      steppers at 30rem and up. The playback mode buttons (random,
---      repeat, single, consume, stop) stay on Now playing.
+--      repeat, single, consume) stay on Now playing. Stop is gone; Clear
+--      queue, in two presses, takes its place (nixtune-page.allium P25).
 --
 --  19. BROWSE BY TAG, NOT ONLY BY FOLDER. BUILT, and since revised:
 --      artist-first with genre as a toggle column, multi-select per
@@ -315,6 +351,70 @@
 --      consumers, no mkSpagoDerivation. spago is only the tool that
 --      edits the lock, from the devShell. No foreign JavaScript modules
 --      exist in the page.
+--
+-- Decisions taken 2026-10-31 evening, on the youtube branch:
+--
+--  27. A YOUTUBE LINK BECOMES A TRACK IN THE LIBRARY. youtube.enable
+--      (off by default) adds youtube.nix: a systemd socket on
+--      127.0.0.1:8603 with Accept=yes, a templated unit running a
+--      writeShellApplication helper with stdin and stdout on the
+--      connection, websocat bridging 127.0.0.1:8604 to it, and nginx
+--      serving /youtube. The same shape as the volume helper (decision
+--      14), and the same reach: anyone who can open the page. The page
+--      offers it on the host page only.
+--      The helper never passes the browser's URL on. It accepts a
+--      youtube.com watch, shorts or live link, a youtu.be link, or a
+--      youtube.com playlist link (www, m and music hosts), takes the
+--      eleven-character video id or the playlist id out of it, and
+--      builds the URL yt-dlp gets from the id alone. A watch link that
+--      also carries list= is the one video. A playlist is listed with
+--      --flat-playlist, cut at youtube.maxPlaylistItems, and each id of
+--      the video id's shape goes through the single-video path in order.
+--      yt-dlp runs with --ignore-config, --no-playlist, bestaudio
+--      extracted without re-encoding, a match filter on duration
+--      (youtube.maxMinutes) and !is_live, --max-filesize
+--      (youtube.maxSize), embedded metadata and thumbnail, under flock
+--      (one download at a time across every connection) and a fifteen
+--      minute timeout. It works in the unit's CacheDirectory and copies
+--      the result to the NAS as <name>.part, then renames it, so MPD
+--      never indexes a half-written file. The name is
+--      "<uploader> - <title> [<id>].<ext>"; a link whose id is already
+--      in the folder is queued from the file that is there.
+--      Only youtube.directory (default _youtube) at the top of the
+--      library export is mounted read-write, at /srv/nixtune-youtube;
+--      the library stays read-only at /srv/music. The helper then asks
+--      MPD to rescan that folder and adds the file, retrying for a
+--      minute and a half because the two NFS mounts cache attributes
+--      separately. The unit runs as the fixed user nixtune-youtube so
+--      the NAS sees one uid; the NAS's permissions on the folder are a
+--      prerequisite Nix cannot set (the lesson above).
+--      yt-dlp from a pin a few months old stops working as YouTube
+--      changes; youtube.package is the escape hatch, and a flake update
+--      the ordinary fix.
+--
+--  28. DOWNLOADS ARE LIBRARY, NOT CACHE. A fetched file stays in the
+--      folder, is indexed like any other, and is found by search. Its
+--      album artist is youtube.artist (default "YouTube"), set with
+--      yt-dlp's --parse-metadata into meta_album_artist, and its album
+--      is YouTube's album when there is one and the uploader otherwise.
+--      capabilities.json carries youtubeArtist, and the page pins that
+--      row to the top of the artist column (nixtune-page.allium P29).
+--      Retagging a file with a real album artist moves it into the rest
+--      of the library; renaming it without its [<id>] makes the same
+--      link fetch it again. Files fetched before this decision carry no
+--      such album artist and sit under their uploader until refetched.
+--
+--  29. STORED PLAYLISTS ARE BACK. MPD's `load` and `listplaylistinfo`
+--      go through the playlist plugin registry, while `save`,
+--      `playlistmove`, `playlistdelete`, `rename`, `rm` and
+--      `listplaylists` work on the file directly (checked in MPD 0.24.5,
+--      src/playlist/Print.cxx and src/command/PlaylistCommands.cxx). So
+--      database.nix turns m3u and extm3u on and keeps pls, xspf, asx,
+--      rss, flac, cue and embcue off. The library's own .m3u files are
+--      indexed as a consequence and the page leaves them out of the
+--      folder listing. A .cue rip is still one long track. The page's
+--      playlists are nixtune-page.allium P27; Home Assistant can load
+--      stored playlists too.
 --
 -- Earlier decisions still in force: AirPlay on, UPnP off until upmpdcli
 -- builds, SD card on oracle's boot path, hardware profile from the
@@ -409,6 +509,8 @@ value Capabilities {
     websocketPath: String
     volumePath: String?
     artPath: String?
+    youtubePath: String?
+    youtubeArtist: String?
     maxVolume: Integer
     party: Boolean
     vetoes: Integer
@@ -472,12 +574,23 @@ contract PlayerModule {
         --   ui.albumArtSize             600, between 64 and 4096
         --   party.enable                false
         --   party.vetoes                3, positive
+        --   youtube.enable              false
+        --   youtube.directory           "_youtube"; one path component,
+        --                               [A-Za-z0-9_][A-Za-z0-9_.-]*
+        --   youtube.package             pkgs.yt-dlp
+        --   youtube.artist              "YouTube"; letters, digits,
+        --                               space, dot, underscore, hyphen
+        --   youtube.maxMinutes          20, between 1 and 600
+        --   youtube.maxSize             "300M", [0-9]+[KMG]
+        --   youtube.maxPlaylistItems    50, between 1 and 500
         --   arbitration.resumeAfterRenderer   true
         --   renderers.airplay.{enable,name}
         --   renderers.upnp.{enable,friendlyName,package}
         --   persistPaths (merged), output.* (internal)
         --   volume.path (internal, read-only, set by volume.nix)
         --   art.path (internal, read-only, set by art.nix)
+        --   youtube.path, youtube.pinnedArtist (internal, read-only, set
+        --   by youtube.nix; null unless the helper is on)
         -- Declared by earlier revisions of this file and NOT built:
         --   mpd.crossfade, mpd.mixRampDb, mpd.replayGain,
         --   ui.browseDefault, dsp.*. mpd.conf has replaygain = "off"
@@ -506,10 +619,12 @@ contract MpdService {
         -- restore_paused true: after a reboot the queue and position come
         -- back paused rather than playing into the room.
 
-    @invariant AudioOnlyDatabase
-        -- All nine playlist plugins (extm3u, m3u, pls, xspf, asx, rss,
-        -- flac, cue, embcue) disabled. A one-file rip with a .cue is one
-        -- long track. Stored playlists cannot be loaded.
+    @invariant PlaylistPluginsForStoredPlaylistsOnly
+        -- extm3u and m3u on, because `load` and `listplaylistinfo` need
+        -- them for MPD's own stored playlists (decision 29). pls, xspf,
+        -- asx, rss, flac, cue and embcue off. A one-file rip with a .cue
+        -- is one long track. The library's .m3u files are indexed and
+        -- the page does not offer them.
 
     @invariant MixerLevelPersists
         -- hardware.alsa.enablePersistence defaults on with an ALSA card,
@@ -532,9 +647,9 @@ contract MpdBridge {
         -- Only the MPD protocol passes; capabilities.json is static.
 
     @invariant LanOnly
-        -- nginx on 0.0.0.0:<ui.port>; websocat on 127.0.0.1:8600 and the
-        -- volume bridge on 127.0.0.1:8602; MPD on loopback unless
-        -- mpd.exposeOnLan.
+        -- nginx on 0.0.0.0:<ui.port>; websocat on 127.0.0.1:8600, the
+        -- volume bridge on 127.0.0.1:8602 and the YouTube bridge on
+        -- 127.0.0.1:8604; MPD on loopback unless mpd.exposeOnLan.
 
     @invariant NoRoleEnforcement
         -- The bridge does not know which page a socket came from.
@@ -578,6 +693,50 @@ contract VolumeWriter {
         -- index from /proc/asound/cards because alsa-lib reports a
         -- missing control device as an invalid card number. The glide
         -- between levels is the page's (nixtune-page.allium).
+}
+
+-- The YouTube helper (decision 27). The page's side of the line
+-- protocol is nixtune-page.allium's YoutubeHelper.
+contract YoutubeFetcher {
+    fetch: (url: String) -> Stream<Reply>
+
+    @invariant OnlyIdsReachYtDlp
+        -- The URL yt-dlp gets is built from a video or playlist id taken
+        -- out of an accepted youtube.com or youtu.be link. Anything else
+        -- is answered "err not a YouTube video or playlist link" and
+        -- nothing runs. No part of the line reaches a shell word.
+
+    @invariant Bounded
+        -- One video at a time across every connection (flock); per
+        -- video a duration limit that also refuses live streams, a size
+        -- limit and a fifteen minute timeout; per playlist
+        -- youtube.maxPlaylistItems entries, listed with a two minute
+        -- timeout.
+
+    @invariant NeverAHalfFile
+        -- The file reaches the NAS under a .part name and is renamed
+        -- into place, and MPD is asked to index it only after that.
+
+    @invariant WritesOneFolder
+        -- ReadWritePaths is /srv/nixtune-youtube alone, mounted from
+        -- <library.export>/<youtube.directory>; the library mount stays
+        -- read-only. ProtectSystem strict, ProtectHome, PrivateTmp,
+        -- NoNewPrivileges.
+
+    @invariant ReusesWhatIsThere
+        -- A video whose [<id>] is already in the folder is queued from
+        -- that file without a download.
+
+    @invariant FinishesWhatItStarted
+        -- A connection that closes mid-request does not stop the
+        -- request; the tracks still reach the queue.
+
+    @guidance
+        -- Replies, one line each: "playlist <n>", "fetching <id> <i>/<n>",
+        -- "added <uri>", "skip <id> <reason>", "done <added>/<n>",
+        -- "err <reason>". The unit's environment points HOME,
+        -- XDG_CACHE_HOME and DENO_DIR into /var/cache/nixtune-youtube,
+        -- which also holds the lock and the working directory.
 }
 
 contract ArtCache {
@@ -664,6 +823,9 @@ entity HostDeclaration {
     album_art_enabled: Boolean
     party_enabled: Boolean
     party_vetoes: Integer
+    youtube_enabled: Boolean
+    youtube_directory: String
+    youtube_artist: String
     fleet: FleetConfig?
 
     modules: ModuleDeclaration with host = this
@@ -682,6 +844,7 @@ entity HostDeclaration {
     wifi_configured: ssid != null and psk_file != null
     needs_volume_helper: hardware.output_kind = alsa
     art_served: album_art_enabled and library_export != null
+    youtube_served: youtube_enabled and library_export != null
 
     invariant CoreIsMandatory {
         has_core
@@ -694,6 +857,12 @@ entity HostDeclaration {
     invariant AirplayNeedsCard {
         -- An assertion in airplay.nix; the build fails otherwise.
         enabled_renderers.any(r => r.kind = airplay) implies hardware.output_kind = alsa
+    }
+
+    invariant YoutubeNeedsALibrary {
+        -- An assertion in youtube.nix: the download folder is a folder
+        -- inside the library export.
+        youtube_enabled implies library_export != null
     }
 
     invariant HostPathIsNotRoot {
@@ -713,7 +882,9 @@ entity HostDeclaration {
         -- 192.168.8.110:/volume2/music/Music, AirPlay on as "nixtune",
         -- UPnP off, stations GBH 89.7 and CRB Classical 99.5,
         -- public_url http://nixtune.lan/, host_path /host,
-        -- mpd.consume = true.
+        -- mpd.consume = true, youtube.enable = true with the defaults,
+        -- users.users.nixtune-youtube.uid = 1034 (the DSM user owning
+        -- Music/_youtube).
 }
 
 entity ModuleDeclaration {
@@ -867,6 +1038,12 @@ config {
     websocket_port: Integer = 8600
     volume_socket_port: Integer = 8601
     volume_bridge_port: Integer = 8602
+    youtube_socket_port: Integer = 8603
+    youtube_bridge_port: Integer = 8604
+    youtube_video_timeout: Duration = 15.minutes
+    youtube_list_timeout: Duration = 2.minutes
+    youtube_index_retries: Integer = 18
+    youtube_index_retry_every: Duration = 5.seconds
     upnp_port: Integer = 49152
     max_volume: Integer = 100
     max_output_buffer_kb: Integer = 32768
@@ -881,7 +1058,7 @@ config {
     mpd_defaults_retries: Integer = 5
     default_vetoes: Integer = 3
     resume_mpd_after_renderer: Boolean = true
-    current_step: ReleaseStep = one_bar_and_tags
+    current_step: ReleaseStep = party_basics
 }
 
 ------------------------------------------------------------
@@ -1001,17 +1178,33 @@ default KnownIssue ci_broken = {
 default KnownIssue readme_stale = {
     repo: nixtune,
     name: "the README describes a flake that no longer exists",
-    status: open,
+    status: closed,
     effect: "it names nixosModules.pi5-sd, overlays.default, pkgs.nixtune.web, nixosConfigurations.example, packages.aarch64-linux.image, nix/hosts/example.nix, nix/modules/hardware.nix, web/ and mkSpagoDerivation; none exist. An adopter following it cannot build anything",
-    closes_when: "the README describes the outputs listed at the top of this file, the page build of decision 26, and how a consumer supplies the Pi boot path"
+    closes_when: "closed on the youtube branch, 2026-10-31: the README describes the outputs listed at the top of this file, every option, the page build of decision 26, the YouTube setup, the known issues, and that a consumer supplies the Pi boot path"
 }
 
 default KnownIssue stored_playlists_unloadable = {
     repo: nixtune,
     name: "stored playlists can be saved and not loaded",
+    status: closed,
+    effect: "was: database.nix disabled every playlist plugin, and `load` and `listplaylistinfo` go through the same plugin registry, so `save` worked and `load` failed",
+    closes_when: "closed on the youtube branch, 2026-10-31: m3u and extm3u re-enabled in database.nix (decision 29), and the page leaves the library's own playlist entries out of the folder listing"
+}
+
+default KnownIssue page_lists_unwindowed = {
+    repo: nixtune,
+    name: "the page reads the queue and an open saved playlist whole",
     status: open,
-    effect: "database.nix disables every playlist plugin, and `load` goes through the same plugin registry, so `save` works and `load` fails. nixtune-page.allium P12 (the Playlists view) depends on load",
-    closes_when: "m3u and extm3u are re-enabled in database.nix and the page filters playlist entries the library itself contains out of the folder listing (lsinfo reports them as playlist: lines)"
+    effect: "`playlistinfo` with no range on opening the Queue view and on every playlist idle event, and `listplaylistinfo NAME` with no range for an open saved playlist, against nixtune-page.allium P4 and P11. A few hundred rows at this household's sizes, so neither is near the output buffer, but each playlist change rereads the whole queue",
+    closes_when: "the queue is read in windows with plchanges (nixtune-page.allium P11) and an open playlist with `listplaylistinfo NAME A:B` beside `playlistlength NAME`"
+}
+
+default KnownIssue youtube_folder_permissions = {
+    repo: nixtune,
+    name: "the YouTube folder's write permission lives on the NAS",
+    status: open,
+    effect: "the helper can write only if the NAS lets the nixtune-youtube uid write to youtube.directory, which Nix cannot declare. On the fleet's Synology it took a DSM permission edit on Music/_youtube beside uid = 1034; a fresh NAS or a recreated folder needs the same by hand. The failure is `cp: cannot create regular file ... Permission denied` in the journal and `Not queued: could not write to the NAS folder` on the page",
+    closes_when: "the permission requirement is a documented first-deploy step in hosts/nixtune.nix's header beside the NFS notes, or the export is given a uid mapping chosen on purpose"
 }
 
 default KnownIssue stale_gitignore = {
@@ -1171,6 +1364,46 @@ rule ArtScanRuns {
         -- directory with neither a picture nor audio gets nothing and
         -- costs a walk. The run ends with one journal line: covers
         -- written, already current, albums with no picture.
+}
+
+-- YouTube -------------------------------------------------------------------
+
+rule YoutubeLinkFetched {
+    when: YoutubeLine(line)
+    requires: host.youtube_served
+    ensures:
+        if not AcceptedLink(line):
+            Replied("err not a YouTube video or playlist link")
+        else:
+            for id in IdsOf(line) taking youtube.maxPlaylistItems:
+                Replied("fetching " + id + " " + Step(id))
+                if FileWithIdIn(host.youtube_directory, id) = null:
+                    Downloaded(id)
+                if Downloaded(id) or FileWithIdIn(host.youtube_directory, id) != null:
+                    MpdRescanned(host.youtube_directory)
+                    MpdProtocol.apply(player, "add " + UriOf(id))
+                    Replied("added " + UriOf(id))
+                else:
+                    Replied("skip " + id + " " + Reason(id))
+            Replied("done " + Added() + "/" + Count())
+
+    @guidance
+        -- AcceptedLink, the id extraction and every limit are contract
+        -- YoutubeFetcher. A playlist that cannot be listed answers
+        -- "err <reason>" in place of the per-video lines.
+}
+
+rule DownloadTagged {
+    when: Downloaded(id)
+    ensures:
+        AlbumArtistOf(id) = host.youtube_artist
+        AlbumOf(id) = YoutubeAlbum(id) or UploaderOf(id)
+
+    @guidance
+        -- Decision 28. --parse-metadata "%(nixtune_unset|<artist>)s:
+        -- %(meta_album_artist)s" and "%(album,uploader)s:%(meta_album)s";
+        -- checked with yt-dlp 2026.10.26, which writes ALBUMARTIST and
+        -- ALBUM into an Opus file's Vorbis comment.
 }
 
 -- Volume ------------------------------------------------------------------
@@ -1337,6 +1570,16 @@ invariant PageNeverSetvolsAHelperHost {
         not PageSends(h, "setvol")
 }
 
+invariant YoutubeWritesOnlyItsFolder {
+    for w in YoutubeHelperWrites:
+        Under(w, "/srv/nixtune-youtube") or Under(w, "/var/cache/nixtune-youtube")
+}
+
+invariant LibraryMountStaysReadOnly {
+    for h in HostDeclarations where library_export != null:
+        MountedReadOnly(h.library_export, "/srv/music")
+}
+
 invariant ArtNeverServesAudio {
     for r in ArtRequests:
         Served(r) implies Extension(r) in {"jpg", "jpeg"} and Under(r, "/var/lib/nixtune/art")
@@ -1412,10 +1655,10 @@ surface Automation {
         -- of client.
 
     @guidance
-        -- Transport, queue and playlist control work. Volume does not:
-        -- see KnownIssue mpd_setvol_mutes_dac2hd and rule
-        -- ProtocolClientSetsVolume. Loading a stored playlist does not
-        -- either (KnownIssue stored_playlists_unloadable).
+        -- Transport, queue and playlist control work, loading stored
+        -- playlists included since decision 29. Volume does not: see
+        -- KnownIssue mpd_setvol_mutes_dac2hd and rule
+        -- ProtocolClientSetsVolume.
 }
 
 surface FleetDeployment {
@@ -1466,8 +1709,8 @@ surface CommunityFlake {
         -- and supply a boot path; this flake does not provide one.
 
     @guidance
-        -- AGPLv3, LICENSE present. No moOde code or name. Not adoptable
-        -- from the README until KnownIssue readme_stale closes.
+        -- AGPLv3, LICENSE present. No moOde code or name. The README on
+        -- the youtube branch is the adopter's guide.
 }
 
 ------------------------------------------------------------
@@ -1476,12 +1719,16 @@ surface CommunityFlake {
 
 -- pi_plays               DONE 2026-10-30.
 -- room_page              DONE 2026-10-30.
--- one_bar_and_tags       BUILT; being revised by nixtune-page.allium.
--- party_basics           NEXT on the system side: mpd.crossfade (and
+-- one_bar_and_tags       BUILT; revised by nixtune-page.allium, whose
+--                        IMPLEMENTATION STATUS says what of it is built.
+-- party_basics           IN PROGRESS. Done on the youtube branch: m3u
+--                        and extm3u back on and saved playlists on the
+--                        page (decision 29), YouTube links (decisions 27
+--                        and 28). Still to do: mpd.crossfade (and
 --                        mixRampDb), mpd.replayGain replacing the
 --                        hard-coded "off", applied at start the way
---                        mpd.consume is; m3u/extm3u back on for stored
---                        playlists; the AirPlay mixer decision.
+--                        mpd.consume is; the AirPlay mixer decision;
+--                        merging the youtube branch to main.
 -- public_release         ci_broken and readme_stale closed, an example
 --                        host and a Pi image output in the flake.
 -- arbiter_and_renderers  upmpdcli built; Spotify Connect, Squeezelite,
@@ -1534,6 +1781,7 @@ deferred Firmware.configtxt         -- see: nixos-hardware raspberry-pi/README.m
 deferred Renderer.airplay           -- see: shairport-sync documentation, sessioncontrol
 deferred Renderer.upnp_renderer     -- see: upmpdcli documentation
 deferred Websocket.bridge           -- see: websocat documentation
+deferred Fetcher.ytdlp              -- see: yt-dlp README, output templates, --parse-metadata, --match-filter
 deferred AlsaMixer.mapped           -- see: amixer -M and ALSA's normalized volume mapping
 deferred Automation.homeassistant   -- see: Home Assistant's MPD integration
 deferred Fleet.rows                 -- see: neoblade-config.allium
@@ -1549,3 +1797,5 @@ open question "Whether DSP should be a declared option with a rebuild to change 
 open question "Whether the DJ console is built beside nixtune sharing its library and hardware layer, or whether nixtune's page grows a second mode and the no-backend decision is dropped. The spec assumes the first; nothing has been built either way."
 open question "Whether the Pi image and boot path should move into this flake (an example host and an image output) for public_release, or stay in the fleet with the README telling adopters to bring their own."
 open question "Why nixpkgs' online expandOnBoot resize corrupted directory blocks on this card and kernel, and whether it reproduces on a second card."
+open question "Whether the uid = 1034 line in hosts/nixtune.nix is still needed now that the folder's DSM permissions were edited, or whether the edit alone (for example a permission granted to everyone) is what made writes work. One test with the line removed settles it, and the answer decides what KnownIssue youtube_folder_permissions tells a second adopter to do."
+open question "Whether downloads should ever leave youtube.directory on their own, for example a tool that moves a retagged file into the library proper. Today a file stays where it landed, which keeps the helper writing one folder and nothing else."
