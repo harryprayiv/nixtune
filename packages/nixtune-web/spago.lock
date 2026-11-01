@@ -14,6 +14,7 @@
             "bifunctors",
             "effect",
             "either",
+            "exceptions",
             "foldable-traversable",
             "foreign",
             "halogen",
@@ -30,7 +31,8 @@
             "web-events",
             "web-html",
             "web-socket",
-            "web-storage"
+            "web-storage",
+            "web-uievents"
           ]
         },
         "test": {
