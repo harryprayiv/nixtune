@@ -16,6 +16,7 @@ import Nixtune.Room.Config
 import Nixtune.Room.Keys
 import Nixtune.Room.Name (RoomName, roomNameText)
 import Nixtune.Room.Provision (provisionPlayer)
+import Nixtune.Sendspin.Audio (StreamFormat (..))
 import Nixtune.Sendspin.PskId (base64Url, pskBytes, pskId)
 import System.FilePath ((</>))
 import TempDir (withTempDir)
@@ -55,6 +56,7 @@ kitchenConfig hk dir = do
       , listen = Listen "127.0.0.1" 0 (dir </> "control.sock")
       , mpd = MpdConfig "127.0.0.1" 6600 "dac" "multiroom"
       , secrets = Secrets serverKey playerKey Map.empty playerPsks
+      , sendspin = SendspinConfig 8928 "/sendspin" (dir </> "fifo") (StreamFormat 44100 24 2)
       }
 
 serverIdsIn :: Value -> [Text]

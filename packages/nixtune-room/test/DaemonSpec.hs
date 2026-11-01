@@ -25,6 +25,7 @@ import Nixtune.Room.Peer qualified as Peer
 import Nixtune.Room.Protocol
 import Nixtune.Room.Server (SendspinServer (..))
 import Nixtune.Room.Wire (WireStatus (..))
+import Nixtune.Sendspin.Audio (StreamFormat (..))
 import System.FilePath ((</>))
 import System.Timeout (timeout)
 import TempDir (withTempDir)
@@ -71,6 +72,7 @@ configFor h r m =
     , listen = Listen "127.0.0.1" (Map.findWithDefault 0 r (ports h)) (dirOf h </> ("control-" <> show (Map.findWithDefault 0 r (ports h)) <> ".sock"))
     , mpd = MpdConfig "127.0.0.1" (fakePort m) "dac" "multiroom"
     , secrets = Secrets "" "" Map.empty Map.empty
+    , sendspin = SendspinConfig 8928 "/sendspin" (dirOf h </> "fifo") (StreamFormat 44100 24 2)
     }
 
 quiet :: Text -> IO ()

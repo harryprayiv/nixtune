@@ -20,7 +20,7 @@ import Nixtune.Room.Daemon qualified as Daemon
 import Nixtune.Room.Keys (generateHome, publicKeysNix, roomSecretsYaml)
 import Nixtune.Room.Name (mkRoomName, roomNameText)
 import Nixtune.Room.Provision (provisionPlayer)
-import Nixtune.Room.Server (unbuiltServer)
+import Nixtune.Sendspin.Server qualified as Server
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesPathExist)
 import System.Exit (exitFailure)
@@ -53,7 +53,7 @@ main = do
     Run path -> do
       cfg <- either die' pure =<< loadConfig path
       let say = TextIO.hPutStrLn stderr
-      d <- Daemon.start say cfg (\_ -> pure (unbuiltServer say))
+      d <- Daemon.start say cfg (Server.start say cfg)
       Daemon.run d
     Ctl path ws -> ctl path (Text.unwords ws)
     Keys rooms out -> keys rooms out

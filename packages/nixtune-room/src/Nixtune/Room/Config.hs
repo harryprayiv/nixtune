@@ -8,6 +8,7 @@ module Nixtune.Room.Config
   , Listen (..)
   , MpdConfig (..)
   , Secrets (..)
+  , SendspinConfig (..)
   , loadConfig
   , decodeConfig
   , coordinatorConfig
@@ -28,6 +29,7 @@ import Data.Text qualified as Text
 import Nixtune.Room.Clock (Millis (..), milliseconds)
 import Nixtune.Room.Coordinator (Config (..))
 import Nixtune.Room.Name (RoomName, mkRoomName)
+import Nixtune.Sendspin.Audio (StreamFormat, parseStreamFormat)
 
 data PeerConfig = PeerConfig
   { peerHost :: Text
@@ -79,6 +81,16 @@ data Secrets = Secrets
   }
   deriving stock (Eq, Show)
 
+-- | The room's Sendspin server: where it finds players and MPD's
+-- multiroom fifo, and the format MPD writes there.
+data SendspinConfig = SendspinConfig
+  { playerPort :: Int
+  , playerPath :: Text
+  , fifoPath :: FilePath
+  , streamFormat :: StreamFormat
+  }
+  deriving stock (Eq, Show)
+
 data RoomConfig = RoomConfig
   { room :: RoomName
   , peerConfigs :: Map RoomName PeerConfig
@@ -87,6 +99,7 @@ data RoomConfig = RoomConfig
   , listen :: Listen
   , mpd :: MpdConfig
   , secrets :: Secrets
+  , sendspin :: SendspinConfig
   }
   deriving stock (Eq, Show)
 
@@ -143,9 +156,15 @@ instance FromJSON Secrets where
       <*> (roomMap parseJSON =<< o .: "serverPsks")
       <*> (roomMap parseJSON =<< o .: "playerPsks")
 
+instance FromJSON SendspinConfig where
+  parseJSON = withObject "sendspin" $ \o -> do
+    strict ["playerPort", "playerPath", "fifo", "format"] o
+    fmt <- either fail pure . parseStreamFormat =<< o .: "format"
+    SendspinConfig <$> o .: "playerPort" <*> o .: "playerPath" <*> o .: "fifo" <*> pure fmt
+
 instance FromJSON RoomConfig where
   parseJSON = withObject "room.json" $ \o -> do
-    strict ["room", "peers", "acoustics", "timing", "listen", "mpd", "secrets"] o
+    strict ["room", "peers", "acoustics", "timing", "listen", "mpd", "secrets", "sendspin"] o
     r <- roomKey =<< o .: "room"
     ps <- roomMap parseJSON =<< o .: "peers"
     ac <- roomMap (roomMap (fmap Millis . parseJSON)) =<< o .: "acoustics"
@@ -155,6 +174,7 @@ instance FromJSON RoomConfig where
         <*> o .: "listen"
         <*> o .: "mpd"
         <*> o .: "secrets"
+        <*> o .: "sendspin"
     if Map.member r ps then pure cfg else fail "peers must include this room"
 
 decodeConfig :: Lazy.ByteString -> Either String RoomConfig

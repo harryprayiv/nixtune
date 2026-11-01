@@ -57,9 +57,12 @@
 -- Stage 2, the same day: the shell (room.json, the line protocol on a
 -- websocket and the control socket, the MPD client, peer calls, the
 -- clock), `nixtune-room keys` and `nixtune-room provision-player`.
--- Stage 3 is the Sendspin server; the NixOS module, haskell.nix and
--- MultiroomRehearsal follow it, because the rehearsal needs a server
--- that can hold a player.
+-- Stage 3, the same day: the Sendspin server (M19): Noise KKpsk2 on
+-- crypton, the core messages, the time responder, player@v1 with PCM,
+-- send-ahead across a group, set_output_delay, stream start, clear and
+-- end, and the fifo reader. Stage 4 is the NixOS module, haskell.nix
+-- and MultiroomRehearsal; stage 5 is what M19 defers (FLAC,
+-- metadata@v1, client-initiated connections, JumpClears).
 -- The open questions at the end are the next round. One room exists:
 -- the kitchen (the Pi, host nixtune).
 --
@@ -236,8 +239,10 @@
 --       file needs), external-source handling, mandatory encryption, and
 --       the metadata and visualizer roles the party direction will want.
 --       The cost, accepted: the spec is a preview and nixtune tracks it;
---       the server is ours to write. cacophony, the Haskell Noise
---       library, has KKpsk2, Curve25519, ChaChaPoly and AES-GCM.
+--       the server is ours to write. Noise is implemented in
+--       nixtune-room on crypton's X25519, ChaChaPoly1305, AES-GCM and
+--       HMAC-SHA256 (M19), checked against vectors from the Python
+--       noiseprotocol library that aiosendspin uses.
 --   M2. No group is stored. Each room writes only its own intent; each
 --       server knows only the players it holds. A group is derived by
 --       asking every room for its status. Nothing is elected or
@@ -385,9 +390,10 @@
 --       for each role it claims:
 --         nixtune-room's server (needed first, there is no other non-
 --           Python server): core messages, Noise KKpsk2 with
---           provisioned PSKs, the time responder, FLAC encoding,
---           send-ahead across a group, stream start, clear and end,
---           set_output_delay, player@v1 and metadata@v1;
+--           provisioned PSKs, the time responder, PCM (FLAC in
+--           stage 5), send-ahead across a group, stream start, clear
+--           and end, set_output_delay, player@v1 (metadata@v1 in
+--           stage 5);
 --         only if sendspin-cli causes a problem nixtune cannot fix
 --           around it, a native player behind SendspinPlayer: the Noise
 --           responder, the spec's time filter (an exact algorithm, about
@@ -409,6 +415,20 @@
 --       against MultiroomRehearsal (three VMs with sendspin-cli
 --       players), which needs no second Pi; then the kitchen plus one
 --       wired room; then calibration on the real rooms.
+--   M19. Stage 3's server streams PCM, not FLAC. PCM at 44.1 kHz, 24
+--       bits, stereo is 2.1 Mbit/s, which the wired rooms and the
+--       kitchen's Wi-Fi carry, and it needs no C library in the static
+--       build. sendspin-cli lists PCM at every rate and depth its device
+--       takes, so the player runs with --audio-format pcm:<streamFormat>.
+--       A player that lists PCM only at 16 bits gets the top 16 bits of
+--       each sample. FLAC through libFLAC follows in stage 5, when the
+--       static build is proven. Noise is written against crypton rather
+--       than taken from cacophony, which depends on the deprecated
+--       cryptonite; it is about 200 lines and the spec pins every
+--       detail. Also deferred to stage 5: metadata@v1, the listener on
+--       8927 for client-initiated connections (no nixtune player uses
+--       one), and JumpClears (a seek in a group plays out the send-ahead
+--       before the new position).
 --
 -- ============================================================================
 -- MODULE OPTIONS (planned; services.nixtune.multiroom.*)
@@ -440,9 +460,7 @@
 --   streamFormat    "44100:24:2". MPD resamples to it in group mode only.
 --                   44.1 kHz because most of the library is 44.1 kHz and
 --                   is then not resampled; 24 bits so 16-bit files pass
---                   through unchanged. FLAC at 44.1 or 48 kHz and 16 or 24
---                   bits is what every Sendspin server and player must
---                   support.
+--                   through unchanged. Streamed as PCM (M19).
 --   library.writer  the room that scans and publishes the database.
 --   library.published  path on the NAS mount for the published database.
 --   playlists.path  path on the NAS mount for the shared playlist
@@ -598,12 +616,13 @@ contract SendspinServer {
     set_delay: (player: Peer, delay: Duration) -> Result
 
     @invariant ConformsToSpec
-        -- Core messages version 1; roles player@v1 and metadata@v1.
-        -- controller@v1, artwork@v1 and visualizer@v1 are deferred.
-        -- Both cipher suites. server/time answered per spec, stamped as
-        -- late as the implementation allows, from CLOCK_MONOTONIC in
-        -- microseconds. The server records the spec commit it
-        -- implements in its server/hello.
+        -- Core messages version 1; role player@v1. metadata@v1 is
+        -- stage 5; controller@v1, artwork@v1 and visualizer@v1 are
+        -- deferred. Both cipher suites. server/time answered per spec,
+        -- stamped immediately before encryption, from CLOCK_MONOTONIC in
+        -- microseconds. The server logs the spec commit it implements
+        -- at start; server/hello carries only the fields the spec
+        -- defines, because senders must not add others.
 
     @invariant OneSource
         -- The only audio is this room's MPD, read from its fifo output
@@ -613,9 +632,9 @@ contract SendspinServer {
 
     @invariant ServerInitiatedOnly
         -- The server connects out to declared players' hosts on port
-        -- 8928, path /sendspin, and never browses mDNS. It also listens
-        -- on 8927 for client-initiated connections, as servers must
-        -- support, without advertising _sendspin-server._tcp.
+        -- 8928, path /sendspin, and never browses mDNS. The listener on
+        -- 8927 for client-initiated connections, which servers must
+        -- support, is stage 5 (M19): no nixtune player initiates.
 
     @invariant PairedOnly
         -- Every handshake uses a provisioned long-term PSK. A client_id
@@ -631,16 +650,29 @@ contract SendspinServer {
     @invariant OnlyDelayCommands
         -- M6. server/command is only ever set_output_delay.
 
+    @invariant OwnPlayerIsNoMember
+        -- The room's own player, held for own_server, is never reported
+        -- to the coordinator as joining or leaving the audience: the
+        -- coordinator decides that path itself, and a report would make
+        -- it release the player.
+
     @guidance
-        -- Haskell: websockets for the transport, cacophony for Noise,
-        -- a small FFI binding to libFLAC's stream encoder, stm for the
-        -- shared state, and the MPD protocol spoken directly over the
-        -- loopback socket. Chunks of 20 to 50 ms; the spec bounds them at
-        -- 15 to 150 ms. MPD's output: type "fifo", name "multiroom",
+        -- Haskell: websockets for the transport, Noise on crypton (M19),
+        -- stm for the shared state, and the MPD protocol spoken directly
+        -- over the loopback socket. Chunks of 20 ms; the spec bounds them
+        -- at 15 to 150 ms. MPD's output: type "fifo", name "multiroom",
         -- path /run/nixtune/room/fifo, format <streamFormat>, disabled
-        -- at boot. MPD's 24-bit format is 24 bits in 32-bit containers;
-        -- the server packs it for FLAC. suspend keeps a player in the
-        -- audience for path decisions while another server holds it.
+        -- at boot. nixtune-room creates the fifo if it is missing and
+        -- holds it open read-write, so MPD never finds it without a
+        -- reader and never removes it. MPD's 24-bit format is 24 bits in
+        -- 32-bit containers; the server packs it to 3 bytes for PCM.
+        -- Each player has a sending thread with two queues, control
+        -- before audio, so server/command and group/update go ahead of
+        -- audio not yet started, as the spec requires. A pause clears
+        -- every stream, then discards what the fifo still delivers until
+        -- it has been quiet for 50 ms, and seeks MPD back by that audio
+        -- plus what was sent and not yet heard. suspend keeps a player in
+        -- the audience for path decisions while another server holds it.
 }
 
 -- The room's Sendspin player on the DAC.
@@ -670,7 +702,7 @@ contract SendspinPlayer {
         -- To start with: sendspin-cli's `sendspin daemon` from nixpkgs
         -- (python3Packages.sendspin) pinned to a tested version, with
         -- --name <room>, --audio-device <output.device>, --port 8928,
-        -- --audio-format flac:<streamFormat>, --hardware-volume false,
+        -- --audio-format pcm:<streamFormat>, --hardware-volume false,
         -- --unpaired-access false, --output-delay-ms <outputDelay>,
         -- --hook-start and --hook-stop calling the coordinator. Its
         -- settings, identity and pairing store live in its
@@ -836,7 +868,7 @@ config {
     room_port: Integer = 8605
     server_port: Integer = 8927
     player_port: Integer = 8928
-    stream_format: StreamFormat = { codec: flac, rate: 44100, bits: 24, channels: 2 }
+    stream_format: StreamFormat = { codec: pcm, rate: 44100, bits: 24, channels: 2 }
     reconcile_interval: Duration = 2.seconds
     audience_grace: Duration = 10.seconds
     orphan_timeout: Duration = 3.minutes
@@ -877,6 +909,13 @@ default KnownIssue player_start_hook_does_not_wait = {
     status: open,
     effect: "daemon.py starts hook_start as a background task (create_task), so the player can open the DAC while MPD still holds it; the open fails and the interruption or the group join has no sound in that room",
     closes_when: "nixtune's sendspin-cli carries a patch that awaits hook_start before opening the output stream, offered upstream as an option; or the native player"
+}
+
+default KnownIssue player_does_not_report_commanded_delay = {
+    name: "aiosendspin applies set_output_delay without reporting it",
+    status: open,
+    effect: "the spec requires a client/state whenever output_delay_ms changes, including through server/command; aiosendspin 0.0.0 (the library sendspin-cli is built on) changes the delay and sends nothing, so a server that trusts reports alone keeps the old send-ahead and the player's buffer shrinks by the delay. nixtune's server counts a delay as applied once it queues the command (found in stage 3's end-to-end run against aiosendspin's client)",
+    closes_when: "aiosendspin sends client/state after applying a delay command (offered upstream); the server's handling stays correct either way"
 }
 
 default KnownIssue shared_playlist_races = {
@@ -1090,8 +1129,8 @@ rule HoldRequested {
     @guidance
         -- The server connects to f's host:8928/sendspin, completes the
         -- Noise handshake with the pair's provisioned PSK, then sends
-        -- server/activate with activities ['playback'] and player@v1,
-        -- metadata@v1. The reply waits for the player's first
+        -- server/activate with activities ['playback'] and player@v1
+        -- (metadata@v1 in stage 5). The reply waits for the player's first
         -- client/state with available true, up to
         -- config.player_ready_timeout; after that it is refused
         -- player_not_ready and the server disconnects.

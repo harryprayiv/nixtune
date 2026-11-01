@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               nixtune-room
-version:            0.2.0.0
+version:            0.3.0.0
 synopsis:           The nixtune multiroom daemon: coordinator and Sendspin server
 description:
   One process per nixtune room. It decides what the room's DAC plays,
@@ -12,7 +12,8 @@ description:
   Stage 2 is the shell around it: room.json, the line protocol over a
   websocket and a control socket, the MPD client, peer calls, key
   generation and the player's credential provisioning. The Sendspin
-  server itself is stage 3.
+  server, stage 3, is Noise KKpsk2, the core messages, the time
+  responder and player@v1 with PCM.
 license:            AGPL-3.0-or-later
 author:             Harry Pray IV
 maintainer:         harry@harryprayiv.com
@@ -49,7 +50,12 @@ library
     Nixtune.Room.Status
     Nixtune.Room.Sync
     Nixtune.Room.Wire
+    Nixtune.Sendspin.Audio
+    Nixtune.Sendspin.Connection
+    Nixtune.Sendspin.Message
+    Nixtune.Sendspin.Noise
     Nixtune.Sendspin.PskId
+    Nixtune.Sendspin.Server
     Nixtune.Sendspin.TimeFilter
   build-depends:
     , aeson       >=2.1  && <2.3
@@ -99,8 +105,10 @@ test-suite nixtune-room-test
     Generators
     KeysSpec
     MpdSpec
+    NoiseSpec
     OutputsSpec
     SendspinSpec
+    StreamSpec
     SyncSpec
     TempDir
     WireSpec
@@ -113,6 +121,7 @@ test-suite nixtune-room-test
     , directory
     , filepath
     , hspec         >=2.10 && <2.12
+    , memory
     , network
     , nixtune-room
     , QuickCheck    >=2.14 && <2.16
