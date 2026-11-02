@@ -68,7 +68,8 @@
 --     checks.<sys>.nixtune-web     the page build
 --     checks.x86_64-linux.rehearsal
 --                               toplevel of a QEMU-shaped host with
---                               hardware.profile = "none" and one station
+--                               hardware.board = "other",
+--                               hardware.audio = "none" and one station
 --     devShells.<sys>.default, formatter.<sys> (nixfmt)
 --   for <sys> in x86_64-linux and aarch64-linux. There is no Pi SD image
 --   output, no example host, no overlay and no pi5-sd module in this
@@ -104,6 +105,17 @@
 --       192.168.8.110:/volume2/music/Music/_youtube read-write over
 --       NFSv4.1, sec=sys; a single video and a playlist fetched, written
 --       to the NAS and queued.
+--
+--   Hardware broadened, 2026-11-01, on the multiroom branch: the single
+--   hardware.profile became two choices, hardware.board (pi3, pi4, pi5,
+--   other) and hardware.audio (dac2hd, headphones, hdmi, usb, hat, none),
+--   so a stock Pi with no DAC plays through its headphone jack or HDMI.
+--   hardware.profile remains as an alias for the two values it had. Every
+--   board and output was evaluated against nixos-hardware 04c6b94
+--   (Raspberry Pi kernel 6.18.50, stable_20260911) and the rehearsal
+--   nixpkgs, to a system derivation, with each refused combination
+--   refused; only pi5 with dac2hd has run on hardware. KnownIssue
+--   hardware_unverified.
 --
 --   Lessons that cost a night, written down so they are not paid twice:
 --     - nixpkgs' online first-boot resize of the ext4 root corrupted
@@ -416,9 +428,24 @@
 --      playlists are nixtune-page.allium P27; Home Assistant can load
 --      stored playlists too.
 --
+--  30. A BOARD AND AN OUTPUT, NOT A PROFILE. nixtune is for people who
+--      have a Pi and not necessarily a DAC, so the hardware is two
+--      choices: the board (entity Board) and where the sound leaves it
+--      (entity AudioOutput). An output either takes the file as it is
+--      (a DAC: bit-perfect, MPD converts nothing) or needs MPD to convert
+--      (the headphone jack, 16 bits at 48 kHz at most; HDMI, through
+--      alsa-lib's iec958 plugin), and either has a hardware volume
+--      control or leaves volume to MPD's software mixer (HDMI). Each
+--      file reads those facts from services.nixtune.output and never
+--      the board or output by name. A combination the board does not
+--      have fails evaluation with a message saying why. 32-bit boards
+--      are not supported: nixpkgs has no binary cache for armv6l or
+--      armv7l, so a Pi Zero, Zero W, 1 or 2 would compile everything,
+--      and nixos-hardware's Pi kernels for this stack are aarch64.
+--
 -- Earlier decisions still in force: AirPlay on, UPnP off until upmpdcli
--- builds, SD card on oracle's boot path, hardware profile from the
--- datasheet.
+-- builds, SD card on oracle's boot path, hardware facts from the
+-- datasheet and the kernel source.
 
 ------------------------------------------------------------
 -- Given
@@ -498,7 +525,7 @@ value AudioFormat {
 value Capabilities {
     hostname: String
     hardware: {
-        profile: String
+        profile: String          -- HardwareProfile.name
         output: alsa | null
         card: String?
         mixer: String?
@@ -555,7 +582,22 @@ contract PlayerModule {
     @guidance
         -- Options as implemented at 1ad560b:
         --   enable
-        --   hardware.profile            "pi5-dac2hd" (default) | "none"
+        --   hardware.board              "pi5" (default) | "pi4" | "pi3" |
+        --                               "other"
+        --   hardware.audio              "dac2hd" (default) | "headphones" |
+        --                               "hdmi" | "usb" | "hat" | "none"
+        --   hardware.hdmiPort           0 (default) | 1, for audio = hdmi
+        --   hardware.card.id            ALSA card id, for usb and hat
+        --   hardware.card.mixer         control name or null (software
+        --                               volume); for headphones, the
+        --                               control if not "PCM"
+        --   hardware.card.overlay       device tree overlay, for hat
+        --   hardware.card.convert       false; let MPD convert, for usb
+        --                               and hat
+        --   hardware.profile            null (default) | "pi5-dac2hd" |
+        --                               "none"; the earlier single option,
+        --                               setting board and audio with
+        --                               mkDefault
         --   library.export              "host:/path" or null
         --   wifi.ssid, wifi.pskFile     pskFile is a runtime path to an
         --                               environment file, PSK=<value>
@@ -586,7 +628,8 @@ contract PlayerModule {
         --   arbitration.resumeAfterRenderer   true
         --   renderers.airplay.{enable,name}
         --   renderers.upnp.{enable,friendlyName,package}
-        --   persistPaths (merged), output.* (internal)
+        --   persistPaths (merged), output.{kind,card,device,mixer,
+        --   convert} (internal, set by hardware.nix)
         --   volume.path (internal, read-only, set by volume.nix)
         --   art.path (internal, read-only, set by art.nix)
         --   youtube.path, youtube.pinnedArtist (internal, read-only, set
@@ -603,10 +646,17 @@ contract MpdService {
         -- when mpd.exposeOnLan.
 
     @invariant BitPerfectPath
-        -- One ALSA output on hw:CARD=<card>,DEV=0 with mixer_type
-        -- hardware, auto_resample, auto_channels and auto_format all
-        -- "no". The null profile uses a null output with a software
-        -- mixer.
+        -- One ALSA output on the output's device. On an output that does
+        -- not convert (a DAC, and a usb or hat card unless card.convert),
+        -- auto_resample, auto_channels and auto_format are all "no", so
+        -- MPD hands the card what the file is. On one that converts
+        -- (headphones, hdmi) all three are "yes", because with them off
+        -- MPD fails to open the output for most of a library.
+
+    @invariant MixerWhereTheCardHasOne
+        -- mixer_type hardware on the output's control when it has one,
+        -- with mixer_device hw:CARD=<card>; software otherwise (HDMI, a
+        -- card declared with no mixer, and the null output).
 
     @invariant ReleasesTheCardOnPause
         -- close_on_pause = "yes", so a renderer can open the card while
@@ -628,7 +678,8 @@ contract MpdService {
 
     @invariant MixerLevelPersists
         -- hardware.alsa.enablePersistence defaults on with an ALSA card,
-        -- so the DAC's level survives a reboot.
+        -- so the card's level survives a reboot. MPD's software level is
+        -- in its own state file and survives too.
 
     @guidance
         -- music_directory is /srv/music with a library, else
@@ -693,6 +744,12 @@ contract VolumeWriter {
         -- index from /proc/asound/cards because alsa-lib reports a
         -- missing control device as an invalid card number. The glide
         -- between levels is the page's (nixtune-page.allium).
+        -- Built for every output with a hardware control, not only the
+        -- DAC2 HD: the headphone jack's PCM control (-102.39 dB to
+        -- +4 dB) and most USB controls are wider than 24 dB, so MPD
+        -- takes its dB write path on them too, and amixer's mapped
+        -- write is right on any card. Only the DAC2 HD's mute is
+        -- measured.
 }
 
 -- The YouTube helper (decision 27). The page's side of the line
@@ -797,16 +854,108 @@ enum ReleaseStep {
 -- Entities and Variants
 ------------------------------------------------------------
 
-entity HardwareProfile {
-    name: String
-    board: String
-    output_kind: alsa | null
-    dac_overlay: String?
+-- The computer (decision 30). One value per nixos-hardware Raspberry Pi
+-- module, plus other for anything that is not a Pi.
+entity Board {
+    kind: pi3 | pi4 | pi5 | other
+    models: String
+    soc: String?
+    raspberry_pi: Boolean
+    headphone_jack: Boolean
+    hdmi_ports: Integer
+    nixos_hardware_module: String?
+    builds_on_device: Boolean
+
+    @guidance
+        -- soc is the compatible string the build-time overlay copy is
+        -- rewritten to (hardware.nix), because nixpkgs applies an overlay
+        -- only to a DTB it shares a compatible string with, and every
+        -- HiFiBerry overlay is shipped as brcm,bcm2835.
+        -- headphone_jack is per board kind, and two models of a kind
+        -- lack one: the Pi 400 (pi4) and the Zero 2 W (pi3). The
+        -- assertion cannot tell them apart; the option description and
+        -- the README say so.
+        -- builds_on_device: a Pi 4 or 5 with 4 GB or more can run the
+        -- deploy's build itself (the reference Pi 5 does, with
+        -- max-jobs 2 and cores 2). Anything smaller is deployed with
+        -- --build-host on the workstation.
+}
+
+-- Where the sound leaves the computer (decision 30).
+entity AudioOutput {
+    kind: dac2hd | headphones | hdmi | usb | hat | none
+    alsa: alsa | null
+    overlay: String?
     card: String?
+    device: String?
     mixer_control: String?
-    hardware_volume: Boolean
+    converts: Boolean
+    needs_kms: Boolean
+    needs_raspberry_pi: Boolean
     mpd_can_write_mixer: Boolean
-    needs_pi_kernel: Boolean
+
+    bit_perfect: alsa = alsa and not converts
+    hardware_volume: mixer_control != null
+
+    @guidance
+        -- device is what MPD, shairport-sync and the multiroom player
+        -- open: hw:CARD=<card>,DEV=0, except HDMI, which is
+        -- hdmi:CARD=<card>,DEV=0,AES0=0x04,AES1=0x82,AES2=0x00,AES3=0x01.
+        -- vc4-hdmi takes only IEC958_SUBFRAME_LE, so every client goes
+        -- through alsa-lib's iec958 plugin (cards/vc4-hdmi.conf); the
+        -- channel status is the one alsa-lib's own default PCM for the
+        -- card uses, AES3=0x01 letting the plugin fill in the real rate.
+        -- The HDMI card id is vc4hdmi on a board with one port and
+        -- vc4hdmi0 or vc4hdmi1 on one with two.
+        -- mpd_can_write_mixer is false wherever the volume helper is
+        -- built, which is every output with a control; it is measured
+        -- false only on the DAC2 HD.
+}
+
+-- The pair a host declares. HostDeclaration.hardware.
+entity HardwareProfile {
+    board: Board
+    output: AudioOutput
+    hdmi_port: Integer
+    card_id: String?
+    card_mixer: String?
+    card_overlay: String?
+    card_convert: Boolean
+
+    name: board.kind + "-" + output.kind
+
+    invariant JackOnlyWhereThereIsOne {
+        -- An assertion in hardware.nix.
+        output.kind = headphones and board.raspberry_pi implies board.headphone_jack
+    }
+
+    invariant PiOutputsOnAPi {
+        -- An assertion in hardware.nix.
+        output.needs_raspberry_pi implies board.raspberry_pi
+    }
+
+    invariant HdmiPortExists {
+        -- An assertion in hardware.nix.
+        output.kind = hdmi and board.raspberry_pi implies hdmi_port < board.hdmi_ports
+    }
+
+    invariant NamedCardsAreNamed {
+        -- An assertion in hardware.nix: usb and hat need card.id, which
+        -- becomes the output's card.
+        output.kind in {usb, hat} implies card_id != null
+    }
+
+    invariant KmsOnlyForHdmi {
+        -- config.txt's [all] overlays are the output's overlay, if any,
+        -- and vc4-kms-v3d only when needs_kms. This replaces
+        -- nixos-hardware's default [all] list, which is vc4-kms-v3d.
+        output.needs_kms = (output.kind = hdmi)
+    }
+
+    @guidance
+        -- name is the string capabilities.json carries as
+        -- hardware.profile: "pi5-dac2hd", "pi4-headphones", "other-usb".
+        -- The page decodes it and does not use it.
 }
 
 entity HostDeclaration {
@@ -842,7 +991,7 @@ entity HostDeclaration {
     capabilities: enabled_modules -> kind
     has_core: modules.any(m => m.kind = mpd and m.enabled)
     wifi_configured: ssid != null and psk_file != null
-    needs_volume_helper: hardware.output_kind = alsa
+    needs_volume_helper: hardware.output.alsa = alsa and hardware.output.hardware_volume
     art_served: album_art_enabled and library_export != null
     youtube_served: youtube_enabled and library_export != null
 
@@ -856,7 +1005,7 @@ entity HostDeclaration {
 
     invariant AirplayNeedsCard {
         -- An assertion in airplay.nix; the build fails otherwise.
-        enabled_renderers.any(r => r.kind = airplay) implies hardware.output_kind = alsa
+        enabled_renderers.any(r => r.kind = airplay) implies hardware.output.alsa = alsa
     }
 
     invariant YoutubeNeedsALibrary {
@@ -1065,28 +1214,163 @@ config {
 -- Defaults
 ------------------------------------------------------------
 
-default HardwareProfile pi5_dac2hd = {
-    name: "Raspberry Pi 5 with HiFiBerry DAC2 HD",
-    board: "raspberrypi-5",
-    output_kind: alsa,
-    dac_overlay: "hifiberry-dacplushd",
-    card: "sndrpihifiberry",
-    mixer_control: "DAC",
-    hardware_volume: true,
-    mpd_can_write_mixer: false,
-    needs_pi_kernel: true
+default Board pi3 = {
+    kind: pi3,
+    models: "Raspberry Pi 3 B, 3 B+, 3 A+, Zero 2 W",
+    soc: "brcm,bcm2837",
+    raspberry_pi: true,
+    headphone_jack: true,
+    hdmi_ports: 1,
+    nixos_hardware_module: "raspberry-pi-3",
+    builds_on_device: false
 }
 
-default HardwareProfile none = {
-    name: "No sound card (rehearsal)",
-    board: "any",
-    output_kind: null,
-    dac_overlay: null,
-    card: null,
+default Board pi4 = {
+    kind: pi4,
+    models: "Raspberry Pi 4 B, 400, Compute Module 4",
+    soc: "brcm,bcm2711",
+    raspberry_pi: true,
+    headphone_jack: true,
+    hdmi_ports: 2,
+    nixos_hardware_module: "raspberry-pi-4",
+    builds_on_device: true
+}
+
+default Board pi5 = {
+    kind: pi5,
+    models: "Raspberry Pi 5, 500, Compute Module 5",
+    soc: "brcm,bcm2712",
+    raspberry_pi: true,
+    headphone_jack: false,
+    hdmi_ports: 2,
+    nixos_hardware_module: "raspberry-pi-5",
+    builds_on_device: true
+}
+
+default Board other = {
+    kind: other,
+    models: "anything that is not a Raspberry Pi, and the rehearsal VM",
+    soc: null,
+    raspberry_pi: false,
+    headphone_jack: false,
+    hdmi_ports: 0,
+    nixos_hardware_module: null,
+    builds_on_device: true
+}
+
+default AudioOutput dac2hd = {
+    kind: dac2hd,
+    alsa: alsa,
+    overlay: "hifiberry-dacplushd",
+    card: "sndrpihifiberry",
+    device: "hw:CARD=sndrpihifiberry,DEV=0",
+    mixer_control: "DAC",
+    converts: false,
+    needs_kms: false,
+    needs_raspberry_pi: true,
+    mpd_can_write_mixer: false
+}
+
+default AudioOutput headphones = {
+    kind: headphones,
+    alsa: alsa,
+    overlay: null,
+    card: "Headphones",
+    device: "hw:CARD=Headphones,DEV=0",
+    mixer_control: "PCM",
+    converts: true,
+    needs_kms: false,
+    needs_raspberry_pi: true,
+    mpd_can_write_mixer: false
+}
+
+default AudioOutput hdmi = {
+    kind: hdmi,
+    alsa: alsa,
+    overlay: null,
+    card: "vc4hdmi0",
+    device: "hdmi:CARD=vc4hdmi0,DEV=0,AES0=0x04,AES1=0x82,AES2=0x00,AES3=0x01",
     mixer_control: null,
-    hardware_volume: false,
-    mpd_can_write_mixer: true,
-    needs_pi_kernel: false
+    converts: true,
+    needs_kms: true,
+    needs_raspberry_pi: true,
+    mpd_can_write_mixer: true
+}
+
+-- card, device, mixer_control and converts come from the profile's
+-- card_id, card_mixer and card_convert; device is
+-- hw:CARD=<card_id>,DEV=0.
+default AudioOutput usb = {
+    kind: usb,
+    alsa: alsa,
+    overlay: null,
+    card: null,
+    device: null,
+    mixer_control: null,
+    converts: false,
+    needs_kms: false,
+    needs_raspberry_pi: false,
+    mpd_can_write_mixer: false
+}
+
+-- As usb, plus the overlay from the profile's card_overlay.
+default AudioOutput hat = {
+    kind: hat,
+    alsa: alsa,
+    overlay: null,
+    card: null,
+    device: null,
+    mixer_control: null,
+    converts: false,
+    needs_kms: false,
+    needs_raspberry_pi: true,
+    mpd_can_write_mixer: false
+}
+
+default AudioOutput none = {
+    kind: none,
+    alsa: null,
+    overlay: null,
+    card: null,
+    device: null,
+    mixer_control: null,
+    converts: false,
+    needs_kms: false,
+    needs_raspberry_pi: false,
+    mpd_can_write_mixer: true
+}
+
+-- The reference player, and the only pair run on hardware.
+default HardwareProfile pi5_dac2hd = {
+    board: pi5,
+    output: dac2hd,
+    hdmi_port: 0,
+    card_id: null,
+    card_mixer: null,
+    card_overlay: null,
+    card_convert: false
+}
+
+-- The rehearsal VM.
+default HardwareProfile other_none = {
+    board: other,
+    output: none,
+    hdmi_port: 0,
+    card_id: null,
+    card_mixer: null,
+    card_overlay: null,
+    card_convert: false
+}
+
+-- A stock Pi 4 or Pi 3 with nothing added, the case decision 30 is for.
+default HardwareProfile pi4_headphones = {
+    board: pi4,
+    output: headphones,
+    hdmi_port: 0,
+    card_id: null,
+    card_mixer: null,
+    card_overlay: null,
+    card_convert: false
 }
 
 default FleetConfig neoblade = {
@@ -1149,6 +1433,30 @@ default KnownIssue mpd_setvol_mutes_dac2hd = {
     status: open,
     effect: "every setvol on this card lands on raw 0; worked around by volume.nix, which means any OTHER MPD client on the LAN, Home Assistant included, still mutes the room when it sets volume",
     closes_when: "MPD is patched or configured to take the raw write path on a control with a wide dB range, or the helper is reachable to every client, which it is not"
+}
+
+default KnownIssue hardware_unverified = {
+    repo: nixtune,
+    name: "every board and output but the Pi 5 with the DAC2 HD is evaluated, not run",
+    status: open,
+    effect: "pi3, pi4 and pi5 with headphones, hdmi, usb and hat, and other with usb, evaluate to a system derivation against nixos-hardware 04c6b94 and the combinations a board lacks are refused, but none has booted or played. The card ids (Headphones, vc4hdmi, vc4hdmi0, vc4hdmi1), the headphone control name PCM, the HDMI device string, MPD's conversion on both, the player's plug PCM and the volume helper on a card other than the DAC2 HD are taken from the kernel and alsa-lib sources",
+    closes_when: "each output has played a FLAC and an MP3 on a real board, with the volume moved from the page and from an AirPlay sender, and this file records which board and kernel; one closes per output"
+}
+
+default KnownIssue hdmi_needs_a_sink = {
+    repo: nixtune,
+    name: "HDMI audio needs a display or receiver connected and on",
+    status: open,
+    effect: "vc4-hdmi refuses to open its PCM when nothing audio-capable is connected, so MPD's output fails to open and the multiroom player waits for a device it cannot open. What happens when the TV or receiver is turned on after boot is not measured",
+    closes_when: "measured on a Pi 4 and a Pi 5 with the sink off at boot and turned on later, and the behaviour written here, or a dummy sink documented for a room where the receiver is switched off"
+}
+
+default KnownIssue pi400_and_zero2w_jack = {
+    repo: nixtune,
+    name: "the jack assertion is per board kind, and two models of a kind have no jack",
+    status: open,
+    effect: "audio = headphones evaluates for a Pi 400 (pi4) and a Zero 2 W (pi3), which have no 3.5 mm jack; there is then no Headphones card and MPD's output fails to open",
+    closes_when: "hardware.board grows pi400 and zero2w, or the README and the option description are judged enough (they say it today)"
 }
 
 default KnownIssue listall_overruns = {
@@ -1425,14 +1733,16 @@ rule ProtocolClientSetsVolume {
     requires: host.expose_mpd_on_lan
     ensures:
         MpdProtocol.apply(player, "setvol " + level)
-        if host.needs_volume_helper:
+        if host.hardware.output.kind = dac2hd:
             OutputMuted(output: output)
 
     @guidance
         -- A real consequence and not a hypothetical: Home Assistant's
-        -- media_player.volume_set sends setvol, and on this card that
+        -- media_player.volume_set sends setvol, and on the DAC2 HD that
         -- silences the room. Use HA for transport until KnownIssue
-        -- mpd_setvol_mutes_dac2hd closes.
+        -- mpd_setvol_mutes_dac2hd closes. On the other outputs with a
+        -- control, what MPD's write does is not measured; on an output
+        -- without one (HDMI) setvol is MPD's software level and works.
 }
 
 -- Output arbitration ------------------------------------------------------
@@ -1704,9 +2014,10 @@ surface CommunityFlake {
         demands PlayerModule
 
     @guarantee StandaloneUse
-        -- Import nixosModules.default and set services.nixtune.*. For the
-        -- Pi profile, also import nixos-hardware's raspberry-pi-5 module
-        -- and supply a boot path; this flake does not provide one.
+        -- Import nixosModules.default and set services.nixtune.*. On a
+        -- Raspberry Pi, also import the nixos-hardware module the board
+        -- names (Board.nixos_hardware_module) and supply a boot path;
+        -- this flake does not provide one.
 
     @guidance
         -- AGPLv3, LICENSE present. No moOde code or name. The README on
@@ -1734,8 +2045,7 @@ surface CommunityFlake {
 -- arbiter_and_renderers  upmpdcli built; Spotify Connect, Squeezelite,
 --                        Bluetooth as off-by-default modules.
 -- long_tail              the 2026-10-28 wish list: multiroom, HTTP
---                        stream out, a USB DAC profile, more HiFiBerry
---                        profiles, kiosk display, GPIO/rotary, IR, USB
+--                        stream out, kiosk display, GPIO/rotary, IR, USB
 --                        and SMB sources, favorites, runtime station add,
 --                        a fallback access point, ListenBrainz.
 
@@ -1783,6 +2093,7 @@ deferred Renderer.upnp_renderer     -- see: upmpdcli documentation
 deferred Websocket.bridge           -- see: websocat documentation
 deferred Fetcher.ytdlp              -- see: yt-dlp README, output templates, --parse-metadata, --match-filter
 deferred AlsaMixer.mapped           -- see: amixer -M and ALSA's normalized volume mapping
+deferred AlsaPlugin.iec958          -- see: alsa-lib src/conf/cards/vc4-hdmi.conf and src/pcm/pcm_iec958.c
 deferred Automation.homeassistant   -- see: Home Assistant's MPD integration
 deferred Fleet.rows                 -- see: neoblade-config.allium
 

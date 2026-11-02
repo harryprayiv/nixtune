@@ -19,6 +19,12 @@
 # form and the mapped form, and they hold. So the DAC and the driver are
 # fine and MPD's write path is not usable here.
 #
+# The helper is used for every card with a hardware control, not only the
+# DAC2 HD: the Pi's headphone jack and most USB DACs also have controls
+# wider than 24 dB, so MPD takes the same write path on them, and amixer's
+# mapped write is correct on every card. That is untested on hardware for
+# anything but the DAC2 HD.
+#
 # This is the split moOde uses, without moOde's database or PHP: MPD keeps
 # the mixer for reading, and writes go through a helper that performs the
 # same mapped write amixer does. The page sends one line per change to a
@@ -48,9 +54,10 @@ let
   cfg = config.services.nixtune;
   out = cfg.output;
 
-  # Only when there is a real card to write to. With the null output MPD's
-  # software mixer works properly and the page keeps using setvol.
-  enabled = cfg.enable && cfg.ui.enable && out.kind == "alsa";
+  # Only when there is a card with a volume control to write to. With the
+  # null output, or a card without a control (HDMI), MPD's software mixer
+  # works properly and the page keeps using setvol.
+  enabled = cfg.enable && cfg.ui.enable && out.kind == "alsa" && out.mixer != null;
 
   socketPort = 8601;
   bridgePort = 8602;

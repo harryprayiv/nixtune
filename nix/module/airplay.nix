@@ -1,5 +1,6 @@
-# AirPlay through shairport-sync, straight to the DAC with the same hardware
-# mixer MPD uses, so volume is one number everywhere.
+# AirPlay through shairport-sync, straight to the card with the same
+# hardware mixer MPD uses, so volume is one number everywhere. On a card
+# with no control (HDMI) shairport-sync attenuates in software instead.
 #
 # Arbitration: shairport-sync runs a hook before its first audio frame and
 # another after its last. The first pauses MPD if it was playing and leaves a
@@ -73,7 +74,7 @@ in
     assertions = [
       {
         assertion = out.kind == "alsa";
-        message = "services.nixtune.renderers.airplay needs a sound card; services.nixtune.hardware.profile is \"${cfg.hardware.profile}\".";
+        message = "services.nixtune.renderers.airplay needs a sound card; services.nixtune.hardware.audio is \"${cfg.hardware.audio}\".";
       }
     ];
 
@@ -92,6 +93,8 @@ in
         };
         alsa = {
           output_device = out.device;
+        }
+        // lib.optionalAttrs (out.mixer != null) {
           mixer_control_name = out.mixer;
           mixer_device = "hw:CARD=${out.card}";
         };

@@ -449,7 +449,7 @@ external entity Browser {
 -- generation.
 value Capabilities {
     hostname: String
-    profile: String
+    profile: String          -- board and output, "pi4-headphones"; decoded, not used
     output_kind: alsa | null_output
     card: String?
     mixer: String?

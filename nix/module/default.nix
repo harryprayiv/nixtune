@@ -1,22 +1,24 @@
 # nixtune: a network music player as one NixOS module.
 #
-# MPD on a DAC through ALSA with hardware volume and nothing else in the
-# chain; AirPlay and UPnP renderers as sub-options that are off by default;
-# a Halogen page (packages/nixtune-web) that speaks the MPD protocol over a
-# websocket. There is no settings database and no settings page: the options
-# below are the configuration, and changing them means a new generation with
-# the previous one a reboot away.
+# MPD on a sound card through ALSA, on a DAC with hardware volume and
+# nothing else in the chain; AirPlay and UPnP renderers as sub-options
+# that are off by default; a Halogen page (packages/nixtune-web) that
+# speaks the MPD protocol over a websocket. There is no settings database
+# and no settings page: the options below are the configuration, and
+# changing them means a new generation with the previous one a reboot
+# away.
 #
 # This file declares every option and the wiring that is not one service.
 # The parts live beside it:
 #
-#   hardware.nix   board and DAC facts per profile, the device tree overlay
+#   hardware.nix   the board and the audio output, and the device tree
+#                  overlay
 #   mpd.nix        the daemon on the card
 #   library.nix    the NFS export, mounted read-only at /srv/music
 #   database.nix   what MPD indexes, and dropping its database when the
 #                  export changes
-#   volume.nix     writing the hardware volume, which MPD cannot do on this
-#                  card
+#   volume.nix     writing the hardware volume, which MPD cannot do on the
+#                  DAC2 HD
 #   art.nix        pulling cover art out of the files into a served cache
 #   ui.nix         nginx, websocat, capabilities.json, the page
 #   youtube.nix    fetching a YouTube track into the library and queueing it
@@ -88,24 +90,6 @@ in
 
   options.services.nixtune = {
     enable = lib.mkEnableOption "nixtune, the network music player";
-
-    hardware.profile = mkOption {
-      type = types.enum [
-        "pi5-dac2hd"
-        "none"
-      ];
-      default = "pi5-dac2hd";
-      description = ''
-        The board and DAC this host is built for.
-
-        pi5-dac2hd  Raspberry Pi 5 with a HiFiBerry DAC2 HD. Device tree
-                    overlay, ALSA card name and hardware mixer come from
-                    hardware.nix. Needs the Raspberry Pi kernel, which
-                    nixos-hardware's raspberry-pi-5 module provides.
-        none        No sound card. MPD plays into a null output. For a
-                    rehearsal VM, where everything but the DAC is exercised.
-      '';
-    };
 
     library.export = mkOption {
       type = types.nullOr types.str;
@@ -396,7 +380,8 @@ in
       description = "Directories holding nixtune's state. Set by the parts that own them.";
     };
 
-    # Set by hardware.nix from the profile; read by the other files.
+    # Set by hardware.nix from the board and the audio output; read by the
+    # other files.
     output = {
       kind = mkOption {
         type = types.enum [
@@ -418,6 +403,11 @@ in
       };
       mixer = mkOption {
         type = types.nullOr types.str;
+        readOnly = true;
+        internal = true;
+      };
+      convert = mkOption {
+        type = types.bool;
         readOnly = true;
         internal = true;
       };

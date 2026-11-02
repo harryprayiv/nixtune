@@ -29,7 +29,10 @@ let
     builtins.toJSON {
       hostname = config.networking.hostName;
       hardware = {
-        profile = cfg.hardware.profile;
+        # The board and the output, as one string: "pi5-dac2hd",
+        # "pi4-headphones", "other-usb". The page decodes it and does not
+        # use it.
+        profile = "${cfg.hardware.board}-${cfg.hardware.audio}";
         output = cfg.output.kind;
         card = cfg.output.card;
         mixer = cfg.output.mixer;

@@ -495,12 +495,23 @@
 --                   default. A rehearsal VM points it at snd-aloop's
 --                   "Loopback". playerCardDevice is its PCM number, 0.
 --                   The module writes the player's ~/.asoundrc with one
---                   PCM, nixtune, of type hw on that card, and runs the
---                   player with --audio-device nixtune: sendspin-cli
---                   finds devices among PortAudio's list by name prefix,
---                   and PortAudio lists the user's .asoundrc PCMs but not
---                   a bare hw:CARD=... name (found in the rehearsal run,
---                   2026-11-01).
+--                   PCM, nixtune, and runs the player with
+--                   --audio-device nixtune: sendspin-cli finds devices
+--                   among PortAudio's list by name prefix, and PortAudio
+--                   lists the user's .asoundrc PCMs but not a bare
+--                   hw:CARD=... name (found in the rehearsal run,
+--                   2026-11-01). On an output that takes the stream as
+--                   it is (a DAC, a USB or HAT card without
+--                   card.convert, the rehearsal's Loopback) nixtune is
+--                   of type hw on playerCard and playerCardDevice. On an
+--                   output MPD converts for (nixtune.allium decision 30:
+--                   the headphone jack, HDMI) and with playerCard left
+--                   at output.card, it is of type plug over MPD's own
+--                   device string, so the group's 44.1 kHz 24-bit stream
+--                   is converted the way MPD's own output is; for HDMI
+--                   that device is alsa-lib's iec958 plugin. Evaluated
+--                   for pi4 headphones and pi5 hdmi on 2026-11-01, not
+--                   run (nixtune.allium KnownIssue hardware_unverified).
 --   timing          audienceGrace, orphanTimeout, playerReadyTimeout,
 --                   maxSuspension, reconcileInterval, peerTimeout, in
 --                   milliseconds, defaulting to config below.

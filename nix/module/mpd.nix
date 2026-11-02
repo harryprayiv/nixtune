@@ -1,5 +1,6 @@
-# MPD on the DAC, with hardware volume and nothing between the decoder and
-# the card.
+# MPD on the card hardware.nix chose. On a DAC: hardware volume and nothing
+# between the decoder and the card. On the Pi's headphone jack or HDMI: MPD
+# converts to what the output takes, and on HDMI sets the level itself.
 {
   config,
   lib,
@@ -16,18 +17,31 @@ let
   # an NFS export that squashes root and takes the unit down with it.
   musicDirectory = if cfg.library.export != null then "/srv/music" else "/var/lib/mpd/music";
 
-  alsaOutput = {
+  yesNo = b: if b then "yes" else "no";
+
+  # With a control on the card, the card sets the level. Without one, MPD
+  # scales the samples, which is the only volume HDMI has.
+  mixer =
+    if out.mixer != null then
+      {
+        mixer_type = "hardware";
+        mixer_device = "hw:CARD=${out.card}";
+        mixer_control = out.mixer;
+      }
+    else
+      { mixer_type = "software"; };
+
+  alsaOutput = mixer // {
     type = "alsa";
     name = out.card;
     device = out.device;
-    mixer_type = "hardware";
-    mixer_device = "hw:CARD=${out.card}";
-    mixer_control = out.mixer;
-    # The DAC takes what the file is. No resampling, no channel or format
-    # conversion in software unless the card refuses the stream.
-    auto_resample = "no";
-    auto_channels = "no";
-    auto_format = "no";
+    # A DAC takes what the file is: no resampling, no channel or format
+    # conversion. The headphone jack (16 bits, 48 kHz at most) and HDMI
+    # (the iec958 plugin's formats) do not, and with these off MPD fails to
+    # open them for most of a library; hardware.nix says which is which.
+    auto_resample = yesNo out.convert;
+    auto_channels = yesNo out.convert;
+    auto_format = yesNo out.convert;
     # Release the device on pause so a renderer can open it. The
     # arbitration hooks in airplay.nix depend on this.
     close_on_pause = "yes";
@@ -72,8 +86,9 @@ in
           # collection. Raising it costs nothing until a reply is actually
           # that large, because the buffer grows on demand.
           max_output_buffer_size = cfg.mpd.maxOutputBuffer;
-          # The mixer level the DAC was left at is read back at start; the
-          # page clamps changes to maxVolume. No software volume anywhere.
+          # The mixer level the card was left at is read back at start; the
+          # page clamps changes to maxVolume. Software volume only on an
+          # output with no control of its own.
           replaygain = "off";
           audio_output = [ (if out.kind == "alsa" then alsaOutput else nullOutput) ];
         };

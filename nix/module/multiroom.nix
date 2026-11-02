@@ -89,14 +89,29 @@ let
   # fallback for one needs aplay and then cannot check the stream's format
   # against the card. PortAudio does list the PCMs of the user's
   # ~/.asoundrc, so the player gets one, named nixtune, that is the card
-  # MPD uses, with no plugin between them.
-  playerAsoundrc = pkgs.writeText "nixtune-player-asoundrc" ''
-    pcm.nixtune {
-      type hw
-      card "${toString mr.playerCard}"
-      device ${toString mr.playerCardDevice}
-    }
-  '';
+  # MPD uses. On a DAC there is no plugin between them. On an output that
+  # MPD converts for (the Pi's headphone jack, HDMI) the player's stream
+  # needs the same conversion, so nixtune is a plug over MPD's device,
+  # which for HDMI is the iec958 plugin.
+  playerConverts = out.kind == "alsa" && out.convert && mr.playerCard == out.card;
+
+  playerAsoundrc = pkgs.writeText "nixtune-player-asoundrc" (
+    if playerConverts then
+      ''
+        pcm.nixtune {
+          type plug
+          slave.pcm "${out.device}"
+        }
+      ''
+    else
+      ''
+        pcm.nixtune {
+          type hw
+          card "${toString mr.playerCard}"
+          device ${toString mr.playerCardDevice}
+        }
+      ''
+  );
 
   roomJson = pkgs.writeText "room.json" (
     builtins.toJSON {
@@ -240,9 +255,11 @@ in
       default = out.card;
       defaultText = lib.literalExpression "config.services.nixtune.output.card";
       description = ''
-        The ALSA card id the player opens: the DAC MPD uses, which the two
-        never hold at once. A rehearsal VM with no sound card points this
-        at snd-aloop's "Loopback".
+        The ALSA card id the player opens: the card MPD uses, which the
+        two never hold at once. A rehearsal VM with no sound card points
+        this at snd-aloop's "Loopback". Left at the default on an output
+        MPD converts for (headphones, HDMI), the player converts the same
+        way and playerCardDevice is not used.
       '';
     };
 
@@ -330,7 +347,7 @@ in
         }
         {
           assertion = mr.playerCard != null;
-          message = "services.nixtune.multiroom needs a card for the player; with hardware.profile \"none\" set multiroom.playerCard.";
+          message = "services.nixtune.multiroom needs a card for the player; with hardware.audio \"none\" set multiroom.playerCard.";
         }
         {
           assertion = cfg.ui.enable;

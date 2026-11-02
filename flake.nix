@@ -46,7 +46,10 @@
               networking.hostName = "nixtune-rehearsal";
               services.nixtune = {
                 enable = true;
-                hardware.profile = "none";
+                hardware = {
+                  board = "other";
+                  audio = "none";
+                };
                 radio.stations = [
                   {
                     name = "GBH 89.7";
