@@ -11,8 +11,11 @@
 # This file declares every option and the wiring that is not one service.
 # The parts live beside it:
 #
-#   hardware.nix   the board and the audio output, and the device tree
-#                  overlay
+#   hardware.nix   the board and the audio output, the device tree
+#                  overlay, and config.txt on whichever Raspberry Pi layer
+#                  the host imported
+#   cards.nix      the HiFiBerry cards by product: data hardware.nix reads,
+#                  not a module
 #   mpd.nix        the daemon on the card
 #   library.nix    the NFS export, mounted read-only at /srv/music
 #   database.nix   what MPD indexes, and dropping its database when the
@@ -22,7 +25,8 @@
 #   art.nix        pulling cover art out of the files into a served cache
 #   ui.nix         nginx, websocat, capabilities.json, the page
 #   youtube.nix    fetching a YouTube track into the library and queueing it
-#   airplay.nix    shairport-sync and the arbitration hooks
+#   airplay.nix    shairport-sync, NQPTP for AirPlay 2, and the arbitration
+#                  hooks
 #   upnp.nix       upmpdcli
 #   multiroom.nix  services.nixtune.multiroom: the coordinator, the room's
 #                  Sendspin server and player. It declares its own
@@ -352,6 +356,22 @@ in
           default = config.networking.hostName;
           defaultText = lib.literalExpression "config.networking.hostName";
           description = "Name advertised to AirPlay senders.";
+        };
+        version = mkOption {
+          type = types.enum [
+            1
+            2
+          ];
+          default = 2;
+          description = ''
+            Which AirPlay to offer. 2 runs nixpkgs' shairport-sync-airplay2,
+            patched to bind its stream sockets in a fixed range
+            (packages/shairport-sync), with NQPTP beside it: the player
+            appears in the Home app and in multi-speaker AirPlay, and opens
+            TCP 7000, UDP 319 and 320, UDP 6001 to 6011, and TCP and UDP
+            6200 to 6231. 1 runs nixpkgs' classic build alone, on TCP 5000
+            and UDP 6001 to 6011. airplay.nix says what each port is for.
+          '';
         };
       };
       upnp = {

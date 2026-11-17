@@ -1,17 +1,46 @@
 # The whole maintenance loop: `nix flake update` on the update branch, this
-# runs, merge to main. Evaluation of the example host and the page's build
-# are what break when an input moves, so that is what runs.
+# runs, merge to main.
+#
+# `nix flake check` evaluates every output for the runner's system and
+# builds every check: on x86_64 the page, nixtune-room, the Sendspin player,
+# the patched shairport-sync, the rehearsal hosts, the two-room VM test, and
+# the nixos-hardware Pi host, which is only evaluated; on aarch64 the same
+# packages and one Raspberry Pi system per board. The Pi kernels and
+# firmware come from nixos-raspberrypi's binary cache, which is why that
+# cache is trusted here; without it the aarch64 job compiles two kernels
+# (bcm2711 for the Zero 2 W, 3 and 4, bcm2712 for the 5).
+#
+# The VM test needs KVM. GitHub's Linux runners have /dev/kvm, readable
+# only by root until the udev rule below opens it, and Nix builds a test
+# only when kvm is in system-features.
 name: check
 on:
   push:
     branches: [main, update]
   pull_request:
 jobs:
-  check:
+  x86_64-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Open /dev/kvm to the build users
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - uses: DeterminateSystems/nix-installer-action@main
-      - run: nix flake check --no-build
-      - run: nix build .#web --print-build-logs
-      - run: nix build .#checks.x86_64-linux.example-eval --print-build-logs
+        with:
+          extra-conf: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - run: nix flake check --print-build-logs
+
+  aarch64-linux:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      - run: nix flake check --print-build-logs
