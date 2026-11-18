@@ -578,7 +578,10 @@
 --      connections in TIME_WAIT can be rebound, never on UDP sockets
 --      (where it would let two sockets share a port), and returns
 --      EADDRINUSE with a warning when the range is full, which the callers
---      already treat as fatal. airplay.nix sets 6200 and 32: below the
+--      already treat as fatal. Since 2026-11-18 the patch also closes each
+--      connection's event and data listening sockets at teardown, which
+--      upstream never does (KnownIssue airplay2_listener_leak); a small
+--      range makes that leak fatal where the ephemeral range hid it. airplay.nix sets 6200 and 32: below the
 --      ephemeral range, so the kernel never hands those ports to anyone
 --      else, and clear of classic AirPlay's UDP 6001 to 6011 and MPD.
 --      Version 2 opens TCP 7000, UDP 319 and 320, UDP 6001 to 6011 (the
@@ -1833,9 +1836,17 @@ default KnownIssue airplay2_ephemeral_ports = {
 default KnownIssue airplay2_port_patch_unstreamed = {
     repo: nixtune,
     name: "the AirPlay 2 port patch has not carried a stream",
+    status: closed,
+    effect: "was: the patch was built and its port walk tested on IPv4 only, with no AirPlay 2 sender",
+    closes_when: "closed 2026-11-18 on the kitchen player (Pi 5, DAC2 HD, nixos-hardware layer, nixtune multiroom-NEW, nixpkgs 1c89083): an iPhone and a second Apple device streamed over IPv6 and took over from each other repeatedly, every shairport-sync socket in `ss -tuapn` was on 7000 or in 6200 to 6231, and the journal had no bind error. ss reports shairport-sync under the name convolver"
+}
+
+default KnownIssue airplay2_listener_leak = {
+    repo: nixtune,
+    name: "upstream shairport-sync never closes a connection's event and data listening sockets",
     status: open,
-    effect: "airplay-2-port-range.patch builds with no warnings against 5.6.2 on gcc 13, and a test linked against the patched common.o passes on Linux for IPv4: every port of a range handed out once, a full range returning EADDRINUSE, a freed port found again, a port in TIME_WAIT rebound where a plain bind is refused, a UDP port never shared, range 0 leaving the kernel to choose, a fixed port bound as asked. The binary refuses a base and range that leave 1 to 65535. IPv6 was not testable (the build machine has no AF_INET6). No AirPlay 2 sender has connected to it, and no such sender runs in a VM test",
-    closes_when: "an iPhone or Mac has streamed to a player built with it, `ss -tulpn` during the stream shows shairport-sync on 7000 and on ports in 6200 to 6231 only, and a second sender taking over plays without a bind error in the journal"
+    effect: "found in the 2026-11-18 test: 13 listeners in the range after a few switches between two senders, with three RTSP connections alive. In 5.6.2 and on upstream's development branch, event_socket and data_socket are bound and listened on in rtsp.c and closed nowhere. With a 32-port range the leak fills it, the next SETUP calls die() and shairport-sync exits; the NixOS unit has Restart=on-failure, so AirPlay drops and comes back. airplay-2-port-range.patch now closes both in rtsp_conversation_thread_cleanup_function, after the event thread is joined. That change compiles with no warnings and has not run on a player. A SETUP repeated on one living connection still overwrites event_socket without closing the old one; whether iOS does that is not known",
+    closes_when: "on a player built with the fix, `sudo ss -tlpn | grep -c convolver` returns to 2 (the two listeners on 7000) some time after every sender has disconnected, and stays below the range size through twenty or more switches between senders"
 }
 
 default KnownIssue airplay2_port_patch_carried = {

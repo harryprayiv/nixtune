@@ -106,6 +106,34 @@ index bfa6638..b388873 100644
    int ignore_volume_control;
    int volume_max_db_set; // set to 1 if a maximum volume db has been set
    int volume_max_db;
+diff --git a/rtsp.c b/rtsp.c
+index d8985b5..fe7de30 100644
+--- a/rtsp.c
++++ b/rtsp.c
+@@ -4058,6 +4058,23 @@ void rtsp_conversation_thread_cleanup_function(void *arg) {
+     conn->ap2_event_receiver_exited = 0;
+     debug(3, "Connection %d: %s event thread deleted.", conn->connection_number,
+           get_category_string(conn->airplay_stream_category));
++
++    // Close the listening sockets this connection bound for its event and data ports. Nothing
++    // else closes them, so each connection would otherwise leave them listening for the life of
++    // the process. With the kernel choosing from tens of thousands of ports that goes unnoticed;
++    // with airplay_2_port_range set, the range fills up and the next SETUP can not bind a port.
++    // The event receiver thread, the only user of event_socket, has been cancelled and joined
++    // above. A socket that was never bound is 0, and one already closed is -1.
++    if (conn->event_socket > 0) {
++      debug(3, "Connection %d: terminating -- closing event_socket %d.", conn->connection_number,
++            conn->event_socket);
++      safe_socket_close(&conn->event_socket);
++    }
++    if (conn->data_socket > 0) {
++      debug(3, "Connection %d: terminating -- closing data_socket %d.", conn->connection_number,
++            conn->data_socket);
++      safe_socket_close(&conn->data_socket);
++    }
+ #endif
+ 
+     debug(3, "Connection %d: terminating  -- closing timing, control and audio sockets...",
 diff --git a/shairport.c b/shairport.c
 index 7a06caa..265045c 100644
 --- a/shairport.c

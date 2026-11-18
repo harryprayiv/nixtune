@@ -7,8 +7,19 @@
 # sockets are bound in it instead, TCP and UDP alike, walking from one place
 # further on at every bind so ports are reused as late as possible, and
 # setting SO_REUSEADDR on TCP sockets so a port whose earlier connections are
-# still in TIME_WAIT can be bound again. With no range set it behaves exactly
-# as upstream does. airplay.nix sets 6200 and 32.
+# still in TIME_WAIT can be bound again. With no range set, port choice is
+# exactly upstream's. airplay.nix sets 6200 and 32.
+#
+# The patch also closes two listening sockets upstream never closes: each
+# RTSP connection's event port and, when a remote-control stream is set up,
+# its data port. Upstream leaves both listening until the process exits,
+# which nobody notices among 28,000 ephemeral ports. In a range of 32 the
+# leak fills the range after a dozen or so connections, and the next SETUP
+# then fails to bind and shairport-sync exits (systemd restarts it). Seen on
+# the kitchen player on 2026-11-18: 13 listeners in the range after a few
+# switches between two senders with three connections alive. They are now
+# closed when the connection is torn down, after its event thread has been
+# joined.
 #
 # The patch is written against 5.6.2, the release nixpkgs builds (its source
 # hash, sha256-JiiZLgeYFoZ+Xq6tn1+KqW6Ewo+j+5JmxJ0Wm3dXqoE=, is the NAR hash
