@@ -1,0 +1,163 @@
+diff --git a/common.c b/common.c
+index cdf66b9..1eaf868 100644
+--- a/common.c
++++ b/common.c
+@@ -358,14 +358,23 @@ uint16_t nextFreeUDPPort() {
+   return UDPPortIndex;
+ }
+ 
+-// if port is zero, pick any port
+-// otherwise, try the given port only
+-int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, uint32_t scope_id,
+-                         uint16_t *port, int *sock) {
++// Bind one socket to the given port, or to any port the kernel chooses if the port is zero.
++// If reuse_address is set, SO_REUSEADDR is set on the socket first.
++// If quiet_if_in_use is set, an EADDRINUSE failure is returned without a warning.
++static int bind_socket_and_port_once(int type, int ip_family, const char *self_ip_address,
++                                     uint32_t scope_id, uint16_t *port, int *sock,
++                                     int reuse_address, int quiet_if_in_use) {
+   int ret = 0; // no error
+   int local_socket = socket(ip_family, type, 0);
+   if (local_socket == -1)
+     ret = errno;
++  if ((ret == 0) && (reuse_address != 0)) {
++    int on = 1;
++    if (setsockopt(local_socket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
++      ret = errno;
++      safe_socket_close(&local_socket);
++    }
++  }
+   if (ret == 0) {
+     SOCKADDR myaddr;
+     memset(&myaddr, 0, sizeof(myaddr));
+@@ -389,9 +398,11 @@ int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, u
+     if (ret < 0) {
+       ret = errno;
+       safe_socket_close(&local_socket);
+-      char errorstring[1024];
+-      getErrorText((char *)errorstring, sizeof(errorstring));
+-      warn("error %d: \"%s\". Could not bind a port!", errno, errorstring);
++      if ((ret != EADDRINUSE) || (quiet_if_in_use == 0)) {
++        char errorstring[1024];
++        getErrorText((char *)errorstring, sizeof(errorstring));
++        warn("error %d: \"%s\". Could not bind a port!", ret, errorstring);
++      }
+     } else {
+       uint16_t sport;
+       SOCKADDR local;
+@@ -422,6 +433,47 @@ int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, u
+   return ret;
+ }
+ 
++// If port is non-zero, try the given port only.
++// If port is zero and airplay_2_port_range is zero, pick any port the kernel chooses.
++// If port is zero and airplay_2_port_range is set, pick a free port in the range
++// airplay_2_port_base to airplay_2_port_base + airplay_2_port_range - 1, so that a firewall
++// need only open that range. Only AirPlay 2's own sockets are bound with port zero.
++//
++// The walk starts one place further on at every call, so that ports are reused as late as
++// possible. A TCP port whose earlier connections are still in TIME_WAIT can not be bound again
++// without SO_REUSEADDR for about a minute, so SO_REUSEADDR is set on TCP sockets bound in the
++// range. It is not set on UDP sockets, where on Linux it would let two sockets share one port.
++int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, uint32_t scope_id,
++                         uint16_t *port, int *sock) {
++  if ((*port != 0) || (config.airplay_2_port_range == 0))
++    return bind_socket_and_port_once(type, ip_family, self_ip_address, scope_id, port, sock, 0, 0);
++
++  static unsigned int next_offset = 0;
++  unsigned int start = __atomic_fetch_add(&next_offset, 1, __ATOMIC_RELAXED);
++  int reuse_address = (type == SOCK_STREAM) ? 1 : 0;
++  int ret = EADDRINUSE;
++  int tries;
++  for (tries = 0; tries < config.airplay_2_port_range; tries++) {
++    // airplay_2_port_base + airplay_2_port_range - 1 <= 65535 is checked when the settings
++    // are read, so the sum fits.
++    unsigned int offset = (start + (unsigned int)tries) % (unsigned int)config.airplay_2_port_range;
++    uint16_t candidate = (uint16_t)((unsigned int)config.airplay_2_port_base + offset);
++    ret = bind_socket_and_port_once(type, ip_family, self_ip_address, scope_id, &candidate, sock,
++                                    reuse_address, 1);
++    if (ret == 0) {
++      *port = candidate;
++      return 0;
++    }
++    if (ret != EADDRINUSE)
++      return ret;
++  }
++  warn("Could not find a free %s port between %d and %d. Check that airplay_2_port_range is large "
++       "enough.",
++       (type == SOCK_STREAM) ? "TCP" : "UDP", config.airplay_2_port_base,
++       config.airplay_2_port_base + config.airplay_2_port_range - 1);
++  return ret;
++}
++
+ uint16_t bind_UDP_port(int ip_family, const char *self_ip_address, uint32_t scope_id, int *sock) {
+   // look for a port in the range, if any was specified.
+   int ret = 0;
+diff --git a/common.h b/common.h
+index bfa6638..b388873 100644
+--- a/common.h
++++ b/common.h
+@@ -251,6 +251,8 @@ typedef struct {
+   int port;
+   int udp_port_base;
+   int udp_port_range;
++  int airplay_2_port_base;  // first port of the range AirPlay 2's own sockets are bound in
++  int airplay_2_port_range; // number of ports in that range; 0 lets the kernel choose any port
+   int ignore_volume_control;
+   int volume_max_db_set; // set to 1 if a maximum volume db has been set
+   int volume_max_db;
+diff --git a/shairport.c b/shairport.c
+index 7a06caa..265045c 100644
+--- a/shairport.c
++++ b/shairport.c
+@@ -760,6 +760,32 @@ int parse_options(int argc, char **argv) {
+           config.udp_port_range = value;
+       }
+ 
++      /* Get the AirPlay 2 port base and range settings. AirPlay 2's event, control and audio
++       * sockets are bound in this range, on TCP and UDP alike, rather than wherever the kernel
++       * chooses. A range of 0, the default, leaves the choice to the kernel. */
++      if (config_lookup_int(config.cfg, "general.airplay_2_port_base", &value)) {
++        if ((value < 1) || (value > 65535))
++          die("Invalid airplay_2_port_base \"%d\". It should be between 1 and 65535.", value);
++        else
++          config.airplay_2_port_base = value;
++      }
++
++      if (config_lookup_int(config.cfg, "general.airplay_2_port_range", &value)) {
++        if ((value < 0) || (value > 65535))
++          die("Invalid airplay_2_port_range \"%d\". It should be between 0 and 65535, default is "
++              "0.",
++              value);
++        else
++          config.airplay_2_port_range = value;
++      }
++
++      if ((config.airplay_2_port_range != 0) &&
++          ((config.airplay_2_port_base == 0) ||
++           (config.airplay_2_port_base + config.airplay_2_port_range - 1 > 65535)))
++        die("airplay_2_port_base \"%d\" and airplay_2_port_range \"%d\" do not describe a range "
++            "of ports between 1 and 65535.",
++            config.airplay_2_port_base, config.airplay_2_port_range);
++
+       /* Get the password setting. */
+       if (config_lookup_non_empty_string(config.cfg, "general.password", &str))
+         config.password = (char *)str;
+@@ -2812,6 +2838,8 @@ int main(int argc, char **argv) {
+   config.audio_decoded_buffer_desired_length = 0.75; // seconds
+   config.udp_port_base = 6001;
+   config.udp_port_range = 10;
++  config.airplay_2_port_base = 0;
++  config.airplay_2_port_range = 0; // the kernel chooses AirPlay 2's ports
+ 
+   config.current_output_configuration = 0; // no output configuration selected...
+ 
+@@ -3431,6 +3459,8 @@ int main(int argc, char **argv) {
+   debug(option_print_level, "rtsp listening port is %d.", config.port);
+   debug(option_print_level, "udp base port is %d.", config.udp_port_base);
+   debug(option_print_level, "udp port range is %d.", config.udp_port_range);
++  debug(option_print_level, "airplay 2 port base is %d.", config.airplay_2_port_base);
++  debug(option_print_level, "airplay 2 port range is %d.", config.airplay_2_port_range);
+   debug(option_print_level, "player name is \"%s\".", config.service_name);
+   debug(option_print_level, "run_this_before_play_begins action is \"%s\".",
+         strnull(config.cmd_start));
