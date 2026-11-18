@@ -2,3 +2,4 @@ result
 result-*
 .spago
 output
+packages/nixtune-room/dist-newstyle/*
