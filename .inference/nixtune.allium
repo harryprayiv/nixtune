@@ -32,7 +32,8 @@
 --                               github:harryprayiv/nixtune.
 --                               nix/module/{default,hardware,mpd,library,
 --                               database,volume,art,ui,youtube,airplay,
---                               upnp}.nix,
+--                               upnp,multiroom}.nix, nix/module/cards.nix
+--                               (data, not a module), nix/raspberry-pi.nix,
 --                               packages/upmpdcli.nix,
 --                               packages/nixtune-web/, LICENSE (AGPLv3),
 --                               .github/workflows/check.yml,
@@ -63,19 +64,36 @@
 --     nixosModules.default      ./nix/module (also nixosModules.nixtune).
 --                               Brings its own packages, built with the
 --                               importing host's pkgs; no overlay.
+--     nixosModules.raspberry-pi-02, -3, -4, -5
+--                               the Raspberry Pi layer (decision 31),
+--                               nix/raspberry-pi.nix over the input
+--                               nixos-raspberrypi
+--     nixosModules.sd-image     nixos-raspberrypi's SD image module
 --     packages.<sys>.nixtune-web   the page
 --     packages.<sys>.upmpdcli      unbuilt (KnownIssue upmpdcli_unbuilt)
+--     packages.<sys>.shairport-sync
+--                               nixpkgs' shairport-sync-airplay2 with
+--                               airplay-2-port-range.patch (decision 35)
 --     checks.<sys>.nixtune-web     the page build
+--     checks.<sys>.shairport-sync  the patched build
 --     checks.x86_64-linux.rehearsal
 --                               toplevel of a QEMU-shaped host with
 --                               hardware.board = "other",
 --                               hardware.audio = "none" and one station
+--     checks.x86_64-linux.rehearsal-airplay
+--                               the same with a USB DAC and AirPlay 2
+--     checks.x86_64-linux.pi5-dac2hd-nixos-hardware
+--                               the reference player on nixos-hardware,
+--                               evaluated and not built (decision 38)
+--     checks.aarch64-linux.{pi5-dac2hd, pi4-amp100, pi400-hdmi,
+--                           pi3-headphones, zero2w-dacplus-zero}
+--                               toplevel of one Pi per board on
+--                               nixosModules.raspberry-pi-*
 --     devShells.<sys>.default, formatter.<sys> (nixfmt)
---   for <sys> in x86_64-linux and aarch64-linux. There is no Pi SD image
---   output, no example host, no overlay and no pi5-sd module in this
---   flake, and the README rewritten on the youtube branch says so
---   (KnownIssue readme_stale, closed). The Pi's boot path and image come
---   from the fleet.
+--   for <sys> in x86_64-linux and aarch64-linux. There is no example host
+--   and no overlay for the module. Since 2026-11-11 the Pi's boot path
+--   and image can come from this flake (decision 31); the fleet's nixtune
+--   row still takes them from nixos-hardware until it is moved.
 --
 --   The library, measured 2026-10-30 and 2026-10-31: about 75.8k songs,
 --   roughly 55k MP3 and 18.5k FLAC, a quarter lossless. No cover files
@@ -116,6 +134,19 @@
 --   nixpkgs, to a system derivation, with each refused combination
 --   refused; only pi5 with dac2hd has run on hardware. KnownIssue
 --   hardware_unverified.
+--
+--   Compared with hifiberry-nixos, 2026-11-11, on multiroom-canonical
+--   (ad8c391): the Raspberry Pi layer moved to nixos-raspberrypi
+--   (decision 31), the HiFiBerry cards became one output named by
+--   product (decision 32), AirPlay became AirPlay 2 by default (decision
+--   33), and CI was rewritten (decision 34). hardware.board gained
+--   zero2w and pi400, which closes KnownIssue pi400_and_zero2w_jack.
+--   Every board on the new layer was evaluated to a system against
+--   nixos-raspberrypi 295ad11 (kernel 6.18.59, its nixpkgs c56a87d,
+--   nixos-26.05) and nixtune's nixpkgs 1c89083; nothing on it has
+--   booted. The nixos-hardware path was evaluated against nixos-hardware
+--   master of the same day. KnownIssues raspberrypi_layer_unbooted,
+--   hifiberry_cards_unverified.
 --
 --   Lessons that cost a night, written down so they are not paid twice:
 --     - nixpkgs' online first-boot resize of the ext4 root corrupted
@@ -441,11 +472,156 @@
 --      have fails evaluation with a message saying why. 32-bit boards
 --      are not supported: nixpkgs has no binary cache for armv6l or
 --      armv7l, so a Pi Zero, Zero W, 1 or 2 would compile everything,
---      and nixos-hardware's Pi kernels for this stack are aarch64.
+--      and both Pi layers' kernels for this stack are aarch64.
+--
+-- Decisions taken 2026-11-11, from the hifiberry-nixos comparison:
+--
+--  31. THE PI LAYER IS NIXOS-RASPBERRYPI, BEHIND NIXTUNE'S OWN MODULES.
+--      nixosModules.raspberry-pi-02, -3, -4 and -5 import
+--      nixos-raspberrypi's board module, its overlays and its
+--      trusted-nix-caches, pass the flake in as the module argument its
+--      board modules read (_module.args, since a host built with
+--      nixpkgs.lib.nixosSystem has no specialArgs for it), and set
+--      hardware.board with mkDefault. The reason is the binary cache: the
+--      board modules take the kernel and firmware from that flake's own
+--      package set, built with its own pinned nixpkgs, so
+--      nixos-raspberrypi.cachix.org holds them whatever nixpkgs the host
+--      follows, and a Pi build stops costing hours of kernel compile. The
+--      flake input's nixpkgs is deliberately not made to follow
+--      nixtune's.
+--      Two consequences. First, nixos-unstable's modules read
+--      kernel.target and kernel.buildDTBs, which 26.05's kernel builder
+--      does not set, and nixos-raspberrypi's own loader reads
+--      kernel.target on any release from 26.11; nix/raspberry-pi.nix adds
+--      both as plain attributes and wraps kernel.override to keep them,
+--      which changes no derivation (the host's kernel drvPath equals
+--      nixos-raspberrypi.packages.aarch64-linux.linuxPackages_rpi5's,
+--      checked). The shim steps aside for a kernel that already has
+--      target. KnownIssue kernel_attribute_shim. Second, the Pi 5's
+--      bootloader is set to nixos-raspberrypi's generational "kernel"
+--      loader with mkOverride 900, because its default, "kernelboot", is
+--      deprecated and warns at every evaluation.
+--      On this layer an overlay is a config.txt entry only
+--      (hardware.raspberry-pi.config.all.dt-overlays). The Pi 5 boots the
+--      kernel straight from the firmware; the Zero 2 W, 3 and 4 chainload
+--      U-Boot, which takes the firmware's tree because nixos-raspberrypi
+--      leaves useGenerationDeviceTree off for U-Boot. The build-time copy
+--      onto the generation's DTB is not written, because the "kernel"
+--      loader installs the generation's own DTBs and the firmware would
+--      apply the overlay a second time.
+--      nixos-hardware stays supported: hardware.nix recognises each
+--      layer by the options it declares (hardware.raspberry-pi.config
+--      for nixos-raspberrypi, hardware.raspberry-pi.configtxt for
+--      nixos-hardware) and writes to whichever is there. A running
+--      player moves between them only on a new card, since
+--      nixos-raspberrypi keeps every generation's kernel, initrd and
+--      device trees on a 1 GB firmware partition that nixpkgs' generic
+--      image makes 30 MB.
+--      Considered and not taken (decision 37): following
+--      nixos-raspberrypi's nixpkgs (26.05) on Pi hosts, as hifiberry-nixos
+--      does. It keeps the cache without a shim, and puts the Pi rows on a
+--      different nixpkgs from the rest of the fleet.
+--
+--  32. HIFIBERRY CARDS ARE ONE OUTPUT, NAMED BY PRODUCT. hardware.audio
+--      = "hifiberry" with hardware.hifiberry naming the board as sold
+--      ("dacplus-pro", "amp100", "digi2-pro"). nix/module/cards.nix maps
+--      each to its overlay, overlay parameters, mixer control, whether
+--      MPD converts, and whether it runs only on a Pi 5; every card is
+--      ALSA card sndrpihifiberry. The facts are read from the Raspberry
+--      Pi kernel, rpi-6.18.y: the overlays and their README, the machine
+--      drivers' card names and sound/core/init.c's id rule, and the codec
+--      drivers' control names. hifiberry-nixos's README table gives
+--      Amp100 the parameter automute; the overlay defines auto_mute, and
+--      that is what is written. hardware.card.mixer
+--      replaces a card's control and hardware.card.convert = true forces
+--      conversion, for a card that turns out to differ. audio = "dac2hd"
+--      stays as the same output, so existing hosts are unchanged.
+--      Considered and not taken: hifiberry-nixos's detection at boot,
+--      which reads the HAT EEPROM, writes /boot/firmware/hifiberry.txt
+--      and reboots. It is runtime configuration that rewrites /boot,
+--      which decision 1 refuses. A HAT whose EEPROM names its overlay
+--      already works as audio = "hat" with card.overlay = null.
+--      On every Pi output but the headphone jack the onboard analog
+--      audio is off: dtparam=audio=off in config.txt and snd_bcm2835
+--      blacklisted, so /proc/asound/cards lists only the card that plays.
+--
+--  33. AIRPLAY 2 BY DEFAULT. renderers.airplay.version (2, or 1 for the
+--      classic build) picks nixpkgs' shairport-sync-airplay2 or
+--      shairport-sync. With 2, NQPTP runs beside it as upstream's unit
+--      does (DynamicUser, CAP_NET_BIND_SERVICE only, LimitRTPRIO 6),
+--      ordered before shairport-sync. The ports it opens are decision
+--      35's. AirPlay carries 44.1 or 48 kHz either way and is never the
+--      bit-perfect path.
+--
+--  34. CI IS `nix flake check` ON BOTH ARCHITECTURES. One job on an
+--      x86_64 runner, with /dev/kvm opened and kvm in system-features
+--      so the two-room VM test builds; one on an aarch64 runner trusting
+--      nixos-raspberrypi.cachix.org, which builds one Pi system per
+--      board. The workflow names no output, so it cannot drift from the
+--      flake again.
+--
+-- Decisions taken 2026-11-12:
+--
+--  35. AIRPLAY 2'S STREAM PORTS ARE A FIXED RANGE, BY A PATCH. Upstream
+--      shairport-sync binds AirPlay 2's event, control, realtime audio,
+--      buffered audio and remote-control data sockets to port 0 (rtsp.c,
+--      six calls to bind_socket_and_port, all under CONFIG_AIRPLAY_2), so
+--      the kernel picks them from 32768 to 60999 and a firewall must open
+--      that range, which exposes every other ephemeral listener on the
+--      host. Upstream's development branch had no setting for it as of
+--      2026-11-10. packages/shairport-sync applies
+--      airplay-2-port-range.patch to nixpkgs' shairport-sync-airplay2: two
+--      settings in the general section, airplay_2_port_base and
+--      airplay_2_port_range (default 0, upstream's behaviour). With a
+--      range, a port-0 bind walks the range from one place further on at
+--      every call, sets SO_REUSEADDR on TCP sockets so a port with
+--      connections in TIME_WAIT can be rebound, never on UDP sockets
+--      (where it would let two sockets share a port), and returns
+--      EADDRINUSE with a warning when the range is full, which the callers
+--      already treat as fatal. airplay.nix sets 6200 and 32: below the
+--      ephemeral range, so the kernel never hands those ports to anyone
+--      else, and clear of classic AirPlay's UDP 6001 to 6011 and MPD.
+--      Version 2 opens TCP 7000, UDP 319 and 320, UDP 6001 to 6011 (the
+--      AirPlay 2 build serves classic AirPlay on 7000 too, and a classic
+--      session's streams take those ports through bind_UDP_port), and TCP
+--      and UDP 6200 to 6231. It does not use the NixOS module's
+--      openFirewall, whose TCP 5000 it has no use for. Version 1 is
+--      nixpkgs' classic build, unpatched, with openFirewall.
+--      The patch applies to 5.6.2, whose tag is byte for byte the source
+--      nixpkgs fetches (NAR hash checked), and to upstream's development
+--      branch at e8f3217. Whether to offer it upstream is Harry's call.
+--      Considered and not taken: an LD_PRELOAD shim setting
+--      IP_LOCAL_PORT_RANGE on shairport-sync's sockets, which the kernel
+--      only lets narrow inside the system's ephemeral range
+--      (inet_sk_get_local_port_range), so other programs could still land
+--      in it; an nftables set of hosts that recently reached TCP 7000,
+--      which stops a scan and not a LAN host that connects to 7000 first;
+--      a rule on shairport-sync's cgroup (socket cgroupv2), which nft
+--      resolves when the ruleset loads, before the service exists.
+--
+--  36. THE AIRPLAY PORTS ARE OPEN ON EVERY INTERFACE. AirPlay discovery
+--      works only on the LAN, and per-interface names differ by board
+--      (end0, eth0, wlan0). A per-interface option waits until a player
+--      has a VPN or other non-LAN interface.
+--
+--  37. THE KERNEL ATTRIBUTE SHIM STAYS (decision 31). The fleet keeps one
+--      nixpkgs; Pi hosts do not follow nixos-raspberrypi's 26.05.
+--
+--  38. BOTH PI LAYERS STAY SUPPORTED, AND CI EVALUATES THE OLD ONE. The
+--      flake has a nixos-hardware input used by one check only,
+--      checks.x86_64-linux.pi5-dac2hd-nixos-hardware: the reference
+--      player on nixos-hardware's raspberry-pi-5 module, as the README's
+--      "With nixos-hardware instead" declares it, written to a text file
+--      as its derivation path with unsafeDiscardOutputDependency, so the
+--      check depends on the .drv and not on its outputs and building it
+--      compiles nothing. It catches option and assertion breakage on that
+--      path, not build breakage; building it would compile nixos-hardware's
+--      uncached kernel on every bump.
 --
 -- Earlier decisions still in force: AirPlay on, UPnP off until upmpdcli
--- builds, SD card on oracle's boot path, hardware facts from the
--- datasheet and the kernel source.
+-- builds, hardware facts from the datasheet and the kernel source. "SD
+-- card on oracle's boot path" holds for the fleet's row until it moves to
+-- decision 31's layer.
 
 ------------------------------------------------------------
 -- Given
@@ -570,9 +746,11 @@ contract PlayerModule {
 
     @invariant FleetAgnostic
         -- The module references only nixpkgs' option tree, its own
-        -- services.nixtune.*, and, when present, nixos-hardware's
-        -- hardware.raspberry-pi.* (guarded with optionalAttrs, so a host
-        -- without nixos-hardware evaluates).
+        -- services.nixtune.*, and, when present, nixos-raspberrypi's or
+        -- nixos-hardware's hardware.raspberry-pi.* (each guarded with
+        -- optionalAttrs on the options it declares, so a host with
+        -- neither evaluates). The raspberry-pi modules are separate
+        -- outputs a host imports or does not.
 
     @invariant BuildTimeValidation
         -- The NixOS mpd module validates mpd.conf by running mpd on it at
@@ -582,18 +760,24 @@ contract PlayerModule {
     @guidance
         -- Options as implemented at 1ad560b:
         --   enable
-        --   hardware.board              "pi5" (default) | "pi4" | "pi3" |
-        --                               "other"
-        --   hardware.audio              "dac2hd" (default) | "headphones" |
-        --                               "hdmi" | "usb" | "hat" | "none"
+        --   hardware.board              "pi5" (default) | "pi400" | "pi4" |
+        --                               "pi3" | "zero2w" | "other"; set with
+        --                               mkDefault by nixosModules.
+        --                               raspberry-pi-*
+        --   hardware.audio              "dac2hd" (default) | "hifiberry" |
+        --                               "headphones" | "hdmi" | "usb" |
+        --                               "hat" | "none"
+        --   hardware.hifiberry          null (default) | a card name from
+        --                               cards.nix, for hifiberry
         --   hardware.hdmiPort           0 (default) | 1, for audio = hdmi
         --   hardware.card.id            ALSA card id, for usb and hat
         --   hardware.card.mixer         control name or null (software
-        --                               volume); for headphones, the
-        --                               control if not "PCM"
+        --                               volume); for headphones and
+        --                               hifiberry, the control if not the
+        --                               expected one
         --   hardware.card.overlay       device tree overlay, for hat
-        --   hardware.card.convert       false; let MPD convert, for usb
-        --                               and hat
+        --   hardware.card.convert       false; let MPD convert, for usb,
+        --                               hat and hifiberry
         --   hardware.profile            null (default) | "pi5-dac2hd" |
         --                               "none"; the earlier single option,
         --                               setting board and audio with
@@ -627,6 +811,7 @@ contract PlayerModule {
         --   youtube.maxPlaylistItems    50, between 1 and 500
         --   arbitration.resumeAfterRenderer   true
         --   renderers.airplay.{enable,name}
+        --   renderers.airplay.version   2 (default) | 1
         --   renderers.upnp.{enable,friendlyName,package}
         --   persistPaths (merged), output.{kind,card,device,mixer,
         --   convert} (internal, set by hardware.nix)
@@ -854,15 +1039,16 @@ enum ReleaseStep {
 -- Entities and Variants
 ------------------------------------------------------------
 
--- The computer (decision 30). One value per nixos-hardware Raspberry Pi
--- module, plus other for anything that is not a Pi.
+-- The computer (decision 30). One value per Raspberry Pi board nixtune
+-- distinguishes, plus other for anything that is not a Pi.
 entity Board {
-    kind: pi3 | pi4 | pi5 | other
+    kind: zero2w | pi3 | pi4 | pi400 | pi5 | other
     models: String
     soc: String?
     raspberry_pi: Boolean
     headphone_jack: Boolean
     hdmi_ports: Integer
+    nixtune_module: String?
     nixos_hardware_module: String?
     builds_on_device: Boolean
 
@@ -871,10 +1057,12 @@ entity Board {
         -- rewritten to (hardware.nix), because nixpkgs applies an overlay
         -- only to a DTB it shares a compatible string with, and every
         -- HiFiBerry overlay is shipped as brcm,bcm2835.
-        -- headphone_jack is per board kind, and two models of a kind
-        -- lack one: the Pi 400 (pi4) and the Zero 2 W (pi3). The
-        -- assertion cannot tell them apart; the option description and
-        -- the README say so.
+        -- nixtune_module is the flake's nixosModules.<name> for decision
+        -- 31's layer; nixos_hardware_module is the nixos-hardware module
+        -- for the other one.
+        -- headphone_jack is per board kind. The Compute Module 4 (pi4)
+        -- has no jack and the assertion cannot tell it from a Pi 4 B
+        -- (KnownIssue cm4_jack).
         -- builds_on_device: a Pi 4 or 5 with 4 GB or more can run the
         -- deploy's build itself (the reference Pi 5 does, with
         -- max-jobs 2 and cores 2). Anything smaller is deployed with
@@ -883,9 +1071,10 @@ entity Board {
 
 -- Where the sound leaves the computer (decision 30).
 entity AudioOutput {
-    kind: dac2hd | headphones | hdmi | usb | hat | none
+    kind: dac2hd | hifiberry | headphones | hdmi | usb | hat | none
     alsa: alsa | null
     overlay: String?
+    overlay_params: Set<String>
     card: String?
     device: String?
     mixer_control: String?
@@ -912,10 +1101,27 @@ entity AudioOutput {
         -- false only on the DAC2 HD.
 }
 
+-- A HiFiBerry card by product (decision 32): one row of cards.nix.
+entity HifiberryCard {
+    name: String
+    products: String
+    overlay: String
+    overlay_params: Set<String>
+    mixer_control: String?
+    converts: Boolean
+    pi5_only: Boolean
+
+    @guidance
+        -- card is always sndrpihifiberry, so it is not a field.
+        -- cards.nix is the full table; the defaults below are the two
+        -- the checks build and the one with a parameter.
+}
+
 -- The pair a host declares. HostDeclaration.hardware.
 entity HardwareProfile {
     board: Board
     output: AudioOutput
+    hifiberry_card: HifiberryCard?
     hdmi_port: Integer
     card_id: String?
     card_mixer: String?
@@ -945,17 +1151,36 @@ entity HardwareProfile {
         output.kind in {usb, hat} implies card_id != null
     }
 
-    invariant KmsOnlyForHdmi {
-        -- config.txt's [all] overlays are the output's overlay, if any,
-        -- and vc4-kms-v3d only when needs_kms. This replaces
-        -- nixos-hardware's default [all] list, which is vc4-kms-v3d.
+    invariant HifiberryCardsAreNamed {
+        -- An assertion in hardware.nix.
+        output.kind = hifiberry implies hifiberry_card != null
+    }
+
+    invariant Pi5OnlyCardsOnAPi5 {
+        -- An assertion in hardware.nix: the DAC8x.
+        hifiberry_card != null and hifiberry_card.pi5_only implies board.kind = pi5
+    }
+
+    invariant HdmiAudioOnlyForHdmi {
+        -- On nixos-hardware, config.txt's [all] overlays are the output's
+        -- overlay, if any, and vc4-kms-v3d only when needs_kms; this
+        -- replaces nixos-hardware's default [all] list, which is
+        -- vc4-kms-v3d. On nixos-raspberrypi, which keeps vc4-kms-v3d on,
+        -- every output but hdmi sets its noaudio parameter.
         output.needs_kms = (output.kind = hdmi)
+    }
+
+    invariant OnboardAudioOnlyForTheJack {
+        -- dtparam=audio=off and snd_bcm2835 blacklisted on every Pi
+        -- output but headphones (decision 32).
+        board.raspberry_pi and output.kind != headphones implies OnboardAudioOff(board)
     }
 
     @guidance
         -- name is the string capabilities.json carries as
-        -- hardware.profile: "pi5-dac2hd", "pi4-headphones", "other-usb".
-        -- The page decodes it and does not use it.
+        -- hardware.profile: "pi5-dac2hd", "pi4-headphones", "other-usb",
+        -- "pi4-hifiberry". It does not name the HiFiBerry card. The page
+        -- decodes it and does not use it.
 }
 
 entity HostDeclaration {
@@ -1194,6 +1419,15 @@ config {
     youtube_index_retries: Integer = 18
     youtube_index_retry_every: Duration = 5.seconds
     upnp_port: Integer = 49152
+    airplay_classic_port: Integer = 5000
+    airplay2_port: Integer = 7000
+    ptp_event_port: Integer = 319
+    ptp_general_port: Integer = 320
+    nqptp_control_port: Integer = 9000
+    airplay_classic_udp_first: Integer = 6001
+    airplay_classic_udp_last: Integer = 6011
+    airplay2_stream_port_base: Integer = 6200
+    airplay2_stream_port_range: Integer = 32
     max_volume: Integer = 100
     max_output_buffer_kb: Integer = 32768
     rescan_after_boot: Duration = 2.minutes
@@ -1214,24 +1448,50 @@ config {
 -- Defaults
 ------------------------------------------------------------
 
+default Board zero2w = {
+    kind: zero2w,
+    models: "Raspberry Pi Zero 2 W",
+    soc: "brcm,bcm2837",
+    raspberry_pi: true,
+    headphone_jack: false,
+    hdmi_ports: 1,
+    nixtune_module: "raspberry-pi-02",
+    nixos_hardware_module: "raspberry-pi-3",
+    builds_on_device: false
+}
+
 default Board pi3 = {
     kind: pi3,
-    models: "Raspberry Pi 3 B, 3 B+, 3 A+, Zero 2 W",
+    models: "Raspberry Pi 3 B, 3 B+, 3 A+",
     soc: "brcm,bcm2837",
     raspberry_pi: true,
     headphone_jack: true,
     hdmi_ports: 1,
+    nixtune_module: "raspberry-pi-3",
     nixos_hardware_module: "raspberry-pi-3",
     builds_on_device: false
 }
 
 default Board pi4 = {
     kind: pi4,
-    models: "Raspberry Pi 4 B, 400, Compute Module 4",
+    models: "Raspberry Pi 4 B, Compute Module 4",
     soc: "brcm,bcm2711",
     raspberry_pi: true,
     headphone_jack: true,
     hdmi_ports: 2,
+    nixtune_module: "raspberry-pi-4",
+    nixos_hardware_module: "raspberry-pi-4",
+    builds_on_device: true
+}
+
+default Board pi400 = {
+    kind: pi400,
+    models: "Raspberry Pi 400",
+    soc: "brcm,bcm2711",
+    raspberry_pi: true,
+    headphone_jack: false,
+    hdmi_ports: 2,
+    nixtune_module: "raspberry-pi-4",
     nixos_hardware_module: "raspberry-pi-4",
     builds_on_device: true
 }
@@ -1243,6 +1503,7 @@ default Board pi5 = {
     raspberry_pi: true,
     headphone_jack: false,
     hdmi_ports: 2,
+    nixtune_module: "raspberry-pi-5",
     nixos_hardware_module: "raspberry-pi-5",
     builds_on_device: true
 }
@@ -1254,6 +1515,7 @@ default Board other = {
     raspberry_pi: false,
     headphone_jack: false,
     hdmi_ports: 0,
+    nixtune_module: null,
     nixos_hardware_module: null,
     builds_on_device: true
 }
@@ -1262,6 +1524,7 @@ default AudioOutput dac2hd = {
     kind: dac2hd,
     alsa: alsa,
     overlay: "hifiberry-dacplushd",
+    overlay_params: {},
     card: "sndrpihifiberry",
     device: "hw:CARD=sndrpihifiberry,DEV=0",
     mixer_control: "DAC",
@@ -1275,6 +1538,7 @@ default AudioOutput headphones = {
     kind: headphones,
     alsa: alsa,
     overlay: null,
+    overlay_params: {},
     card: "Headphones",
     device: "hw:CARD=Headphones,DEV=0",
     mixer_control: "PCM",
@@ -1288,6 +1552,7 @@ default AudioOutput hdmi = {
     kind: hdmi,
     alsa: alsa,
     overlay: null,
+    overlay_params: {},
     card: "vc4hdmi0",
     device: "hdmi:CARD=vc4hdmi0,DEV=0,AES0=0x04,AES1=0x82,AES2=0x00,AES3=0x01",
     mixer_control: null,
@@ -1297,6 +1562,23 @@ default AudioOutput hdmi = {
     mpd_can_write_mixer: true
 }
 
+-- overlay, overlay_params, mixer_control and converts come from the
+-- profile's hifiberry_card; card_mixer replaces the control when set and
+-- card_convert = true forces conversion.
+default AudioOutput hifiberry = {
+    kind: hifiberry,
+    alsa: alsa,
+    overlay: null,
+    overlay_params: {},
+    card: "sndrpihifiberry",
+    device: "hw:CARD=sndrpihifiberry,DEV=0",
+    mixer_control: null,
+    converts: false,
+    needs_kms: false,
+    needs_raspberry_pi: true,
+    mpd_can_write_mixer: false
+}
+
 -- card, device, mixer_control and converts come from the profile's
 -- card_id, card_mixer and card_convert; device is
 -- hw:CARD=<card_id>,DEV=0.
@@ -1304,6 +1586,7 @@ default AudioOutput usb = {
     kind: usb,
     alsa: alsa,
     overlay: null,
+    overlay_params: {},
     card: null,
     device: null,
     mixer_control: null,
@@ -1318,6 +1601,7 @@ default AudioOutput hat = {
     kind: hat,
     alsa: alsa,
     overlay: null,
+    overlay_params: {},
     card: null,
     device: null,
     mixer_control: null,
@@ -1331,6 +1615,7 @@ default AudioOutput none = {
     kind: none,
     alsa: null,
     overlay: null,
+    overlay_params: {},
     card: null,
     device: null,
     mixer_control: null,
@@ -1340,10 +1625,41 @@ default AudioOutput none = {
     mpd_can_write_mixer: true
 }
 
+default HifiberryCard dac2hd_card = {
+    name: "dac2hd",
+    products: "DAC2 HD",
+    overlay: "hifiberry-dacplushd",
+    overlay_params: {},
+    mixer_control: "DAC",
+    converts: false,
+    pi5_only: false
+}
+
+default HifiberryCard amp100_card = {
+    name: "amp100",
+    products: "Amp100",
+    overlay: "hifiberry-amp100",
+    overlay_params: {"auto_mute"},
+    mixer_control: "Digital",
+    converts: false,
+    pi5_only: false
+}
+
+default HifiberryCard dacplus_zero_card = {
+    name: "dacplus-zero",
+    products: "DAC+ Light, DAC+ Zero, MiniAmp, Beocreate",
+    overlay: "hifiberry-dac",
+    overlay_params: {},
+    mixer_control: null,
+    converts: false,
+    pi5_only: false
+}
+
 -- The reference player, and the only pair run on hardware.
 default HardwareProfile pi5_dac2hd = {
     board: pi5,
     output: dac2hd,
+    hifiberry_card: null,
     hdmi_port: 0,
     card_id: null,
     card_mixer: null,
@@ -1355,6 +1671,7 @@ default HardwareProfile pi5_dac2hd = {
 default HardwareProfile other_none = {
     board: other,
     output: none,
+    hifiberry_card: null,
     hdmi_port: 0,
     card_id: null,
     card_mixer: null,
@@ -1366,6 +1683,20 @@ default HardwareProfile other_none = {
 default HardwareProfile pi4_headphones = {
     board: pi4,
     output: headphones,
+    hifiberry_card: null,
+    hdmi_port: 0,
+    card_id: null,
+    card_mixer: null,
+    card_overlay: null,
+    card_convert: false
+}
+
+-- checks.aarch64-linux.pi4-amp100: a card from the table with an overlay
+-- parameter, on decision 31's layer.
+default HardwareProfile pi4_amp100 = {
+    board: pi4,
+    output: hifiberry,
+    hifiberry_card: amp100_card,
     hdmi_port: 0,
     card_id: null,
     card_mixer: null,
@@ -1454,9 +1785,65 @@ default KnownIssue hdmi_needs_a_sink = {
 default KnownIssue pi400_and_zero2w_jack = {
     repo: nixtune,
     name: "the jack assertion is per board kind, and two models of a kind have no jack",
+    status: closed,
+    effect: "was: audio = headphones evaluated for a Pi 400 (pi4) and a Zero 2 W (pi3), which have no 3.5 mm jack",
+    closes_when: "closed 2026-11-11: hardware.board has pi400 and zero2w, neither with a jack, and the assertion refuses headphones on both (evaluated)"
+}
+
+default KnownIssue cm4_jack = {
+    repo: nixtune,
+    name: "pi4 covers the Compute Module 4, which has no jack",
     status: open,
-    effect: "audio = headphones evaluates for a Pi 400 (pi4) and a Zero 2 W (pi3), which have no 3.5 mm jack; there is then no Headphones card and MPD's output fails to open",
-    closes_when: "hardware.board grows pi400 and zero2w, or the README and the option description are judged enough (they say it today)"
+    effect: "audio = headphones evaluates for a Compute Module 4; there is then no Headphones card and MPD's output fails to open. The option description says so",
+    closes_when: "hardware.board grows cm4, or the description is judged enough"
+}
+
+default KnownIssue raspberrypi_layer_unbooted = {
+    repo: nixtune,
+    name: "nixosModules.raspberry-pi-* have been evaluated, not booted",
+    status: open,
+    effect: "every board on decision 31's layer evaluates to a system and its kernel is the cached one, but no card has been written from nixosModules.sd-image and booted, so the generational loader, config.txt as nixos-raspberrypi renders it, the noaudio parameter and the blacklist are unproven on hardware. The fleet's nixtune row still boots through nixos-hardware",
+    closes_when: "a card built from nixosModules.raspberry-pi-5 and nixosModules.sd-image has booted a Pi 5, played through the DAC2 HD, survived a switch to a second generation and a rollback, and this file records the nixos-raspberrypi revision"
+}
+
+default KnownIssue kernel_attribute_shim = {
+    repo: nixtune,
+    name: "nixos-raspberrypi's 26.05 kernels lack attributes nixos-unstable reads",
+    status: open,
+    effect: "without nix/raspberry-pi.nix's withKernelAttrs a host on nixos-unstable fails to evaluate (buildDTBs, then target missing). The shim is a compatibility layer between two nixpkgs releases that nixtune now carries",
+    closes_when: "nixos-raspberrypi builds its kernels with a nixpkgs that sets kernel.target, at which point the shim passes the kernel through untouched and can be deleted"
+}
+
+default KnownIssue hifiberry_cards_unverified = {
+    repo: nixtune,
+    name: "every HiFiBerry card but the DAC2 HD is read from the kernel source, not played",
+    status: open,
+    effect: "cards.nix's overlays, Amp100's auto_mute, the control names (Digital, Master, A.Mstr Vol) and the convert choices for the DAC+ DSP, Amp+ and Amp3 come from rpi-6.18.y's sources; a card that differs shows as a missing control, or as MPD failing to open the output for some files",
+    closes_when: "per card: it has played a FLAC and an MP3 with the volume moved from the page, and this file records the card and kernel; one closes per card"
+}
+
+default KnownIssue airplay2_ephemeral_ports = {
+    repo: nixtune,
+    name: "AirPlay 2 opens the whole ephemeral port range",
+    status: closed,
+    effect: "was: with renderers.airplay.version = 2, TCP and UDP 32768 to 60999 were open to the LAN, exposing every ephemeral listener on the player",
+    closes_when: "closed 2026-11-12 by decision 35: the patched build binds AirPlay 2's stream sockets in 6200 to 6231 and the firewall opens only that range"
+}
+
+default KnownIssue airplay2_port_patch_unstreamed = {
+    repo: nixtune,
+    name: "the AirPlay 2 port patch has not carried a stream",
+    status: open,
+    effect: "airplay-2-port-range.patch builds with no warnings against 5.6.2 on gcc 13, and a test linked against the patched common.o passes on Linux for IPv4: every port of a range handed out once, a full range returning EADDRINUSE, a freed port found again, a port in TIME_WAIT rebound where a plain bind is refused, a UDP port never shared, range 0 leaving the kernel to choose, a fixed port bound as asked. The binary refuses a base and range that leave 1 to 65535. IPv6 was not testable (the build machine has no AF_INET6). No AirPlay 2 sender has connected to it, and no such sender runs in a VM test",
+    closes_when: "an iPhone or Mac has streamed to a player built with it, `ss -tulpn` during the stream shows shairport-sync on 7000 and on ports in 6200 to 6231 only, and a second sender taking over plays without a bind error in the journal"
+}
+
+default KnownIssue airplay2_port_patch_carried = {
+    repo: nixtune,
+    name: "nixtune carries a patch to shairport-sync",
+    status: open,
+    effect: "the AirPlay 2 build is compiled wherever the system is built instead of downloaded, and a shairport-sync release that changes bind_socket_and_port or its settings parsing breaks checks.<sys>.shairport-sync until the patch is rebased",
+    closes_when: "upstream shairport-sync has a setting that confines AirPlay 2's stream ports, and nixtune uses nixpkgs' build unpatched"
 }
 
 default KnownIssue listall_overruns = {
@@ -1479,8 +1866,8 @@ default KnownIssue ci_broken = {
     repo: nixtune,
     name: "the CI workflow builds outputs the flake does not have",
     status: open,
-    effect: ".github/workflows/check.yml runs `nix build .#web` and `nix build .#checks.x86_64-linux.example-eval`; the flake has packages.<sys>.nixtune-web and checks.x86_64-linux.rehearsal. Every run fails at the second step, so decision 7's loop has no check in it",
-    closes_when: "the workflow builds .#nixtune-web and .#checks.x86_64-linux.rehearsal (or runs `nix flake check` without --no-build, which builds every check), and a run on main passes"
+    effect: "was: .github/workflows/check.yml ran `nix build .#web` and `nix build .#checks.x86_64-linux.example-eval`, which do not exist. Rewritten 2026-11-11 to `nix flake check` on an x86_64 and an aarch64 runner (decision 34); `nix flake check --no-build --all-systems` passes locally, and no run of the workflow has happened yet",
+    closes_when: "a run of the rewritten workflow on main passes on both runners"
 }
 
 default KnownIssue readme_stale = {
@@ -1762,6 +2149,9 @@ rule AirplayAcquiresOutput {
         -- shairport-sync's run_this_before_play_begins, with
         -- wait_for_completion: `mpc status`, and if it says [playing],
         -- touch /run/shairport-sync/nixtune-paused-mpd and `mpc pause`.
+        -- The same hooks for AirPlay 1 and AirPlay 2 (decision 33); with
+        -- 2, nqptp.service is wanted by and ordered before
+        -- shairport-sync.
         -- MPD's close_on_pause frees the card before shairport-sync
         -- opens it. The marker lives in shairport-sync's own
         -- RuntimeDirectory, so nothing survives a reboot.
@@ -1820,10 +2210,9 @@ rule CiChecksUpdateRun {
         run.ci_passed = passed
 
     @guidance
-        -- What CI should run, given the outputs that exist:
-        -- `nix flake check --no-build`, `nix build .#nixtune-web`,
-        -- `nix build .#checks.x86_64-linux.rehearsal`. Today it runs two
-        -- that do not exist (KnownIssue ci_broken).
+        -- `nix flake check --print-build-logs` on ubuntu-latest (KVM
+        -- opened, kvm in system-features) and on ubuntu-24.04-arm
+        -- (nixos-raspberrypi.cachix.org trusted). Decision 34.
 }
 
 rule MaintainerMergesUpdateRun {
@@ -1896,8 +2285,8 @@ invariant ArtNeverServesAudio {
 }
 
 invariant MainIsAlwaysChecked {
-    -- Violated today (KnownIssue ci_broken): no run passes, so nothing
-    -- merged since the workflow last matched the flake was checked.
+    -- Unproven until the rewritten workflow has passed once (KnownIssue
+    -- ci_broken).
     for r in UpdateRuns:
         r.status = merged implies r.ci_passed
 }
@@ -2015,9 +2404,10 @@ surface CommunityFlake {
 
     @guarantee StandaloneUse
         -- Import nixosModules.default and set services.nixtune.*. On a
-        -- Raspberry Pi, also import the nixos-hardware module the board
-        -- names (Board.nixos_hardware_module) and supply a boot path;
-        -- this flake does not provide one.
+        -- Raspberry Pi, also import the board's nixtune module
+        -- (Board.nixtune_module) and, for a card, nixosModules.sd-image;
+        -- or nixos-hardware's module (Board.nixos_hardware_module) with a
+        -- boot path of the host's own.
 
     @guidance
         -- AGPLv3, LICENSE present. No moOde code or name. The README on
@@ -2041,9 +2431,12 @@ surface CommunityFlake {
 --                        mpd.consume is; the AirPlay mixer decision;
 --                        merging the youtube branch to main.
 -- public_release         ci_broken and readme_stale closed, an example
---                        host and a Pi image output in the flake.
--- arbiter_and_renderers  upmpdcli built; Spotify Connect, Squeezelite,
---                        Bluetooth as off-by-default modules.
+--                        host and a Pi image output in the flake. The Pi
+--                        layer and the image module are in (decision 31),
+--                        and the workflow is rewritten (decision 34).
+-- arbiter_and_renderers  upmpdcli built; AirPlay 2 done (decision 33);
+--                        Spotify Connect, Squeezelite, Bluetooth as
+--                        off-by-default modules.
 -- long_tail              the 2026-10-28 wish list: multiroom, HTTP
 --                        stream out, kiosk display, GPIO/rotary, IR, USB
 --                        and SMB sources, favorites, runtime station add,
@@ -2087,7 +2480,10 @@ deferred Nixtune.page               -- see: nixtune-page.allium
 deferred MpdProtocol.apply          -- see: https://mpd.readthedocs.io/en/latest/protocol.html
 deferred MpdProtocol.stickers       -- see: the sticker commands in the same document
 deferred MpdProtocol.crossfade      -- see: crossfade, mixrampdb, mixrampdelay
-deferred Firmware.configtxt         -- see: nixos-hardware raspberry-pi/README.md
+deferred Firmware.configtxt         -- see: nixos-hardware raspberry-pi/README.md, nixos-raspberrypi modules/configtxt-config.nix
+deferred Firmware.raspberrypi_layer -- see: nixos-raspberrypi README.md and modules/system/boot/loader/raspberrypi
+deferred Renderer.nqptp             -- see: nqptp README.md, shairport-sync AIRPLAY2.md and TROUBLESHOOTING.md
+deferred Renderer.airplay2_ports    -- see: packages/shairport-sync/airplay-2-port-range.patch, shairport-sync common.c bind_socket_and_port
 deferred Renderer.airplay           -- see: shairport-sync documentation, sessioncontrol
 deferred Renderer.upnp_renderer     -- see: upmpdcli documentation
 deferred Websocket.bridge           -- see: websocat documentation
@@ -2106,7 +2502,7 @@ open question "How a protocol client such as Home Assistant should set volume on
 open question "Whether shairport-sync's own mixer writes hold on the DAC2 HD, or hit the same dB-path mute MPD's do. airplay.nix gives it the hardware mixer today and nobody has moved the volume from an AirPlay sender and read the control back."
 open question "Whether DSP should be a declared option with a rebuild to change it, or a declared option plus a coefficient file in a persisted path that something on the Pi can write. The second is better to use and is the first crack in decision 1."
 open question "Whether the DJ console is built beside nixtune sharing its library and hardware layer, or whether nixtune's page grows a second mode and the no-backend decision is dropped. The spec assumes the first; nothing has been built either way."
-open question "Whether the Pi image and boot path should move into this flake (an example host and an image output) for public_release, or stay in the fleet with the README telling adopters to bring their own."
+open question "The boot path and the image module are in this flake since decision 31, and both Pi layers stay supported (decision 38). Whether an example host and a built image output should follow for public_release, and when the fleet's nixtune row moves to nixosModules.raspberry-pi-5 (which means a new card, decision 31)."
 open question "Why nixpkgs' online expandOnBoot resize corrupted directory blocks on this card and kernel, and whether it reproduces on a second card."
 open question "Whether the uid = 1034 line in hosts/nixtune.nix is still needed now that the folder's DSM permissions were edited, or whether the edit alone (for example a permission granted to everyone) is what made writes work. One test with the line removed settles it, and the answer decides what KnownIssue youtube_folder_permissions tells a second adopter to do."
 open question "Whether downloads should ever leave youtube.directory on their own, for example a tool that moves a retagged file into the library proper. Today a file stays where it landed, which keeps the helper writing one folder and nothing else."

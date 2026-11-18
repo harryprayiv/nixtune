@@ -146,6 +146,13 @@
 --     client only, marked work in progress). Chosen (M1).
 --   AirPlay 2 (shairport-sync with NQPTP). Grouping is done by the
 --     sender; NQPTP owns UDP 319 and 320. Not a group transport here.
+--     Since 2026-11-11 it is every room's default renderer
+--     (nixtune.allium decision 33), so an iPhone can put several rooms
+--     in one AirPlay 2 session. Each of those rooms handles it as an
+--     ordinary AirPlay interruption (rule InterruptionStarts) for the
+--     length of the stream: a follower is suspended from its group, and
+--     a source's group plays on in its other rooms. Apple's sender, not
+--     nixtune, keeps the AirPlay rooms in time with each other.
 --   Lyrion Music Server with squeezelite. One central server owns every
 --     group. The model this file rejects.
 --   moOde's multiroom. trx multicasting Opus over RTP with no clock sync

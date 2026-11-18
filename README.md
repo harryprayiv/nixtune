@@ -1,6 +1,6 @@
 # nixtune
 
-A network music player for a Raspberry Pi, declared in NixOS. With a DAC, MPD plays to the card through ALSA with hardware volume and nothing else in the chain; a Pi with no DAC plays through its own headphone jack or HDMI, or a USB DAC (see Hardware). AirPlay and UPnP renderers are modules you turn on. A web page served from the Pi speaks the MPD protocol itself over websockets, so there is no application server. There is no settings database and no settings page either: the configuration is the Nix declaration, and changing it means building a new generation, with the previous one a reboot away.
+A network music player for a Raspberry Pi, declared in NixOS. With a DAC, MPD plays to the card through ALSA with hardware volume and nothing else in the chain; every HiFiBerry card can be named by product, and a Pi with no DAC plays through its own headphone jack or HDMI, or a USB DAC (see Hardware). AirPlay 2 and UPnP renderers are modules you turn on. A web page served from the Pi speaks the MPD protocol itself over websockets, so there is no application server. There is no settings database and no settings page either: the configuration is the Nix declaration, and changing it means building a new generation, with the previous one a reboot away.
 
 It does what moOde audio player does for a Pi with a HiFiBerry, with none of moOde's code and none of its runtime configuration machinery.
 
@@ -12,11 +12,15 @@ It does what moOde audio player does for a Pi with a HiFiBerry, with none of moO
 
 `overlays.sendspin` puts the same aiosendspin and sendspin releases into every Python package set of a host that applies it. The module does not need it; it is for a workstation that wants to run `sendspin` by hand against a room.
 
-`checks.<system>.nixtune-web`, `checks.<system>.nixtune-room` and `checks.<system>.sendspin` build the packages, which runs their test suites. `checks.x86_64-linux.rehearsal` builds a whole system for a QEMU-shaped host with `hardware.board = "other"` and `hardware.audio = "none"`, which is the quickest proof that a change to the module still produces a system, and `checks.x86_64-linux.rehearsal-multiroom` does the same for a room with multiroom on. `checks.x86_64-linux.multiroom` boots two rooms in VMs and plays a group (see Testing a change to multiroom); it needs KVM.
+`nixosModules.raspberry-pi-02`, `raspberry-pi-3`, `raspberry-pi-4` and `raspberry-pi-5` are the Raspberry Pi layer for a Zero 2 W, a Pi 3, a Pi 4 or 400, and a Pi 5. Each brings [nixos-raspberrypi](https://github.com/nvmd/nixos-raspberrypi)'s board support: the Raspberry Pi kernel and firmware, the firmware partition and `config.txt`, and its binary cache, so the kernel is downloaded rather than compiled. Each also sets `hardware.board` for you. `nixosModules.sd-image` is nixos-raspberrypi's SD card image, partitions and all. `nix/raspberry-pi.nix` says what they do and why.
+
+`packages.<system>.shairport-sync` is nixpkgs' AirPlay 2 build of shairport-sync with nixtune's one patch, which binds AirPlay 2's stream ports in a fixed range (see Renderers); the module uses it for AirPlay 2.
+
+`checks.<system>.nixtune-web`, `checks.<system>.nixtune-room`, `checks.<system>.sendspin` and `checks.<system>.shairport-sync` build the packages, which runs their test suites. `checks.x86_64-linux.rehearsal` builds a whole system for a QEMU-shaped host with `hardware.board = "other"` and `hardware.audio = "none"`, which is the quickest proof that a change to the module still produces a system; `checks.x86_64-linux.rehearsal-multiroom` does the same for a room with multiroom on, and `checks.x86_64-linux.rehearsal-airplay` for a USB DAC with AirPlay 2. `checks.x86_64-linux.multiroom` boots two rooms in VMs and plays a group (see Testing a change to multiroom); it needs KVM. `checks.aarch64-linux.pi5-dac2hd`, `pi4-amp100`, `pi400-hdmi`, `pi3-headphones` and `zero2w-dacplus-zero` build a whole Raspberry Pi system for each board, with a different output on each. `checks.x86_64-linux.pi5-dac2hd-nixos-hardware` evaluates the reference player on nixos-hardware and builds none of it, because that kernel has no binary cache; it catches a change that breaks that path's options, not one that breaks its build. The flake's `nixos-hardware` input exists for this check alone.
 
 `devShells.<system>.default` carries purescript, esbuild, nixfmt and spago for working on the page, and `devShells.<system>.room` carries GHC, cabal and the C libraries for working on `packages/nixtune-room`. `formatter.<system>` is nixfmt. Systems are x86_64-linux and aarch64-linux.
 
-The flake does not contain a Pi boot path, an SD image or an example host. Those live in the consuming configuration: import nixos-hardware's module for your board (`raspberry-pi-3`, `raspberry-pi-4` or `raspberry-pi-5`) and use the generic aarch64 SD image. The module turns on `hardware.raspberry-pi.firmware.uboot.enable` for a Raspberry Pi board, which the board needs to boot.
+The flake has no example host: the walkthrough below is one. nixos-hardware's Raspberry Pi modules still work in place of nixtune's, as they did before; the module writes `config.txt` for whichever of the two a host imports (see With nixos-hardware instead).
 
 ## Using it
 
@@ -24,20 +28,20 @@ Import `nixosModules.default` and set `services.nixtune.*`. The section after Op
 
 ```nix
 {
-  imports = [ nixtune.nixosModules.default ];
+  imports = [
+    nixtune.nixosModules.default
+    nixtune.nixosModules.raspberry-pi-5
+  ];
 
   services.nixtune = {
     enable = true;
-    hardware = {
-      board = "pi5";
-      audio = "dac2hd";
-    };
+    hardware.audio = "dac2hd";
     library.export = "192.168.1.10:/volume1/music/Music";
   };
 }
 ```
 
-A stock Raspberry Pi 4 with nothing added plays through its headphone jack with `board = "pi4"` and `audio = "headphones"`; Hardware lists every board and output.
+A stock Raspberry Pi 4 with nothing added plays through its headphone jack with `nixosModules.raspberry-pi-4` and `audio = "headphones"`, and a Pi with a HiFiBerry DAC+ Pro on it with `audio = "hifiberry"` and `hifiberry = "dacplus-pro"`; Hardware lists every board, output and card.
 
 The page is then at `http://<host>/` for guests and `http://<host>/host` for the host.
 
@@ -45,7 +49,7 @@ The page is then at `http://<host>/` for guests and `http://<host>/host` for the
 
 `enable` turns the player on. Every optional part below has its own enable flag that defaults to off, and a part that is off contributes no package, unit, firewall rule or tab. The two exceptions are `ui.enable` and `ui.albumArt`, which default to on because a player without them is not a useful default.
 
-`hardware.board` is the computer: `pi5` (the default), `pi4`, `pi3` or `other`. `hardware.audio` is where the sound leaves it: `dac2hd` (the default), `headphones`, `hdmi`, `usb`, `hat` or `none`. `hardware.hdmiPort` (0) picks the port for `hdmi` on a board with two. `hardware.card.id`, `hardware.card.mixer`, `hardware.card.overlay` and `hardware.card.convert` (false) describe the card for `usb` and `hat`, and `card.mixer` renames the headphone jack's control. `hardware.profile` is the single option of earlier releases, kept so their hosts still build: `"pi5-dac2hd"` means board `pi5` with audio `dac2hd`, and `"none"` means board `other` with audio `none`. See Hardware.
+`hardware.board` is the computer: `pi5` (the default), `pi400`, `pi4`, `pi3`, `zero2w` or `other`; nixtune's raspberry-pi modules set it. `hardware.audio` is where the sound leaves it: `dac2hd` (the default), `hifiberry`, `headphones`, `hdmi`, `usb`, `hat` or `none`. `hardware.hifiberry` names the card for `hifiberry`, by product. `hardware.hdmiPort` (0) picks the port for `hdmi` on a board with two. `hardware.card.id`, `hardware.card.mixer`, `hardware.card.overlay` and `hardware.card.convert` (false) describe the card for `usb` and `hat`; `card.mixer` renames the headphone jack's control or a HiFiBerry card's, and `card.convert` lets MPD convert for a HiFiBerry card too. `hardware.profile` is the single option of earlier releases, kept so their hosts still build: `"pi5-dac2hd"` means board `pi5` with audio `dac2hd`, and `"none"` means board `other` with audio `none`. See Hardware.
 
 `library.export` is the NFS export holding the music, as `host:/path`, or null for radio and renderers only.
 
@@ -63,7 +67,7 @@ The page is then at `http://<host>/` for guests and `http://<host>/host` for the
 
 `arbitration.resumeAfterRenderer` (true) resumes MPD after an AirPlay stream that paused it ends.
 
-`renderers.airplay.{enable,name}` and `renderers.upnp.{enable,friendlyName,package}`.
+`renderers.airplay.{enable,name,version}`, where `version` is 2 (the default, AirPlay 2) or 1, and `renderers.upnp.{enable,friendlyName,package}`.
 
 `multiroom.enable` turns on multiroom, described under Multiroom. `multiroom.room` is this room's name (the hostname by default). `multiroom.peers.<room>` declares every room in the home, this one included, with `host`, `port` (80), `serverKey`, `playerKey` and `outputDelay` (0 milliseconds). `multiroom.acoustics.<focus>.<room>` is the travel time in milliseconds from `<room>`'s speakers to the listening spot in `<focus>`. `multiroom.streamFormat` (`44100:24:2`) is what a group streams. `multiroom.playerCard` (the output card) and `multiroom.playerCardDevice` (0) are the ALSA device the player opens; on an output MPD converts for (headphones, HDMI) the player converts the same way. `multiroom.secrets.serverKeyFile`, `multiroom.secrets.playerKeyFile`, `multiroom.secrets.serverPskFiles.<room>` and `multiroom.secrets.playerPskFiles.<room>` are runtime paths to the room's keys. `multiroom.timing` holds `audienceGrace` (10000), `orphanTimeout` (180000), `playerReadyTimeout` (10000), `maxSuspension` (1800000), `reconcileInterval` (2000) and `peerTimeout` (2000), all milliseconds. `multiroom.package` and `multiroom.playerPackage` replace the two programs.
 
@@ -88,7 +92,17 @@ Commands are marked with where they run: the **workstation** (a NixOS machine wi
 ### What you need first
 
 - A supported Raspberry Pi (see Minimum hardware under Hardware), an SD card of 16 GB or more, and a power supply that meets the Pi's own rating.
-- A NixOS workstation that can build for aarch64. Either set `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];` on it and rebuild, or have an aarch64 machine as a remote builder. Under emulation the first build is slow, because the Raspberry Pi kernel is compiled from source; expect hours.
+- A NixOS workstation that can build for aarch64. Either set `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];` on it and rebuild, or have an aarch64 machine as a remote builder. Give it nixos-raspberrypi's binary cache, so the Raspberry Pi kernel and firmware are downloaded rather than compiled under emulation (which takes hours). In the workstation's own configuration:
+
+```nix
+  nix.settings = {
+    extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
+    extra-trusted-public-keys = [
+      "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
+    ];
+  };
+```
+
 - An NFS export on the NAS that allows the player's subnet (the Pi's wired and wifi interfaces have different addresses, so allow the subnet, not one address). A missing entry shows up as a mount that times out, not as access denied.
 - A router whose DNS names DHCP clients, so the player is reachable as `player.lan` on whichever interface holds the lease.
 - An age key of your own for sops, if you do not have one:
@@ -116,11 +130,12 @@ Three files in a git repository. Flakes only see files git tracks, so `git add` 
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixos-hardware.url = "github:NixOS/nixos-hardware/master";
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Not nixtune's nixos-raspberrypi input: leave that one alone, so the
+    # kernel is the one in nixos-raspberrypi's binary cache.
     nixtune = {
       url = "github:harryprayiv/nixtune";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -131,29 +146,25 @@ Three files in a git repository. Flakes only see files git tracks, so `git add` 
     {
       self,
       nixpkgs,
-      nixos-hardware,
       sops-nix,
       nixtune,
     }:
     {
       nixosConfigurations.player = nixpkgs.lib.nixosSystem {
         modules = [
-          nixos-hardware.nixosModules.raspberry-pi-5
+          nixtune.nixosModules.raspberry-pi-5
           sops-nix.nixosModules.sops
           nixtune.nixosModules.default
 
-          # The generic aarch64 SD image. The same configuration is the
-          # image and every later deploy. The first-boot resize is OFF: on
-          # the reference card the online resize corrupted directory blocks
-          # in the store, so the root is grown offline before first boot.
-          (
-            { modulesPath, ... }:
-            {
-              imports = [ (modulesPath + "/installer/sd-card/sd-image-aarch64.nix") ];
-              sdImage.compressImage = false;
-              sdImage.expandOnBoot = false;
-            }
-          )
+          # The SD image. The same configuration is the image and every
+          # later deploy. The first-boot resize is OFF: on the reference
+          # card nixpkgs' online resize corrupted directory blocks in the
+          # store, so the root is grown offline before first boot.
+          nixtune.nixosModules.sd-image
+          {
+            sdImage.compressImage = false;
+            sdImage.expandOnBoot = false;
+          }
 
           ./hosts/player.nix
         ];
@@ -184,29 +195,9 @@ in
   nixpkgs.hostPlatform = "aarch64-linux";
   system.stateVersion = "26.11";
 
-  # ---- Boot: firmware, U-Boot, extlinux, ext4 root -----------------------
-
-  # What a Pi 5 needs to reach an SD card root and nothing else. The
-  # sd-image module's own list names modules the Raspberry Pi kernel does
-  # not have, and the initrd build fails on the first one missing.
-  boot.initrd.availableKernelModules = lib.mkForce [
-    "mmc_block"
-    "usbhid"
-    "hid_generic"
-    "usb_storage"
-    "xhci_pci"
-    "pcie_brcmstb"
-    "reset-raspberrypi"
-  ];
-  boot.loader.grub.enable = false;
-  boot.loader.generic-extlinux-compatible.enable = true;
-  boot.loader.generic-extlinux-compatible.configurationLimit = 10;
-
-  fileSystems."/" = {
-    device = "/dev/disk/by-label/NIXOS_SD";
-    fsType = "ext4";
-    options = [ "noatime" ];
-  };
+  # The boot path, the firmware partition, config.txt and both
+  # filesystems come from nixosModules.raspberry-pi-5 and
+  # nixosModules.sd-image.
 
   # No swap on the SD card; zram gives headroom without writes.
   swapDevices = [ ];
@@ -266,10 +257,7 @@ in
 
   services.nixtune = {
     enable = true;
-    hardware = {
-      board = "pi5";
-      audio = "dac2hd";
-    };
+    hardware.audio = "dac2hd";
 
     # Music/ only: point the export at the folder that holds music, not at
     # a share that also holds audiobooks or other programs' playlists.
@@ -318,25 +306,24 @@ creation_rules:
 
 ### On another board, or without a DAC
 
-Everything above holds for a Raspberry Pi 3 or 4, and for a Pi 5 without the DAC, with these changes.
+Everything above holds for every supported Raspberry Pi, with these changes.
 
-In `flake.nix`, import the nixos-hardware module for the board in place of `raspberry-pi-5`:
+In `flake.nix`, import the module for the board in place of `raspberry-pi-5`. It sets `hardware.board`:
 
-| Board | `hardware.board` | nixos-hardware module |
+| Board | nixtune module | `hardware.board` it sets |
 | --- | --- | --- |
-| Raspberry Pi 5, 500, Compute Module 5 | `"pi5"` | `nixos-hardware.nixosModules.raspberry-pi-5` |
-| Raspberry Pi 4 B, 400, Compute Module 4 | `"pi4"` | `nixos-hardware.nixosModules.raspberry-pi-4` |
-| Raspberry Pi 3 B, 3 B+, 3 A+, Zero 2 W | `"pi3"` | `nixos-hardware.nixosModules.raspberry-pi-3` |
+| Raspberry Pi 5, 500, Compute Module 5 | `nixtune.nixosModules.raspberry-pi-5` | `"pi5"` |
+| Raspberry Pi 4 B, Compute Module 4 | `nixtune.nixosModules.raspberry-pi-4` | `"pi4"` |
+| Raspberry Pi 400 | `nixtune.nixosModules.raspberry-pi-4`, and set `hardware.board = "pi400"` | `"pi4"` |
+| Raspberry Pi 3 B, 3 B+, 3 A+ | `nixtune.nixosModules.raspberry-pi-3` | `"pi3"` |
+| Raspberry Pi Zero 2 W | `nixtune.nixosModules.raspberry-pi-02` | `"zero2w"` |
 
-In `hosts/player.nix`, set `hardware.board` and `hardware.audio` in `services.nixtune` for what you have. For a stock Pi 4 into an amplifier through the 3.5 mm jack:
+In `hosts/player.nix`, set `hardware.audio` in `services.nixtune` for what you have. For a stock Pi 4 into an amplifier through the 3.5 mm jack:
 
 ```nix
   services.nixtune = {
     enable = true;
-    hardware = {
-      board = "pi4";
-      audio = "headphones";
-    };
+    hardware.audio = "headphones";
     # the rest as above
   };
 ```
@@ -345,19 +332,57 @@ For a stock Pi 5 into a TV or an AV receiver over HDMI, using the port next to t
 
 ```nix
     hardware = {
-      board = "pi5";
       audio = "hdmi";
       hdmiPort = 0;
     };
 ```
 
-The `boot.initrd.availableKernelModules` list in `hosts/player.nix` is the one the reference Pi 5 boots with. The Pi 3 and Pi 4 kernels from nixos-hardware are built from the same Raspberry Pi kernel tree, and the list is expected to work on them unchanged, but that is not yet tested; if the image build stops with a message that a module is not found, delete that one name from the list and build again.
+For a HiFiBerry card other than the DAC2 HD, by its product name (see HiFiBerry cards under Hardware):
 
-On a board with less than 4 GB of memory, a Pi 3 or a small Pi 4, do not build on the Pi. Leave `--build-host admin@player.lan` out of the `nixos-rebuild` command in step 5 and later, so the workstation builds and copies the result over, and delete the `nix.settings` block's `max-jobs` and `cores` lines, which only matter for building on the Pi.
+```nix
+    hardware = {
+      audio = "hifiberry";
+      hifiberry = "dacplus-pro";
+    };
+```
 
-The Pi 3 B's wifi is 2.4 GHz only. A Pi 400 and a Zero 2 W have no headphone jack, so use `hdmi` or `usb` on them.
+On a board with less than 4 GB of memory, a Pi 3, a Zero 2 W or a small Pi 4, do not build on the Pi. Leave `--build-host admin@player.lan` out of the `nixos-rebuild` command in step 5 and later, so the workstation builds and copies the result over, and delete the `nix.settings` block's `max-jobs` and `cores` lines, which only matter for building on the Pi.
+
+The Pi 3 B's wifi is 2.4 GHz only. A Pi 400 and a Zero 2 W have no headphone jack, so use `hdmi`, `usb` or a HiFiBerry card on them; `audio = "headphones"` on either fails the build with a message saying so.
 
 Changing `hardware.board` or `hardware.audio` on a running player changes `config.txt`, which the Pi's firmware reads only at power-on, so reboot after the `nixos-rebuild switch`.
+
+### With nixos-hardware instead
+
+The reference Pi 5 was first provisioned this way, and nixtune still supports it. Import `nixos-hardware.nixosModules.raspberry-pi-5` (or `-4`, or `-3` for a Pi 3 and a Zero 2 W) in place of nixtune's board module, set `hardware.board` yourself, and use nixpkgs' generic aarch64 SD image, `(modulesPath + "/installer/sd-card/sd-image-aarch64.nix")`, in place of `nixosModules.sd-image`. The host then also needs:
+
+```nix
+  # What a Pi 5 needs to reach an SD card root and nothing else. The
+  # sd-image module's own list names modules the Raspberry Pi kernel does
+  # not have, and the initrd build fails on the first one missing.
+  boot.initrd.availableKernelModules = lib.mkForce [
+    "mmc_block"
+    "usbhid"
+    "hid_generic"
+    "usb_storage"
+    "xhci_pci"
+    "pcie_brcmstb"
+    "reset-raspberrypi"
+  ];
+  boot.loader.grub.enable = false;
+  boot.loader.generic-extlinux-compatible.enable = true;
+  boot.loader.generic-extlinux-compatible.configurationLimit = 10;
+
+  fileSystems."/" = {
+    device = "/dev/disk/by-label/NIXOS_SD";
+    fsType = "ext4";
+    options = [ "noatime" ];
+  };
+```
+
+nixtune turns on `hardware.raspberry-pi.firmware.uboot.enable`, which a board needs to boot on this path, and writes the card's overlay both into `config.txt` and onto the generation's device tree. The difference that matters: nixos-hardware has no binary cache, so the Raspberry Pi kernel is compiled from source, which takes hours under emulation.
+
+Moving a running player from nixos-hardware to nixtune's board modules means a new SD card. nixos-raspberrypi keeps each generation's kernel, initrd and device trees on the firmware partition, which its image makes 1 GB, and the generic aarch64 image makes about 30 MB.
 
 ### 1. Build the image
 
@@ -703,7 +728,6 @@ The secret names are the paths inside the room's sops file, so `nixtune-room/ser
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixos-hardware.url = "github:NixOS/nixos-hardware/master";
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -718,7 +742,6 @@ The secret names are the paths inside the room's sops file, so `nixtune-room/ser
     {
       self,
       nixpkgs,
-      nixos-hardware,
       sops-nix,
       nixtune,
     }:
@@ -728,21 +751,20 @@ The secret names are the paths inside the room's sops file, so `nixtune-room/ser
       # One host per room, named after it; peers.nix is the list.
       rooms = lib.attrNames (import ./rooms/peers.nix);
 
+      # Each room imports its own board's module from its hosts file, or
+      # every room is a Pi 5 and this list says so once.
       room =
         name:
         lib.nixosSystem {
           modules = [
-            nixos-hardware.nixosModules.raspberry-pi-5
+            nixtune.nixosModules.raspberry-pi-5
             sops-nix.nixosModules.sops
             nixtune.nixosModules.default
-            (
-              { modulesPath, ... }:
-              {
-                imports = [ (modulesPath + "/installer/sd-card/sd-image-aarch64.nix") ];
-                sdImage.compressImage = false;
-                sdImage.expandOnBoot = false;
-              }
-            )
+            nixtune.nixosModules.sd-image
+            {
+              sdImage.compressImage = false;
+              sdImage.expandOnBoot = false;
+            }
             ./rooms
             (./hosts + "/${name}.nix")
           ];
@@ -905,7 +927,7 @@ nix build .#checks.x86_64-linux.multiroom -L
 
 The hardware is two choices: `hardware.board`, the computer, and `hardware.audio`, where the sound leaves it. A combination the board does not have, such as the headphone jack on a Pi 5 or HDMI on a machine that is not a Pi, fails the build with a message that says why. Where this README says the DAC, read the room's output.
 
-Only the Raspberry Pi 5 with the HiFiBerry DAC2 HD has been run on hardware. Every other board and output below has been checked by building its configuration, against nixos-hardware's Raspberry Pi kernel 6.18.50, and the card names, control names and device strings come from the kernel and alsa-lib sources. Expect to be the first to play through them, and see Finding a card's names if one does not appear as described.
+Only the Raspberry Pi 5 with the HiFiBerry DAC2 HD has been run on hardware, and only on the nixos-hardware path. Every other board, output and HiFiBerry card below, and every board on nixtune's own raspberry-pi modules, has been checked by evaluating its configuration to a system, against nixos-hardware's Raspberry Pi kernel 6.18.50 and nixos-raspberrypi's 6.18.59; the card names, control names, overlay parameters and device strings come from the kernel and alsa-lib sources. Expect to be the first to play through them, and see Finding a card's names if one does not appear as described.
 
 ### Minimum hardware
 
@@ -914,11 +936,12 @@ A 64-bit Raspberry Pi with at least 1 GB of memory:
 | Board | `hardware.board` | Memory | Building on the Pi |
 | --- | --- | --- | --- |
 | Raspberry Pi 5, 500, Compute Module 5 | `pi5` | 1 GB or more | with 4 GB or more; done on 8 GB |
-| Raspberry Pi 4 B, 400, Compute Module 4 | `pi4` | 1 GB or more | with 4 GB or more; not yet tried |
+| Raspberry Pi 4 B, Compute Module 4 | `pi4` | 1 GB or more | with 4 GB or more; not yet tried |
+| Raspberry Pi 400 | `pi400` | 4 GB | not yet tried |
 | Raspberry Pi 3 B, 3 B+, 3 A+ | `pi3` | 1 GB (512 MB on the 3 A+) | no |
-| Raspberry Pi Zero 2 W | `pi3` | 512 MB | no |
+| Raspberry Pi Zero 2 W | `zero2w` | 512 MB | no |
 
-The Pi 1, Pi 2, original Zero and Zero W are not supported. They are 32-bit, nixpkgs has no binary cache for them, so every package would compile on your workstation under emulation, and nixos-hardware's kernels for this setup are 64-bit. The Zero 2 W and the 3 A+, with 512 MB, are below the 1 GB this is meant for and have not been tried; a single room without multiroom is the most to expect of them.
+The Pi 1, Pi 2, original Zero and Zero W are not supported. They are 32-bit, nixpkgs has no binary cache for them, so every package would compile on your workstation under emulation, and both Raspberry Pi layers' kernels for this setup are 64-bit. The Zero 2 W and the 3 A+, with 512 MB, are below the 1 GB this is meant for and have not been tried; a single room without multiroom is the most to expect of them.
 
 Memory matters most for building. The reference Pi 5 has 8 GB and builds its own generations only with Nix's parallelism turned down (`max-jobs` and `cores` in the walkthrough), so a board with less than 4 GB should always be deployed from the workstation (see On another board, or without a DAC). Playing needs much less: MPD, nginx and the helpers are small, and multiroom adds the Sendspin player, a Python program.
 
@@ -931,17 +954,22 @@ Any computer that is not a Pi and runs NixOS works too, with `board = "other"` a
 | `hardware.audio` | Boards | What it is | Volume | Bit-perfect |
 | --- | --- | --- | --- | --- |
 | `dac2hd` | any Pi | HiFiBerry DAC2 HD, the reference | the card's `DAC` control | yes |
+| `hifiberry` | any Pi | the HiFiBerry card `hardware.hifiberry` names | the card's control, where it has one | yes, on the DACs |
 | `headphones` | Pi 3, Pi 4 B | the 3.5 mm jack | the card's `PCM` control | no: 16 bits, 48 kHz at most |
 | `hdmi` | any Pi | the HDMI port, to a TV or AV receiver | MPD's software volume | no: converted by alsa-lib's HDMI plugin |
 | `usb` | any | a USB DAC or sound card | its control, if `card.mixer` names one | yes, unless `card.convert` |
 | `hat` | any Pi | any other DAC HAT | its control, if `card.mixer` names one | yes, unless `card.convert` |
 | `none` | any | no sound, for a rehearsal VM | MPD's software volume | n/a |
 
-**dac2hd** is a Raspberry Pi with a HiFiBerry DAC2 HD. The DAC's overlay, `hifiberry-dacplushd`, is applied two ways so that whichever device tree the kernel is given carries it: as a `config.txt` line for the GPU firmware, and at build time onto the generation's device tree with its compatible string rewritten for the board, because nixpkgs skips an overlay whose compatible string does not match the board. The ALSA card is addressed by name, `sndrpihifiberry`, so the Pi's own audio devices cannot take its place by renumbering. Volume is the card's hardware control, `DAC`. This is the best output nixtune has, and the one to buy for if you are buying.
+**dac2hd** is a Raspberry Pi with a HiFiBerry DAC2 HD. The DAC's overlay, `hifiberry-dacplushd`, goes into `config.txt`, where the GPU firmware applies it. On nixos-hardware it is also applied at build time onto the generation's device tree, with its compatible string rewritten for the board, because nixpkgs skips an overlay whose compatible string does not match the board, so that whichever device tree U-Boot is given carries it. On nixtune's raspberry-pi modules the firmware boots the kernel with the tree it built, and `config.txt` is the only place the overlay goes. The ALSA card is addressed by name, `sndrpihifiberry`, so the Pi's own audio devices cannot take its place by renumbering. Volume is the card's hardware control, `DAC`. This is the best output nixtune has, and the one to buy for if you are buying.
+
+**hifiberry** is any HiFiBerry card, named by product in `hardware.hifiberry`; see HiFiBerry cards below. The card's overlay, with any parameter it needs, goes into `config.txt` the same way as the DAC2 HD's, and the card is `sndrpihifiberry` too. `audio = "dac2hd"` and `audio = "hifiberry"` with `hifiberry = "dac2hd"` are the same output.
+
+On every output but `headphones`, the Pi's own analog audio is switched off in `config.txt` (`dtparam=audio=off`) and its driver, `snd_bcm2835`, is not loaded, so `/proc/asound/cards` lists only the card that plays.
 
 **headphones** is the Pi's own 3.5 mm jack, on a Pi 3 B, 3 B+, 3 A+ and Pi 4 B. It is a PWM output from the SoC, not a DAC: it takes 16 bits at up to 48 kHz, so MPD resamples and reduces anything better, and its noise floor is audible on good speakers. It is fine for a kitchen radio or a first try, and it needs nothing but a cable. Volume is the card's `PCM` control; if `amixer` on your Pi shows another name, set `hardware.card.mixer` to it.
 
-**hdmi** sends digital audio to a TV or an AV receiver over one of the Pi's HDMI ports: `hardware.hdmiPort` 0 (the default; next to the power connector on a Pi 4 and Pi 5) or 1. The Pi 3 and Zero 2 W have one port, 0. The TV or receiver must be connected, and on, when the Pi boots: the Pi only offers HDMI audio to a display that says it takes audio. The Pi's HDMI accepts audio only in IEC958 frames, so every program reaches it through alsa-lib's HDMI plugin, and MPD converts to what the plugin takes. The port has no volume control of its own, so MPD scales the samples; leave the page at 100 and use the receiver's volume for the best result. This output turns on the Pi's display driver (`vc4-kms-v3d`), which the others leave off.
+**hdmi** sends digital audio to a TV or an AV receiver over one of the Pi's HDMI ports: `hardware.hdmiPort` 0 (the default; next to the power connector on a Pi 4 and Pi 5) or 1. The Pi 3 and Zero 2 W have one port, 0. The TV or receiver must be connected, and on, when the Pi boots: the Pi only offers HDMI audio to a display that says it takes audio. The Pi's HDMI accepts audio only in IEC958 frames, so every program reaches it through alsa-lib's HDMI plugin, and MPD converts to what the plugin takes. The port has no volume control of its own, so MPD scales the samples; leave the page at 100 and use the receiver's volume for the best result. On nixos-hardware this output turns on the Pi's display driver (`vc4-kms-v3d`), which the others leave off. nixos-raspberrypi keeps the display driver on for every output, and every output but this one turns its HDMI audio off (`noaudio`).
 
 **usb** is a USB DAC or sound card, named by its ALSA card id in `hardware.card.id`. Most USB DACs take every rate and depth they advertise, so MPD hands them the file as it is. If MPD's log says it cannot open the output for some files, the card refuses those formats: set `hardware.card.convert = true` and MPD converts them. Set `hardware.card.mixer` to the card's volume control if it has one; without it, MPD's software volume is used. On a computer that is not a Pi, this is the output to use.
 
@@ -956,16 +984,16 @@ Any computer that is not a Pi and runs NixOS works too, with `board = "other"` a
     };
 ```
 
-**hat** is any other sound card on the Pi's GPIO header, named by `hardware.card.id`, with `hardware.card.overlay` set to the device tree overlay its maker's instructions give for the `dtoverlay=` line in `config.txt`. A HAT that the firmware recognises from its own EEPROM needs no overlay; leave it null. The overlay is applied the same two ways as the DAC2 HD's. Check the card id and control on your Pi as below, since a maker can rename either.
+**hat** is any other sound card on the Pi's GPIO header, named by `hardware.card.id`, with `hardware.card.overlay` set to the device tree overlay its maker's instructions give for the `dtoverlay=` line in `config.txt`. A HAT that the firmware recognises from its own EEPROM needs no overlay; leave it null. The overlay is applied the same way as the DAC2 HD's. Check the card id and control on your Pi as below, since a maker can rename either. A HiFiBerry card is `hifiberry`, not `hat`.
 
 ```nix
     hardware = {
       board = "pi5";
       audio = "hat";
       card = {
-        id = "sndrpihifiberry";
+        id = "IQaudIODAC";
         mixer = "Digital";
-        overlay = "hifiberry-dacplus";
+        overlay = "iqaudio-dacplus";
       };
     };
 ```
@@ -973,6 +1001,29 @@ Any computer that is not a Pi and runs NixOS works too, with `board = "other"` a
 **none** plays into a null output, for a rehearsal VM where everything but the sound is exercised.
 
 AirPlay and multiroom follow the output: AirPlay plays to the same device MPD does, with the card's control or, on HDMI, its own software volume, and a room's multiroom player converts on the outputs where MPD converts.
+
+### HiFiBerry cards
+
+`hardware.hifiberry` takes the card's product name. The overlay, the volume control and whether MPD converts come with it; the ALSA card is `sndrpihifiberry` for all of them. `nix/module/cards.nix` is the table, with the kernel source each fact comes from.
+
+| `hardware.hifiberry` | Card | Overlay | Volume control | MPD converts |
+| --- | --- | --- | --- | --- |
+| `dac2hd` | DAC2 HD | `hifiberry-dacplushd` | `DAC` | no |
+| `dacplus`, `amp2`, `amp4` | DAC+ (standard), Amp2, Amp4 | `hifiberry-dacplus-std` | `Digital` | no |
+| `dacplus-pro`, `dac2-pro` | DAC+ Pro, DAC2 Pro | `hifiberry-dacplus-pro` | `Digital` | no |
+| `dacplus-adc` | DAC+ ADC | `hifiberry-dacplusadc` | `Digital` | no |
+| `dacplus-adc-pro`, `dac2-adc-pro` | DAC+ ADC Pro, DAC2 ADC Pro | `hifiberry-dacplusadcpro` | `Digital` | no |
+| `dacplus-dsp` | DAC+ DSP | `hifiberry-dacplusdsp` | none | yes |
+| `dac8x` | DAC8x (Pi 5 only) | `hifiberry-dac8x` | none | no |
+| `dacplus-light`, `dacplus-zero`, `miniamp`, `beocreate` | DAC+ Light, DAC+ Zero, MiniAmp, Beocreate | `hifiberry-dac` | none | no |
+| `digi` | Digi, Digi+ | `hifiberry-digi` | none | no |
+| `digi-pro`, `digi2-pro` | Digi+ Pro, Digi2 Pro | `hifiberry-digi-pro` | none | no |
+| `amp` | Amp+ | `hifiberry-amp` | `Master` | yes: 48 kHz at most |
+| `amp3` | Amp3 | `hifiberry-amp3` | `A.Mstr Vol` | yes: 24 and 32 bits only |
+| `amp4-pro` | Amp4 Pro | `hifiberry-amp4pro` | `Digital` | no |
+| `amp100` | Amp100 | `hifiberry-amp100` with `auto_mute` | `Digital` | no |
+
+A card with no volume control gets MPD's software volume. `hardware.card.mixer` replaces a card's control if yours shows another name, and `hardware.card.convert = true` turns conversion on if MPD's log says it cannot open the output for some files. The `Digital` control on the pcm512x cards stops at 0 dB unless the overlay's `24db_digital_gain` is set, which nixtune does not do. The Studio cards are not in the table, because they register as `Soundcard` rather than `sndrpihifiberry`; use `hat` for them.
 
 ### Finding a card's names
 
@@ -994,7 +1045,7 @@ A line such as `Simple mixer control 'PCM',0` names a control; use the name in t
 
 ### Adding a card for everyone
 
-A card that more than a few people use deserves its own `hardware.audio` value, as the DAC2 HD has. It is one entry in `outputs` in `nix/module/hardware.nix`: the overlay, the ALSA card id, the mixer control, and whether MPD must convert for it.
+A HiFiBerry card missing from the table is one entry in `nix/module/cards.nix`: the overlay, its parameters, the mixer control, and whether MPD must convert for it. A card from another maker that more than a few people use deserves its own `hardware.audio` value, which is one entry in `outputs` in `nix/module/hardware.nix` with the ALSA card id as well.
 
 ## The library
 
@@ -1050,7 +1101,7 @@ YouTube changes what yt-dlp has to do every few weeks. When fetches start failin
 
 ## Renderers
 
-**AirPlay** runs shairport-sync straight to the room's output, on the card's control where it has one. A hook before its first frame pauses MPD if it was playing, and a hook after its last resumes it if it was the one that paused it. MPD releases the card on pause, so AirPlay can open it. With multiroom on, the hooks ask the room's coordinator instead, which also frees the DAC from the group's player and takes the room out of its group for as long as the stream lasts (see Using a group).
+**AirPlay** runs shairport-sync straight to the room's output, on the card's control where it has one. With `renderers.airplay.version = 2`, the default, it is nixpkgs' AirPlay 2 build with NQPTP, the PTP clock monitor it needs, beside it: the player shows up in the Home app and in multi-speaker AirPlay from an iPhone or a Mac, and buffered streams start at once and ride out wifi gaps. AirPlay 2 carries 44.1 or 48 kHz like the classic version, so it is never the bit-perfect path. NQPTP needs UDP 319 and 320 to itself, so nothing else on the player may run a PTP daemon. AirPlay 2 opens TCP 7000, UDP 319 and 320, UDP 6001 to 6011 for a sender that falls back to classic AirPlay, and TCP and UDP 6200 to 6231 for its streams. Upstream shairport-sync lets the kernel pick each stream's ports from its whole ephemeral range, 32768 to 60999, and documents opening all of it, which exposes anything else on the machine listening on such a port. nixtune builds shairport-sync with a patch (`packages/shairport-sync`) that adds two settings, `airplay_2_port_base` and `airplay_2_port_range`, and sets them to 6200 and 32, so the streams use only those ports. They are below the kernel's ephemeral range, so the kernel never hands them to another program. The patch is compiled wherever the system is built; its dependencies come from the binary cache. `version = 1` runs nixpkgs' classic build, unpatched, on TCP 5000 and UDP 6001 to 6011 only. A hook before its first frame pauses MPD if it was playing, and a hook after its last resumes it if it was the one that paused it. MPD releases the card on pause, so AirPlay can open it. With multiroom on, the hooks ask the room's coordinator instead, which also frees the DAC from the group's player and takes the room out of its group for as long as the stream lasts (see Using a group).
 
 **UPnP** runs upmpdcli, which drives MPD over the protocol rather than opening the card. Its package does not build yet.
 
@@ -1069,13 +1120,15 @@ The page is built from `packages/nixtune-web/spago.lock` with nothing but nixpkg
 ## Known issues
 
 - `packages.<system>.upmpdcli` has placeholder hashes and does not build, so `renderers.upnp` cannot be enabled.
-- The CI workflow builds `.#web` and `.#checks.x86_64-linux.example-eval`, which no longer exist, so it fails. It should build `.#nixtune-web` and `.#checks.x86_64-linux.rehearsal`.
+- The CI workflow now runs `nix flake check` on an x86_64 runner and an aarch64 runner. No run of it has passed yet.
 - The flake's nixpkgs is pinned because nixpkgs' prebuilt purs segfaults on newer revisions.
 - MPD's `setvol` mutes the DAC2 HD, so any MPD client other than the page, Home Assistant included, mutes the room when it sets volume.
 - shairport-sync is given the hardware mixer, and nobody has yet checked whether its writes hold on the DAC2 HD.
-- Only the Raspberry Pi 5 with the DAC2 HD has run on hardware. Every other board and output has been checked by building it, not by playing through it (see Hardware).
+- Only the Raspberry Pi 5 with the DAC2 HD has run on hardware, on nixos-hardware. nixtune's own raspberry-pi modules, every other board, output and HiFiBerry card have been evaluated, not booted or played through (see Hardware).
+- nixos-raspberrypi builds its kernels with its own nixpkgs, nixos-26.05, and nixos-unstable's modules read two kernel attributes that release does not set. nixtune's raspberry-pi modules add them (`nix/raspberry-pi.nix`) without changing the kernel's derivation, so it still comes from the cache. The shim steps aside on its own once nixos-raspberrypi moves to a nixpkgs that sets them.
+- nixtune carries a patch to shairport-sync for AirPlay 2's ports. It is tested against socket binding on Linux (a free port is found in the range, a full range fails cleanly, a port in TIME_WAIT is reused, a UDP port is never shared) and builds with no warnings, but no AirPlay 2 sender has streamed through it yet. On the player, `ss -tulpn` while an iPhone plays should show shairport-sync on ports 6200 to 6231 only, besides 7000.
 - HDMI audio needs the TV or receiver connected and on when the Pi boots. What happens when it is turned on after boot has not been measured.
-- `audio = "headphones"` builds for a Pi 400 and a Zero 2 W, which have no headphone jack, because the board option cannot tell them from a Pi 4 B and a Pi 3; MPD then finds no card.
+- `audio = "headphones"` builds for a Compute Module 4, which has no headphone jack, because `pi4` covers it; MPD then finds no card.
 - The page reads the whole queue and the whole of an open playlist at once. Both are fine at a few hundred tracks and are meant to become windowed reads.
 - Nothing on the root filesystem is ephemeral yet; `persistPaths` is published for when it is.
 - Multiroom has been run in VMs, two rooms on snd-aloop, and not yet on two Pis. How the DAC2 HD behaves when it is handed between MPD and the player at real switch times is not yet known.
@@ -1100,7 +1153,7 @@ Screenshots:
 
 ## Maintenance
 
-`nix flake update` on the `update` branch, the workflow in `.github/workflows/check.yml`, merge to `main`. Nothing else.
+`nix flake update` on the `update` branch, the workflow in `.github/workflows/check.yml`, merge to `main`. Nothing else. The workflow runs `nix flake check` twice: on x86_64, which builds the packages, the rehearsal hosts and the two-room VM test and evaluates the nixos-hardware host, and on aarch64, which builds the packages and one Raspberry Pi system per board with the kernels from nixos-raspberrypi's cache. `nix flake update` moves `nixos-raspberrypi` too, and with it the kernel. When it moves nixpkgs' shairport-sync to a release the patch no longer applies to, `checks.<system>.shairport-sync` fails, and the patch is rebased against the new release.
 
 Sendspin is the exception: its releases are pinned in `packages/sendspin/python-overrides.nix`, not taken from nixpkgs, because nixpkgs carries older ones. To move to a newer release, set `version` and `tag` for `aiosendspin` or `sendspin` there, set `hash` to `lib.fakeHash`, run `nix build .#sendspin`, and copy the hash Nix reports into the file. The build applies nixtune's three patches to sendspin-cli and runs its test suite. A patch that no longer applies has to be remade against the new release; patches are byte-exact, so edit them as files and never paste them through a web page or chat, which strips the single spaces that blank context lines carry. Then run `nix build .#checks.x86_64-linux.multiroom` before deploying to any room.
 
